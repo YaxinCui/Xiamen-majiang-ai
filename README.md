@@ -35,4 +35,33 @@ python3 scripts/serve_web_game.py --host 127.0.0.1 --port 8765
 python3 -m unittest discover -s tests -v
 ```
 
+## 规则 Teacher 模仿学习基线
+
+经典规则已经可以导出全席位 Teacher 自博弈轨迹，并训练一个只在**规则引擎
+给出的合法动作**中排序的监督策略基线。轨迹对每个决策仅保留该玩家手牌和
+公开信息，不包含对手暗牌或牌墙顺序。
+
+```bash
+python3 scripts/train_rule_policy.py \
+  --profile classic \
+  --hands 80 \
+  --validation-hands 20 \
+  --epochs 10
+```
+
+脚本将把 JSONL 轨迹、训练报告和 `rule-policy.json` 检查点写入
+`artifacts/rule-policy-classic/`（默认不提交）。仓库额外保留已验证的 MLP
+检查点 `artifacts/rule-policy-classic-mlp/rule-policy.json`，以便直接复现当前
+策略参数；原始 JSONL 轨迹仍不提交。这是可复现的模仿学习基线；
+后续可在相同状态/动作接口上增加 MLP、DAgger 和对局评测，而无需绕过规则
+引擎。
+
+经典规则的游金、双游和三游属于低频状态。训练脚本默认会额外生成 136 个由
+规则引擎验证、Teacher 标注的游金/双游课程样本，并用独立的游金样本报告
+动作一致率。需要关闭课程样本时使用 `--tour-curriculum 0`。
+
+训练脚本默认使用零依赖的轻量 ReLU MLP（76 维状态—动作特征、12 个隐藏
+单元）来给合法动作排序；规则仍决定动作集合。需要与线性基线对照时可加
+`--model linear`。
+
 除单元测试外，改动网页交互后应启动本地服务并通过真实浏览器完成至少一局。

@@ -237,6 +237,18 @@ class GameTests(unittest.TestCase):
         discards = [action["tile"] for action in actions if action["kind"] == "discard"]
         self.assertEqual(discards, [27])
 
+    def test_teacher_respects_forced_honor_follow_before_kong(self):
+        game = XiamenMahjongGame(seed=67, rules=XiamenRules.classic())
+        game.phase = "discard"
+        game.current_player = 0
+        game.gold_tile = 25
+        game.players[1].discards = [27]
+        game.players[0].hand = [
+            0, 3, 4, 9, 9, 9, 9, 10, 10, 11, 14, 16, 18, 22, 27, 30, 30
+        ]
+        action = game.teacher.choose_turn_action(game, 0)
+        self.assertEqual(action, GameAction("discard", 27))
+
     def test_public_state_marks_the_current_drawn_tile(self):
         game = XiamenMahjongGame(seed=71, rules=XiamenRules.classic(), dealer=0)
         state = game.public_state()

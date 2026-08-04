@@ -197,6 +197,9 @@ cython_debug/
 # Local Playwright MCP snapshots, console logs, and browser artifacts
 .playwright-mcp/
 
+# Reproducible local training data, reports, and model checkpoints
+artifacts/
+
 # Visual Studio Code
 #   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore

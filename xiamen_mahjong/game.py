@@ -49,8 +49,10 @@ class XiamenMahjongGame:
         dealer_streak: int = 0,
         scores: list[int] | None = None,
         hand_number: int = 1,
+        auto_advance: bool = True,
     ):
         self.rules = rules or XiamenRules()
+        self.auto_advance = auto_advance
         self.random = random.Random(seed)
         self.seed = seed
         self.teacher = HeuristicTeacherAgent()
@@ -115,7 +117,8 @@ class XiamenMahjongGame:
             self._finish_win(opening_gold_winner, "opening_gold")
             return
         self._start_turn(self.dealer)
-        self.advance_ais()
+        if self.auto_advance:
+            self.advance_ais()
 
     def _select_gold_indicator(self) -> None:
         self.gold_dice = (self.random.randint(1, 6), self.random.randint(1, 6))

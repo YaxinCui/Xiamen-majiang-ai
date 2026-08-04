@@ -42,6 +42,12 @@ class HeuristicTeacherAgent:
         ):
             return GameAction("hu")
 
+        # The classic profile's honor-follow rule constrains the entire turn,
+        # including otherwise legal kong choices.  Resolve it before trying a
+        # kong so Teacher self-play cannot propose an engine-illegal action.
+        if game._forced_follow_tiles(player_id):
+            return GameAction("discard", self._best_discard(game, player_id))
+
         if len(game.wall) > game.rules.dead_wall_tiles:
             for tile, count in sorted(Counter(player.hand).items()):
                 if count == 4 and tile != game.gold_tile:
