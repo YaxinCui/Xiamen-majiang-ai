@@ -9,8 +9,10 @@ from mimetypes import guess_type
 from pathlib import Path
 import threading
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from .game import GameError, XiamenMahjongGame
+from .rules import XiamenRules
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = ROOT / "web_game_static"
@@ -19,21 +21,67 @@ STATIC_ROOT = ROOT / "web_game_static"
 class GameStore:
     def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.game = XiamenMahjongGame()
+        self.rules_profile = "classic"
+        self.game = XiamenMahjongGame(rules=XiamenRules.from_profile(self.rules_profile))
 
-    def state(self) -> dict[str, Any]:
-        with self.lock:
-            return self.game.public_state()
+    def _public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
+        state = self.game.public_state(reveal_ai_hands=reveal_ai_hands)
+        state["rule_profiles"] = XiamenRules.available_profiles()
+        return state
 
-    def new_game(self, seed: int | None = None) -> dict[str, Any]:
+    def state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
         with self.lock:
-            self.game = XiamenMahjongGame(seed=seed)
-            return self.game.public_state()
+            return self._public_state(reveal_ai_hands=reveal_ai_hands)
+
+    def new_game(
+        self,
+        seed: int | None = None,
+        rules_profile: str | None = None,
+        *,
+        reset_match: bool = False,
+    ) -> dict[str, Any]:
+        with self.lock:
+            profile = rules_profile or self.rules_profile
+            try:
+                rules = XiamenRules.from_profile(profile)
+            except ValueError as error:
+                raise GameError(str(error)) from error
+            dealer = None
+            dealer_streak = 0
+            scores = None
+            hand_number = 1
+            same_match = (
+                not reset_match
+                and profile == self.rules_profile
+                and rules.enable_dealer_continuation
+            )
+            if same_match:
+                previous = self.game
+                scores = [player.score for player in previous.players]
+                dealer = previous.dealer
+                dealer_streak = previous.dealer_streak
+                hand_number = previous.hand_number + 1
+                if previous.phase == "over":
+                    if previous.winner == previous.dealer or previous.win_type == "draw":
+                        dealer_streak += 1
+                    else:
+                        dealer = (previous.dealer + 1) % rules.player_count
+                        dealer_streak = 0
+            self.rules_profile = profile
+            self.game = XiamenMahjongGame(
+                seed=seed,
+                rules=rules,
+                dealer=dealer,
+                dealer_streak=dealer_streak,
+                scores=scores,
+                hand_number=hand_number,
+            )
+            return self._public_state()
 
     def action(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
             self.game.apply_human_action(payload)
-            return self.game.public_state()
+            return self._public_state()
 
 
 def make_handler(store: GameStore):
@@ -41,8 +89,13 @@ def make_handler(store: GameStore):
         server_version = "XiamenMahjong/0.1"
 
         def do_GET(self) -> None:  # noqa: N802
-            if self.path == "/api/game":
-                self._send_json(HTTPStatus.OK, store.state())
+            request_url = urlsplit(self.path)
+            if request_url.path == "/api/game":
+                # This server is intentionally local-only.  AI hands are still
+                # hidden by default and are revealed solely after the explicit
+                # in-page debug toggle requests this view.
+                reveal_ai_hands = parse_qs(request_url.query).get("debug") == ["1"]
+                self._send_json(HTTPStatus.OK, store.state(reveal_ai_hands=reveal_ai_hands))
                 return
             self._serve_static()
 
@@ -53,7 +106,16 @@ def make_handler(store: GameStore):
                     seed = payload.get("seed")
                     if seed is not None and not isinstance(seed, int):
                         raise GameError("seed 必须是整数")
-                    self._send_json(HTTPStatus.OK, store.new_game(seed))
+                    rules_profile = payload.get("rules_profile")
+                    if rules_profile is not None and not isinstance(rules_profile, str):
+                        raise GameError("rules_profile 必须是字符串")
+                    reset_match = payload.get("reset_match", False)
+                    if not isinstance(reset_match, bool):
+                        raise GameError("reset_match 必须是布尔值")
+                    self._send_json(
+                        HTTPStatus.OK,
+                        store.new_game(seed, rules_profile, reset_match=reset_match),
+                    )
                     return
                 if self.path == "/api/game/action":
                     self._send_json(HTTPStatus.OK, store.action(payload))

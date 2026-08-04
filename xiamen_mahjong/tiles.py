@@ -12,6 +12,7 @@ FLOWERS = ("梅", "兰", "菊", "竹", "春", "夏", "秋", "冬")
 BASE_TILE_COUNT = 34
 FLOWER_TILE_BASE = BASE_TILE_COUNT
 TOTAL_TILE_COUNT = BASE_TILE_COUNT + len(FLOWERS)
+WHITE_DRAGON = 33
 
 
 def is_base_tile(tile: int) -> bool:
@@ -24,6 +25,10 @@ def is_flower(tile: int) -> bool:
 
 def is_suited(tile: int) -> bool:
     return 0 <= tile < 27
+
+
+def is_honor(tile: int) -> bool:
+    return 27 <= tile < BASE_TILE_COUNT
 
 
 def suit_index(tile: int) -> int | None:

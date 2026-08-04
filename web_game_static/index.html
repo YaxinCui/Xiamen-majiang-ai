@@ -14,8 +14,20 @@
           <p class="eyebrow">LOCAL TABLE · TEACHER PLAY</p>
           <h1>厦门麻将 <span>金牌桌</span></h1>
         </div>
-        <button id="new-game" class="secondary-button">新开一局</button>
+        <div class="table-controls">
+          <label class="profile-picker" for="rules-profile">规则档位
+            <select id="rules-profile" aria-label="选择规则档位"></select>
+          </label>
+          <a class="guide-link" href="/guide.html">规则与胡牌教学</a>
+          <button id="toggle-debug" class="debug-button is-active" type="button" aria-pressed="true">隐藏 AI 手牌（调试）</button>
+          <button id="reset-match" class="secondary-button danger-button" type="button">重置积分</button>
+          <button id="new-game" class="primary-button" type="button">新开一局</button>
+        </div>
       </header>
+
+      <section id="action-panel" class="action-panel" aria-label="可执行操作">
+        <p>等待你的回合…</p>
+      </section>
 
       <section class="game-layout" aria-live="polite">
         <aside class="info-panel">
@@ -27,13 +39,16 @@
           <div class="gold-card">
             <p class="section-kicker">翻金</p>
             <div class="gold-tiles">
-              <div><small>指示牌</small><span id="gold-indicator" class="tile compact">?</span></div>
-              <div><small>金牌</small><span id="gold-tile" class="tile compact gold">?</span></div>
+              <div><small id="gold-indicator-label">指示牌</small><span id="gold-indicator" class="tile-slot">?</span></div>
+              <div><small>金牌</small><span id="gold-tile" class="tile-slot">?</span></div>
             </div>
+            <p id="gold-proxy-note" class="gold-proxy-note"></p>
           </div>
           <div class="status-card split-stat">
             <div><small>剩余牌墙</small><strong id="wall-count">–</strong></div>
             <div><small>回合</small><strong id="turn-count">–</strong></div>
+            <div><small>局数</small><strong id="hand-number">–</strong></div>
+            <div><small>连庄</small><strong id="dealer-streak">–</strong></div>
           </div>
           <details class="rules-card">
             <summary>本局规则</summary>
@@ -43,22 +58,25 @@
 
         <section class="table-wrap" aria-label="麻将桌">
           <div class="mahjong-table">
+            <span id="debug-ribbon" class="debug-ribbon">AI 手牌已明牌 · 调试</span>
             <section class="seat seat-top" data-seat="2"></section>
             <section class="seat seat-left" data-seat="3"></section>
             <section class="seat seat-right" data-seat="1"></section>
             <section class="seat seat-bottom" data-seat="0"></section>
+            <section class="river river-top" data-river="2" aria-label="对家弃牌区"></section>
+            <section class="river river-left" data-river="3" aria-label="左家弃牌区"></section>
+            <section class="river river-right" data-river="1" aria-label="右家弃牌区"></section>
+            <section class="river river-bottom" data-river="0" aria-label="你的弃牌区"></section>
             <div class="table-center">
               <span class="compass">厦<br />门<br />麻<br />将</span>
               <span id="phase-chip" class="phase-chip">准备</span>
+              <span id="special-state" class="special-state hidden"></span>
             </div>
           </div>
-          <section id="action-panel" class="action-panel">
-            <p>等待你的回合…</p>
-          </section>
         </section>
 
         <aside class="event-panel">
-          <p class="section-kicker">牌局记录</p>
+          <div class="event-heading"><p class="section-kicker">牌局记录</p><small>最新在上</small></div>
           <ol id="event-list"></ol>
         </aside>
       </section>

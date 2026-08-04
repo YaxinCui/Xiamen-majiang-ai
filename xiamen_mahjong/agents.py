@@ -22,20 +22,32 @@ class HeuristicTeacherAgent:
     def choose_turn_action(self, game, player_id: int) -> GameAction:
         player = game.players[player_id]
         meld_count = len(player.melds)
+        if game._tour_resolution_level(player_id):
+            if game._can_advance_tour(player_id):
+                return GameAction("advance_tour", game.gold_tile)
+            return GameAction("hu")
+        if game._in_locked_tour_cycle(player_id):
+            if game._can_win(player_id):
+                return GameAction("hu")
+            return GameAction("discard", self._best_discard(game, player_id))
         if is_winning_hand(
             player.hand,
             game.gold_tile,
             meld_count=meld_count,
+            melds_required=game.rules.melds_required,
             allow_seven_pairs=game.rules.allow_seven_pairs,
+            wildcard_tiles=game.wildcard_tiles,
+            proxy_tile=game.gold_proxy_tile,
+            proxy_as=game.gold_tile,
         ):
             return GameAction("hu")
 
-        if len(game.wall) > 16:
+        if len(game.wall) > game.rules.dead_wall_tiles:
             for tile, count in sorted(Counter(player.hand).items()):
                 if count == 4 and tile != game.gold_tile:
                     return GameAction("an_kan", tile)
             for meld in player.melds:
-                if meld["kind"] == "pong":
+                if meld["kind"] == "pong" and len(set(meld["tiles"])) == 1:
                     tile = meld["tiles"][0]
                     if tile in player.hand and tile != game.gold_tile:
                         return GameAction("add_kan", tile)
@@ -54,17 +66,37 @@ class HeuristicTeacherAgent:
                 player.hand,
                 game.gold_tile,
                 meld_count=len(player.melds),
+                melds_required=game.rules.melds_required,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
             )
             after_hand = list(player.hand)
-            for _ in range(2):
-                after_hand.remove(kinds["pong"].tile)
-            after = hand_quality(after_hand, game.gold_tile, meld_count=len(player.melds) + 1)
+            for tile in kinds["pong"].tiles:
+                after_hand.remove(tile)
+            after = hand_quality(
+                after_hand,
+                game.gold_tile,
+                meld_count=len(player.melds) + 1,
+                melds_required=game.rules.melds_required,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
             if after >= before - 1.0:
                 return kinds["pong"]
         chi_options = [option for option in options if option.kind == "chi"]
         if chi_options:
             player = game.players[player_id]
-            before = hand_quality(player.hand, game.gold_tile, meld_count=len(player.melds))
+            before = hand_quality(
+                player.hand,
+                game.gold_tile,
+                meld_count=len(player.melds),
+                melds_required=game.rules.melds_required,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
             scored = []
             for option in chi_options:
                 after_hand = list(player.hand)
@@ -72,7 +104,15 @@ class HeuristicTeacherAgent:
                     after_hand.remove(tile)
                 scored.append(
                     (
-                        hand_quality(after_hand, game.gold_tile, meld_count=len(player.melds) + 1),
+                        hand_quality(
+                            after_hand,
+                            game.gold_tile,
+                            meld_count=len(player.melds) + 1,
+                            melds_required=game.rules.melds_required,
+                            wildcard_tiles=game.wildcard_tiles,
+                            proxy_tile=game.gold_proxy_tile,
+                            proxy_as=game.gold_tile,
+                        ),
                         option,
                     )
                 )
@@ -84,11 +124,31 @@ class HeuristicTeacherAgent:
     def explain_discard(self, game, player_id: int) -> list[dict[str, object]]:
         player = game.players[player_id]
         candidates = []
+        allowed = set(game._forced_follow_tiles(player_id))
         for tile in sorted(set(player.hand)):
+            if allowed and tile not in allowed:
+                continue
             candidate = list(player.hand)
             candidate.remove(tile)
-            waits = wait_tiles(candidate, game.gold_tile, meld_count=len(player.melds))
-            quality = hand_quality(candidate, game.gold_tile, meld_count=len(player.melds))
+            waits = wait_tiles(
+                candidate,
+                game.gold_tile,
+                meld_count=len(player.melds),
+                melds_required=game.rules.melds_required,
+                allow_seven_pairs=game.rules.allow_seven_pairs,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
+            quality = hand_quality(
+                candidate,
+                game.gold_tile,
+                meld_count=len(player.melds),
+                melds_required=game.rules.melds_required,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
             gold_penalty = 7.0 if tile == game.gold_tile else 0.0
             score = quality + len(waits) * 18 - gold_penalty
             candidates.append(
