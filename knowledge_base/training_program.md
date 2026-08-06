@@ -120,7 +120,7 @@ per-particle `p/q` proposal，并在微型牌墙穷举校准。固定 core seed 
 collector/Q/网页。普通全历史重放继续拒绝未获专门授权的花牌 transition；补杠／明杠后的 replacement draw 也尚未
 形成公开 draw transition。这是保护正确性的限制，不是缺失事件可以忽略的许可。
 
-### Teacher 单点干预 response 数据（待采集的下一条因果来源）
+### Teacher 单点干预 response 数据（当前因果来源）
 
 run4-based response outcome ensemble 已被全新实战否决，不能再把 run4 作为改善 Teacher 的桥梁。collector 现支持
 `--teacher-base`：候选座位在干预前后均完全执行 `HeuristicTeacherAgent`，每局最多随机选中一个 response 决策，
@@ -128,9 +128,10 @@ run4-based response outcome ensemble 已被全新实战否决，不能再把 run
 只保存本家/公开观察、实际动作、propensity 和终局分数，不保存墙、暗手或随机种子。
 
 这可识别“一个受支持 response 替代 + Teacher 后缀”的局部因果回报，但不能直接识别多次连续修改后的策略价值。
-下一步先用按墙隔离的 held-out 数据报告支持度、动作类别覆盖和 doubly-robust/IPS 置信区间；只有单点策略改动的
-保守下界为正，才允许使用与收集协议一致的“一局至多一次 override”候选进行 200 墙筛选。不得复用已被否决的
-run4 selector、不得把 logged-action 校准或单点 OPE 直接称为完整对局强度。
+`audit_teacher_response_intervention_ope.py` 已实现：它只接收 `base_policy=heuristic_teacher` 的 held-out 轨迹，按
+物理墙组汇总 IPS/DR、报告两侧 ESS，并用多个**不接触 test 墙**的 outcome checkpoint 构造保守 LCB 候选。只有单点
+策略改动的 IPS 和 DR 保守下界均为正，才允许使用与收集协议一致的“一局至多一次 override”候选进行 200 墙筛选。
+不得复用已被否决的 run4 selector、不得把 logged-action 校准或单点 OPE 直接称为完整对局强度。
 
 ## 实验记录模板
 

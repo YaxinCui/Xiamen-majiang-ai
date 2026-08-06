@@ -351,11 +351,20 @@ response 按已知概率采样。它是数据收集入口，不是部署 selecto
 ```
 
 若有多个按物理牌墙隔离的单点干预墙组，可用 `--additional-train`、`--additional-validation` 和
-`--additional-test` 只追加同一分区；v5 会训练独立的 afterstate encoder，因此不会改写冻结 policy logits。可先
-用 `scripts/audit_afterstate_ensemble.py` 审计 logged-action 校准、成员离散度及假设性 policy-prior 偏移，再用
-`scripts/evaluate_afterstate_response_ensemble.py` 在**全新** 200 墙四座轮换中筛选。后者只允许 response top-k
-的实验重排，默认状态仍是 `experimental_not_authorized_for_browser_or_promotion`；200 墙配对 95% 下界不为正时，
-禁止进行 400 墙、发布或替换网页 AI。
+`--additional-test` 只追加同一分区。用训练墙和验证墙训练两个以上、不同随机种子的 afterstate outcome head 后，
+只能在**从未参与其训练／选 epoch 的 test 墙组**上运行分组 IPS/DR：
+
+```bash
+.venv/bin/python scripts/audit_teacher_response_intervention_ope.py \
+  --outcome-checkpoint artifacts/policy-value-teacher-response-outcome-v1-seed1/policy-value.pt \
+  --outcome-checkpoint artifacts/policy-value-teacher-response-outcome-v1-seed2/policy-value.pt \
+  --data artifacts/teacher-response-intervention-v1/test.trajectories.jsonl \
+  --device cuda --output artifacts/teacher-response-intervention-v1/ope-audit.json
+```
+
+审计按物理牌墙而非单条 decision 计算置信区间，核对 `ε × uniform + (1−ε) × Teacher` 的精确 propensity，并同时要求
+IPS、DR 的 95% 下界为正和两侧 ESS 达标。即使通过，它也只解锁「每局**最多一次** response override、随后回到
+Teacher」的全新 200 墙四座轮换筛选；不解锁完整策略、400 墙终检、网页替换或任何对人类强度的声明。
 
 ### response 定向反事实 Q（离线门槛，尚不选牌）
 

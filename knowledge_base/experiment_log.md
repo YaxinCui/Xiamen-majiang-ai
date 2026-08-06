@@ -624,3 +624,14 @@ head）终检。结果为 **−0.8550 ± 0.6448** 分/局，95% CI **[−2.1189,
 core 小规模 smoke（3 个物理墙、12 个换座手）确认该路径可完成结算、生成安全 split 轨迹，并保持规则 Teacher
 身份。尚未收集经典训练墙、训练 outcome/Q 头或测试 selector，因此这不是模型或强度实验。后续先做独立 OPE/支持度
 审计，再决定是否值得生成足量经典数据。
+
+## 2026-08-07：Teacher response 单点 OPE 审计器（基础设施）
+
+新增 `xiamen_mahjong.off_policy` 与 `audit_teacher_response_intervention_ope.py`。每个有效观察必须有完整的
+Teacher epsilon-mixture propensity、受保护的 `split_group_id` 和一个真实终局分数；IPS 与 doubly-robust delta 均按
+物理牌墙组先平均、再计算标准误，避免把同一牌墙的四座轮换误当独立样本。DR 的 direct value 只允许来自不接触
+test 墙的 outcome ensemble；候选 action 用跨成员终局分数 LCB 与 Teacher 标签比较，从而优先保持 Teacher。
+
+输出状态固定为 `audit_only_one_response_teacher_override`。即使 IPS、DR 两项 95% 下界为正且两侧 ESS 达标，也只可
+进入「一局至多一次 response override，随后 Teacher 后缀」的 200 墙筛选，不能作为完整策略、网页部署或打败人类的
+证据。当前只有脚本与单测，尚无经典 Teacher 干预数据、outcome checkpoint 或 OPE 数值结果。
