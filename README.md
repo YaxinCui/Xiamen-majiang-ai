@@ -361,8 +361,9 @@ Q-only 校准必须启用独立 Q encoder 和 policy 路径冻结；`--action-va
 test 墙组报告一次；test 的平均值、MAE 或准确率都不能绕过两项正向置信下界和后续真实对局验收。
 
 若要探索超越 Teacher 的方向，可对 policy-value 候选做终局净分 PPO 微调。它只允许一席
-候选策略采样，三席始终冻结为 Teacher；策略仍只能从规则引擎的合法动作中选择。该命令
-输出的是研究 checkpoint，不会自动替换网页 AI：
+候选策略采样，三席可按概率混合 Teacher、显式冻结 checkpoint，以及“本轮更新前冻结”的当前
+策略快照；策略仍只能从规则引擎的合法动作中选择。快照不与 actor 共享参数或梯度，并在每轮
+更新后才刷新。该命令输出的是研究 checkpoint，不会自动替换网页 AI：
 
 ```bash
 .venv/bin/python scripts/train_torch_ppo.py \
@@ -375,6 +376,27 @@ test 墙组报告一次；test 的平均值、MAE 或准确率都不能绕过两
   --checkpoint artifacts/torch-ppo-classic/policy-value-ppo-iteration-3.pt \
   --reference artifacts/policy-value-classic-v1-dagger/policy-value.pt \
   --profile classic --hands 200 --seed 22000000 --device cuda
+```
+
+要检查策略是否只适应了三名 Teacher，可把模型与 Teacher 组成固定三人阵容。候选会在同一副
+物理牌墙上轮换四座，阵容内每名对手也会覆盖候选周围的三个相对座位；只有**相同阵容标签**的
+结果可做配对分差：
+
+```bash
+# 建立 Teacher 在该阵容中的基线
+.venv/bin/python scripts/evaluate_policy.py \
+  --teacher-candidate \
+  --opponent-checkpoint artifacts/policy-value-classic-v1-run3/policy-value.pt \
+  --opponent-checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --hands 200 --seed 24000000 --device cuda
+
+# 在完全相同的阵容和牌墙上评估新 checkpoint；--reference 同样复用该阵容
+.venv/bin/python scripts/evaluate_policy.py \
+  --checkpoint artifacts/new-candidate/policy-value.pt \
+  --reference artifacts/policy-value-classic-v1-run3/policy-value.pt \
+  --opponent-checkpoint artifacts/policy-value-classic-v1-run3/policy-value.pt \
+  --opponent-checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --hands 200 --seed 24000000 --device cuda
 ```
 
 如需降低训练期终局净分的高方差，可加 `--privileged-critic`。它的 critic 仅在该次 PPO 进程内读取
@@ -411,5 +433,9 @@ CPU/GPU 浮点舍入在临界动作处造成不必要的策略差异。
 `--teacher-opponent-probability 0.75` 保留 75% Teacher 对手。批量 rollout 会把候选及
 同一冻结 checkpoint 的对手请求分别合并成变长合法动作 batch；规则引擎和结算不会被并行
 模型绕过。
+
+可额外使用 `--self-play-opponent-probability 0.25`，并相应把 Teacher 概率降为 `0.75` 或更低。
+每一轮的 snapshot 均从更新前 actor 复制，报告会分别计数 `current_policy_snapshot`、Teacher 和冻结
+checkpoint 对手；它是有待独立评测的训练消融，不是自动晋升条件。
 
 除单元测试外，改动网页交互后应启动本地服务并通过真实浏览器完成至少一局。

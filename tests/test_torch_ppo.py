@@ -104,6 +104,56 @@ class TorchPpoTests(unittest.TestCase):
         self.assertEqual(summary.opponent_profile_counts["frozen_candidate"], 24)
         self.assertGreater(len(steps), 0)
 
+    def test_batched_rollout_can_use_an_isolated_current_policy_snapshot(self):
+        from scripts.train_torch_ppo import (
+            collect_rollouts_batched,
+            freeze_policy_snapshot,
+        )
+        from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
+
+        policy = TorchPolicyValueAgent(feature_version=3, hidden_size=16, device="cpu")
+        snapshot = freeze_policy_snapshot(policy)
+        snapshot_before = {
+            name: value.detach().clone()
+            for name, value in snapshot.network.state_dict().items()
+        }
+        with torch.no_grad():
+            next(policy.network.parameters()).add_(1.0)
+        self.assertTrue(
+            all(
+                torch.equal(snapshot_before[name], value)
+                for name, value in snapshot.network.state_dict().items()
+            )
+        )
+        steps, summary = collect_rollouts_batched(
+            policy,
+            episodes=8,
+            profile="core",
+            seed=846,
+            reward_scale=80.0,
+            teacher_opponent_probability=0.0,
+            self_play_snapshot=snapshot,
+            self_play_opponent_probability=1.0,
+            rollout_batch_size=4,
+        )
+        self.assertEqual(summary.opponent_profile_counts["current_policy_snapshot"], 24)
+        self.assertGreater(len(steps), 0)
+
+    def test_self_play_probability_requires_a_snapshot(self):
+        from scripts.train_torch_ppo import collect_rollouts
+        from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
+
+        with self.assertRaisesRegex(ValueError, "冻结快照"):
+            collect_rollouts(
+                TorchPolicyValueAgent(feature_version=3, hidden_size=16, device="cpu"),
+                episodes=1,
+                profile="core",
+                seed=847,
+                reward_scale=80.0,
+                teacher_opponent_probability=0.0,
+                self_play_opponent_probability=1.0,
+            )
+
     def test_training_only_privileged_critic_never_enters_actor_observations(self):
         from scripts.train_torch_ppo import (
             PRIVILEGED_CRITIC_FEATURE_DIM,

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+import copy
 from dataclasses import dataclass
 from itertools import chain
 import json
@@ -208,6 +209,15 @@ def parse_args() -> argparse.Namespace:
         help="每个非候选座位使用 Teacher 的概率；其余从冻结对手池均匀抽取",
     )
     parser.add_argument(
+        "--self-play-opponent-probability",
+        type=float,
+        default=0.0,
+        help=(
+            "每个非候选座位使用本轮更新前冻结的当前策略快照的概率；"
+            "与 Teacher 概率之和不得超过 1"
+        ),
+    )
+    parser.add_argument(
         "--output-dir", type=Path, default=Path("artifacts/torch-ppo-classic")
     )
     return parser.parse_args()
@@ -231,6 +241,50 @@ def _sample_index(logits: Sequence[float], rng: random.Random) -> tuple[int, flo
     return len(probabilities) - 1, math.log(max(probabilities[-1], 1e-12))
 
 
+def freeze_policy_snapshot(policy: TorchPolicyValueAgent) -> TorchPolicyValueAgent:
+    """Copy a policy for opponents without sharing parameters or gradients.
+
+    The snapshot is created once immediately before a PPO iteration's rollout
+    collection.  It stays fixed while the actor is updated, so it is neither
+    a live-gradient opponent nor a hidden training feature.
+    """
+
+    snapshot = TorchPolicyValueAgent(
+        feature_version=policy.feature_version,
+        hidden_size=policy.hidden_size,
+        architecture=policy.architecture,
+        attention_heads=policy.attention_heads,
+        action_selection=policy.action_selection,
+        device=str(policy.device),
+    )
+    snapshot.network.load_state_dict(copy.deepcopy(policy.network.state_dict()))
+    snapshot.network.eval()
+    return snapshot
+
+
+def _sample_opponent(
+    *,
+    rng: random.Random,
+    teacher: HeuristicTeacherAgent,
+    opponents: Sequence[tuple[str, Any]],
+    teacher_probability: float,
+    self_play_snapshot: TorchPolicyValueAgent | None,
+    self_play_probability: float,
+) -> tuple[str, Any]:
+    """Choose one frozen opponent from a declared, auditable mixture."""
+
+    draw = rng.random()
+    if draw < teacher_probability:
+        return "heuristic_teacher", teacher
+    if draw < teacher_probability + self_play_probability:
+        if self_play_snapshot is None:
+            raise RuntimeError("self-play 对手快照缺失")
+        return "current_policy_snapshot", self_play_snapshot
+    if not opponents:
+        raise RuntimeError("冻结对手池为空却被采样")
+    return opponents[rng.randrange(len(opponents))]
+
+
 def collect_rollouts(
     policy: TorchPolicyValueAgent,
     *,
@@ -240,6 +294,8 @@ def collect_rollouts(
     reward_scale: float,
     opponents: Sequence[tuple[str, Any]] = (),
     teacher_opponent_probability: float = 1.0,
+    self_play_snapshot: TorchPolicyValueAgent | None = None,
+    self_play_opponent_probability: float = 0.0,
     privileged_critic: PrivilegedCritic | None = None,
 ) -> tuple[list[PpoStep], RolloutSummary]:
     """Sample candidate actions and attach final reward and old baseline.
@@ -253,8 +309,17 @@ def collect_rollouts(
         raise ValueError("episodes 必须为正数")
     if not 0.0 <= teacher_opponent_probability <= 1.0:
         raise ValueError("teacher_opponent_probability 必须在 0 和 1 之间")
-    if teacher_opponent_probability < 1.0 and not opponents:
-        raise ValueError("混入非 Teacher 对手时必须提供 opponent checkpoint")
+    if not 0.0 <= self_play_opponent_probability <= 1.0:
+        raise ValueError("self_play_opponent_probability 必须在 0 和 1 之间")
+    if teacher_opponent_probability + self_play_opponent_probability > 1.0:
+        raise ValueError("Teacher 与 self-play 对手概率之和不能超过 1")
+    if self_play_opponent_probability > 0.0 and self_play_snapshot is None:
+        raise ValueError("self-play 对手概率大于 0 时必须提供冻结快照")
+    if (
+        teacher_opponent_probability + self_play_opponent_probability < 1.0
+        and not opponents
+    ):
+        raise ValueError("剩余对手概率大于 0 时必须提供 opponent checkpoint")
     rules = XiamenRules.from_profile(profile)
     teacher = HeuristicTeacherAgent()
     rng = random.Random(seed)
@@ -274,10 +339,14 @@ def collect_rollouts(
         for seat in range(rules.player_count):
             if seat == candidate_seat:
                 continue
-            if not opponents or rng.random() < teacher_opponent_probability:
-                opponent_by_seat[seat] = ("heuristic_teacher", teacher)
-            else:
-                opponent_by_seat[seat] = opponents[rng.randrange(len(opponents))]
+            opponent_by_seat[seat] = _sample_opponent(
+                rng=rng,
+                teacher=teacher,
+                opponents=opponents,
+                teacher_probability=teacher_opponent_probability,
+                self_play_snapshot=self_play_snapshot,
+                self_play_probability=self_play_opponent_probability,
+            )
             opponent_profile_counts[opponent_by_seat[seat][0]] += 1
         episode_steps: list[
             tuple[TeacherDecision, int, float, float, tuple[float, ...] | None]
@@ -424,6 +493,8 @@ def collect_rollouts_batched(
     reward_scale: float,
     opponents: Sequence[tuple[str, Any]] = (),
     teacher_opponent_probability: float = 1.0,
+    self_play_snapshot: TorchPolicyValueAgent | None = None,
+    self_play_opponent_probability: float = 0.0,
     rollout_batch_size: int = 1,
     privileged_critic: PrivilegedCritic | None = None,
 ) -> tuple[list[PpoStep], RolloutSummary]:
@@ -440,14 +511,25 @@ def collect_rollouts_batched(
             reward_scale=reward_scale,
             opponents=opponents,
             teacher_opponent_probability=teacher_opponent_probability,
+            self_play_snapshot=self_play_snapshot,
+            self_play_opponent_probability=self_play_opponent_probability,
             privileged_critic=privileged_critic,
         )
     if episodes <= 0:
         raise ValueError("episodes 必须为正数")
     if not 0.0 <= teacher_opponent_probability <= 1.0:
         raise ValueError("teacher_opponent_probability 必须在 0 和 1 之间")
-    if teacher_opponent_probability < 1.0 and not opponents:
-        raise ValueError("混入非 Teacher 对手时必须提供 opponent checkpoint")
+    if not 0.0 <= self_play_opponent_probability <= 1.0:
+        raise ValueError("self_play_opponent_probability 必须在 0 和 1 之间")
+    if teacher_opponent_probability + self_play_opponent_probability > 1.0:
+        raise ValueError("Teacher 与 self-play 对手概率之和不能超过 1")
+    if self_play_opponent_probability > 0.0 and self_play_snapshot is None:
+        raise ValueError("self-play 对手概率大于 0 时必须提供冻结快照")
+    if (
+        teacher_opponent_probability + self_play_opponent_probability < 1.0
+        and not opponents
+    ):
+        raise ValueError("剩余对手概率大于 0 时必须提供 opponent checkpoint")
     rules = XiamenRules.from_profile(profile)
     teacher = HeuristicTeacherAgent()
     rng = random.Random(seed)
@@ -468,10 +550,14 @@ def collect_rollouts_batched(
         for seat in range(rules.player_count):
             if seat == candidate_seat:
                 continue
-            if not opponents or rng.random() < teacher_opponent_probability:
-                episode_opponents[seat] = ("heuristic_teacher", teacher)
-            else:
-                episode_opponents[seat] = opponents[rng.randrange(len(opponents))]
+            episode_opponents[seat] = _sample_opponent(
+                rng=rng,
+                teacher=teacher,
+                opponents=opponents,
+                teacher_probability=teacher_opponent_probability,
+                self_play_snapshot=self_play_snapshot,
+                self_play_probability=self_play_opponent_probability,
+            )
             opponent_profile_counts[episode_opponents[seat][0]] += 1
         return _ActiveRollout(game, candidate_seat, [], episode_opponents)
 
@@ -913,6 +999,8 @@ def main() -> None:
         or args.privileged_critic_hidden_size <= 0
         or args.privileged_critic_weight < 0
         or not 0.0 <= args.teacher_opponent_probability <= 1.0
+        or not 0.0 <= args.self_play_opponent_probability <= 1.0
+        or args.teacher_opponent_probability + args.self_play_opponent_probability > 1.0
     ):
         raise ValueError("PPO 超参数不合法")
     if args.device == "cuda" and not torch.cuda.is_available():
@@ -937,8 +1025,11 @@ def main() -> None:
         if opponent.architecture != ARCHITECTURE_CANDIDATE_MLP:
             raise ValueError("首版 PPO 对手池仅支持 candidate_mlp checkpoint")
         frozen_opponents.append((str(checkpoint), opponent))
-    if args.teacher_opponent_probability < 1.0 and not frozen_opponents:
-        raise ValueError("teacher-opponent-probability 小于 1 时需要 --opponent-checkpoint")
+    if (
+        args.teacher_opponent_probability + args.self_play_opponent_probability < 1.0
+        and not frozen_opponents
+    ):
+        raise ValueError("剩余对手概率大于 0 时需要 --opponent-checkpoint")
     output_dir: Path = args.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
@@ -962,11 +1053,18 @@ def main() -> None:
         },
         "opponent_pool": {
             "teacher_probability": args.teacher_opponent_probability,
+            "current_policy_snapshot_probability": args.self_play_opponent_probability,
+            "current_policy_snapshot_refresh": "once_per_iteration_before_update",
             "frozen_checkpoints": [str(path) for path in args.opponent_checkpoint],
         },
         "iterations": [],
     }
     for iteration in range(1, args.iterations + 1):
+        self_play_snapshot = (
+            freeze_policy_snapshot(agent)
+            if args.self_play_opponent_probability > 0.0
+            else None
+        )
         steps, rollout = collect_rollouts_batched(
             agent,
             episodes=args.episodes_per_iteration,
@@ -975,6 +1073,8 @@ def main() -> None:
             reward_scale=args.reward_scale,
             opponents=frozen_opponents,
             teacher_opponent_probability=args.teacher_opponent_probability,
+            self_play_snapshot=self_play_snapshot,
+            self_play_opponent_probability=args.self_play_opponent_probability,
             rollout_batch_size=args.rollout_batch_size,
             privileged_critic=privileged_critic,
         )
