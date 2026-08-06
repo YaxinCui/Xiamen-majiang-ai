@@ -48,6 +48,27 @@ fallback），并逐条比对生成的公开 event。固定 `seed=953` 的 13 �
 退化，**不得接入 collector 或替换现有 `--belief-resample`**。下一步改为按事件约束的序列 proposal
 （在目标弃牌/副露发生时先满足所需手牌与私有摸牌），并以 ESS/接受率门槛校准后才允许产出训练数据。
 
+## 2026-08-07：事件约束修复 proposal（审计结果：拒绝作为训练 belief）
+
+实现了仅限 `core`、只读审计的 `core_public_history_constraint_repair_v0`。它仍先从“本家私有
+手牌/摸牌 trace + 公开事实”采样；随后在重放每一个公开事件时，若他家的已观察弃牌、吃、碰或明杠
+因随机暗手而不合法，便只在**未知牌墙与非本家暗手**之间守恒交换所需牌。本家手牌、私有摸牌预约、
+副露、弃牌和所有导出记录绝不修改；暗杠保持公开面值未知的边缘化。该实现不会返回粒子世界，也没有
+接入 `collect_counterfactual_action_value_trajectories`、JSONL 或网页选牌路径。
+
+固定单元夹具（`core`、seed 953、9 个公开 action、本家座位 0、100 个粒子）中，朴素拒绝 proposal
+接受率为 **0/100**；修复 proposal 为 **94/100**，平均 **3.38** 次隐藏牌交换。这验证了原先的主导
+失败确为“公开对手动作在随机暗手中不合法”，而非 replay 或本家私有 trace 的错误。
+
+但其冻结 Teacher 行为似然的加权 ESS 只有 **3.55/94 = 0.038**。更长前缀的初步探针亦可降至约 1%，
+说明高接受率只是把拒绝退化变成了严重的权重退化；而且该交换 proposal 尚未计算自身密度，不能把该
+ESS 解释为严格 posterior ESS。因此它**不通过**进入 multi-world 价值数据的门槛，不能声称是 sequential
+posterior，也不能替换现有局部 SIR 或网页默认 run4。
+
+下一项研究不是继续扩大该修复采样，而是定义有显式条件密度的逐事件 proposal（含抽牌/本家私有摸牌、
+弃牌、公开副露与行为模型温度校准），在可枚举小牌墙上同精确 posterior 对照；只有接受率、proposal
+修正后的 ESS 和 posterior 误差均预注册达标后，才考虑接入独立的多 world value 消融。
+
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 
 作为完整序列 proposal 前的受控中间步骤，新增 `latest_normal_draw_discard_sir_v1`。它只作用于

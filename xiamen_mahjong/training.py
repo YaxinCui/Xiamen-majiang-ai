@@ -1304,6 +1304,7 @@ class _HistoryReplayResult:
     log_likelihood: float
     public_action_count: int
     rejection_reason: str | None = None
+    constraint_repairs: int = 0
 
 
 @dataclass(frozen=True)
@@ -1331,6 +1332,52 @@ class _HistoryReplayAudit:
             "acceptance_rate": self.acceptance_rate,
             "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
             "rejection_counts": dict(self.rejection_counts),
+        }
+
+
+@dataclass(frozen=True)
+class _HistoryConstraintRepairAudit:
+    """Aggregate-only audit for a full-history hidden-tile repair proposal.
+
+    This is a proposal-health diagnostic, not a claim of an exact posterior.
+    The repairs and all particle worlds are runtime-only; callers may export
+    only these aggregate acceptance and Monte-Carlo weight diagnostics.
+    """
+
+    proposed_particles: int
+    accepted_particles: int
+    effective_sample_size: float
+    mean_accepted_log_likelihood: float | None
+    mean_constraint_repairs: float | None
+    rejection_counts: dict[str, int]
+
+    @property
+    def acceptance_rate(self) -> float:
+        return self.accepted_particles / self.proposed_particles
+
+    @property
+    def effective_sample_fraction(self) -> float:
+        return (
+            self.effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposal": "core_public_history_constraint_repair_v0",
+            "proposed_particles": self.proposed_particles,
+            "accepted_particles": self.accepted_particles,
+            "acceptance_rate": self.acceptance_rate,
+            "effective_sample_size": self.effective_sample_size,
+            "effective_sample_fraction": self.effective_sample_fraction,
+            "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
+            "mean_constraint_repairs": self.mean_constraint_repairs,
+            "rejection_counts": dict(self.rejection_counts),
+            "warning": (
+                "Event-constrained repair proposal only; it is not an exact "
+                "full-history posterior and is not authorized for collection."
+            ),
         }
 
 
@@ -1591,6 +1638,205 @@ def _sample_replay_setup_for_actor(
     return sampled
 
 
+def _transfer_unknown_tile_to_opponent_hand(
+    game: XiamenMahjongGame,
+    *,
+    actor_seat: int,
+    recipient_seat: int,
+    required_tile: int,
+    rng: random.Random,
+) -> bool:
+    """Move one hidden physical tile into a non-actor hand by exchange.
+
+    This is deliberately a *proposal* transition, not a game-rule transition.
+    It preserves the multiset over the sampled wall and non-actor concealed
+    hands, and it never reads from or writes to the candidate's hand, flowers,
+    exposed melds, discards, or private-draw reservations.  The returned game
+    remains private to a replay audit.
+    """
+
+    if (
+        recipient_seat == actor_seat
+        or not is_base_tile(required_tile)
+        or not game.players[recipient_seat].hand
+    ):
+        return False
+    recipient = game.players[recipient_seat]
+    # Replacing another copy of the required tile would not increase the
+    # count needed to make an observed discard or claim legal.
+    displaced_indices = [
+        index for index, tile in enumerate(recipient.hand) if tile != required_tile
+    ]
+    if not displaced_indices:
+        return False
+    donor_locations: list[tuple[str, int, int]] = []
+    for index, tile in enumerate(game.wall):
+        if tile == required_tile:
+            donor_locations.append(("wall", -1, index))
+    for player in game.players:
+        if player.seat in {actor_seat, recipient_seat}:
+            continue
+        for index, tile in enumerate(player.hand):
+            if tile == required_tile:
+                donor_locations.append(("hand", player.seat, index))
+    if not donor_locations:
+        return False
+
+    recipient_index = rng.choice(displaced_indices)
+    displaced = recipient.hand[recipient_index]
+    donor_kind, donor_seat, donor_index = rng.choice(donor_locations)
+    recipient.hand[recipient_index] = required_tile
+    if game.last_drawn_tiles[recipient_seat] == displaced:
+        game.last_drawn_tiles[recipient_seat] = required_tile
+    if donor_kind == "wall":
+        # Actor reservations use a sentinel and can never be a donor because
+        # ``required_tile`` is a physical base tile.
+        game.wall[donor_index] = displaced
+    else:
+        donor = game.players[donor_seat]
+        donor.hand[donor_index] = displaced
+        if game.last_drawn_tiles[donor_seat] == required_tile:
+            game.last_drawn_tiles[donor_seat] = displaced
+        donor.hand.sort()
+    recipient.hand.sort()
+    return True
+
+
+def _ensure_unknown_opponent_tiles(
+    game: XiamenMahjongGame,
+    *,
+    actor_seat: int,
+    recipient_seat: int,
+    required_tiles: Sequence[int],
+    rng: random.Random,
+) -> int | None:
+    """Ensure a private opponent hand has the requested tile multiset.
+
+    ``None`` means the proposal cannot repair the public constraint while
+    respecting the candidate's information boundary.  An integer is the
+    number of conservation exchanges made.
+    """
+
+    required_counts = Counter(required_tiles)
+    if recipient_seat == actor_seat or any(
+        not is_base_tile(tile) for tile in required_counts
+    ):
+        return None
+    repairs = 0
+    hand = game.players[recipient_seat].hand
+    for tile, count in sorted(required_counts.items()):
+        while hand.count(tile) < count:
+            if not _transfer_unknown_tile_to_opponent_hand(
+                game,
+                actor_seat=actor_seat,
+                recipient_seat=recipient_seat,
+                required_tile=tile,
+                rng=rng,
+            ):
+                return None
+            repairs += 1
+    return repairs
+
+
+def _repair_opponent_for_public_turn_event(
+    game: XiamenMahjongGame,
+    *,
+    actor_seat: int,
+    player_id: int,
+    event: Mapping[str, Any],
+    rng: random.Random,
+) -> int | None:
+    """Repair only hidden cards needed by a non-actor public turn action."""
+
+    if player_id == actor_seat:
+        return None
+    kind = event.get("kind")
+    tile = event.get("tile")
+    if kind in {"discard", "advance_tour", "add_kan"}:
+        if not isinstance(tile, int):
+            return None
+        return _ensure_unknown_opponent_tiles(
+            game,
+            actor_seat=actor_seat,
+            recipient_seat=player_id,
+            required_tiles=(tile,),
+            rng=rng,
+        )
+    if kind == "hu":
+        # Do not invent a winning hand.  A naturally compatible source-world
+        # particle may still pass through this branch, while other particles
+        # are rejected by ordinary legality below.
+        return 0
+    if kind != "an_kan" or not game.rules.allow_concealed_kong:
+        # Winning and any vocabulary beyond the core action set need an exact
+        # event-specific conditional proposal rather than a fabricated hand.
+        return None
+    candidates: list[int] = []
+    for tile_value in range(BASE_TILE_COUNT):
+        if tile_value == game.gold_tile:
+            continue
+        available = sum(
+            player.hand.count(tile_value)
+            for player in game.players
+            if player.seat != actor_seat
+        ) + game.wall.count(tile_value)
+        if available >= 4:
+            candidates.append(tile_value)
+    if not candidates:
+        return None
+    return _ensure_unknown_opponent_tiles(
+        game,
+        actor_seat=actor_seat,
+        recipient_seat=player_id,
+        required_tiles=(rng.choice(candidates),) * 4,
+        rng=rng,
+    )
+
+
+def _repair_opponent_for_public_response_event(
+    game: XiamenMahjongGame,
+    *,
+    actor_seat: int,
+    claimant: int,
+    event: Mapping[str, Any],
+    rng: random.Random,
+) -> int | None:
+    """Repair known concealed consumption for a public core claim."""
+
+    if claimant == actor_seat or event.get("kind") not in {"pong", "chi", "ming_kan"}:
+        return None
+    tiles = event.get("tiles")
+    if not isinstance(tiles, (list, tuple)) or not all(
+        isinstance(tile, int) for tile in tiles
+    ):
+        return None
+    expected_count = 2 if event["kind"] in {"pong", "chi"} else 3
+    if len(tiles) != expected_count:
+        return None
+    return _ensure_unknown_opponent_tiles(
+        game,
+        actor_seat=actor_seat,
+        recipient_seat=claimant,
+        required_tiles=tuple(tiles),
+        rng=rng,
+    )
+
+
+def _refresh_response_options_for_replay(game: XiamenMahjongGame) -> None:
+    """Rebuild response legality after a private audit-only exchange."""
+
+    if game.discarder is None or game.last_discard is None:
+        raise RuntimeError("response_refresh_without_discard")
+    game.response_options = {}
+    game.response_choices = {}
+    for player_id in range(game.rules.player_count):
+        if player_id == game.discarder:
+            continue
+        options = game._response_actions(player_id)
+        if options:
+            game.response_options[player_id] = options
+
+
 def _replay_snapshot_public_history(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
@@ -1599,6 +1845,7 @@ def _replay_snapshot_public_history(
     uniform_mixture: float = 0.02,
     initial_game: XiamenMahjongGame | None = None,
     condition_actor_draws: bool = False,
+    allow_constraint_repairs: bool = False,
 ) -> _HistoryReplayResult:
     """Strictly replay one snapshot's public prefix in its original world.
 
@@ -1607,7 +1854,10 @@ def _replay_snapshot_public_history(
     actions, and makes frozen opponents reproduce the observed public actions.
     Every generated public event must match the source prefix exactly.  The
     routine is runtime-only; it never returns the replay game or its hidden
-    state.
+    state. ``allow_constraint_repairs`` is an audit-only, core-profile
+    proposal: it may exchange hidden tiles between the wall and non-actor
+    hands to make an already-observed opponent action feasible.  It never
+    modifies the actor's private state and must not be enabled by collection.
 
     It deliberately supports the core event vocabulary only.  A new profile
     feature must gain a precise replay transition before the collector is
@@ -1731,6 +1981,7 @@ def _replay_snapshot_public_history(
         return None
 
     log_likelihood = 0.0
+    constraint_repairs = 0
     try:
         while cursor < len(target_events):
             if game.phase == "over":
@@ -1739,8 +1990,57 @@ def _replay_snapshot_public_history(
                 )
             if game.phase == "discard":
                 player_id = game.current_player
-                legal = tuple(_turn_actions(game, player_id))
                 expected = target_events[cursor]
+                if allow_constraint_repairs and player_id != trace.actor_seat:
+                    repairs = _repair_opponent_for_public_turn_event(
+                        game,
+                        actor_seat=trace.actor_seat,
+                        player_id=player_id,
+                        event=expected,
+                        rng=game.random,
+                    )
+                    if repairs is None:
+                        return _HistoryReplayResult(
+                            False,
+                            0.0,
+                            float("-inf"),
+                            cursor,
+                            "constraint_turn_unrepairable",
+                        )
+                    constraint_repairs += repairs
+                # A claim's concealed consumption must be feasible before
+                # applying its preceding discard: that transition is where
+                # the engine constructs ``response_options``.  The public
+                # log contains no intervening action between them in core.
+                if (
+                    allow_constraint_repairs
+                    and expected.get("kind") == "discard"
+                    and cursor + 1 < len(target_events)
+                ):
+                    following = target_events[cursor + 1]
+                    claimant = following.get("seat")
+                    if (
+                        following.get("kind") in {"pong", "chi", "ming_kan"}
+                        and isinstance(claimant, int)
+                        and claimant != trace.actor_seat
+                    ):
+                        repairs = _repair_opponent_for_public_response_event(
+                            game,
+                            actor_seat=trace.actor_seat,
+                            claimant=claimant,
+                            event=following,
+                            rng=game.random,
+                        )
+                        if repairs is None:
+                            return _HistoryReplayResult(
+                                False,
+                                0.0,
+                                float("-inf"),
+                                cursor,
+                                "constraint_response_unrepairable",
+                            )
+                        constraint_repairs += repairs
+                legal = tuple(_turn_actions(game, player_id))
                 compatible = _event_compatible_actions(legal, expected)
                 if player_id == trace.actor_seat:
                     action = actor_action("discard")
@@ -1798,6 +2098,29 @@ def _replay_snapshot_public_history(
                     return _HistoryReplayResult(
                         False, 0.0, float("-inf"), cursor, "response_event"
                     )
+                if (
+                    allow_constraint_repairs
+                    and expected_kind in {"pong", "chi", "ming_kan"}
+                    and isinstance(claimant, int)
+                    and claimant != trace.actor_seat
+                ):
+                    repairs = _repair_opponent_for_public_response_event(
+                        game,
+                        actor_seat=trace.actor_seat,
+                        claimant=claimant,
+                        event=expected,
+                        rng=game.random,
+                    )
+                    if repairs is None:
+                        return _HistoryReplayResult(
+                            False,
+                            0.0,
+                            float("-inf"),
+                            cursor,
+                            "constraint_response_unrepairable",
+                        )
+                    constraint_repairs += repairs
+                    _refresh_response_options_for_replay(game)
                 for player_id, options in sorted(game.response_options.items()):
                     legal = tuple(options)
                     if player_id == trace.actor_seat:
@@ -1861,7 +2184,13 @@ def _replay_snapshot_public_history(
             False, 0.0, float("-inf"), cursor, "private_trace_mismatch"
         )
     likelihood = math.exp(log_likelihood) if log_likelihood > -745.0 else 0.0
-    return _HistoryReplayResult(True, likelihood, log_likelihood, cursor)
+    return _HistoryReplayResult(
+        True,
+        likelihood,
+        log_likelihood,
+        cursor,
+        constraint_repairs=constraint_repairs,
+    )
 
 
 def _audit_resampled_history_prefix(
@@ -1909,6 +2238,83 @@ def _audit_resampled_history_prefix(
         mean_accepted_log_likelihood=(
             sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
             if accepted_log_likelihoods
+            else None
+        ),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
+def _audit_constraint_repaired_history_prefix(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+) -> _HistoryConstraintRepairAudit:
+    """Audit an event-constrained full-public-history proposal in isolation.
+
+    The proposal starts with the same actor-conditioned setup sampler as the
+    rejection baseline, then exchanges only unknown physical tiles when a
+    recorded opponent discard or exposed claim would otherwise be impossible.
+    It is deliberately not a posterior sampler: the exchange proposal density
+    is not modeled, so the ESS below is only for the frozen-behavior
+    likelihoods.  This function is intentionally disconnected from all
+    trajectory/value collectors until a separately specified calibration gate
+    accepts it.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    accepted_log_likelihoods: list[float] = []
+    accepted_repairs: list[int] = []
+    rejection_counts: Counter[str] = Counter()
+    for _ in range(particle_count):
+        initial_game = _sample_replay_setup_for_actor(snapshot, rng=rng)
+        if initial_game is None:
+            rejection_counts["setup_proposal"] += 1
+            continue
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=initial_game,
+            condition_actor_draws=True,
+            allow_constraint_repairs=True,
+        )
+        if result.accepted:
+            accepted_log_likelihoods.append(result.log_likelihood)
+            accepted_repairs.append(result.constraint_repairs)
+        else:
+            rejection_counts[result.rejection_reason or "unknown"] += 1
+    if accepted_log_likelihoods:
+        maximum = max(accepted_log_likelihoods)
+        unnormalized = [
+            math.exp(value - maximum) for value in accepted_log_likelihoods
+        ]
+        normalizer = sum(unnormalized)
+        effective_sample_size = (
+            1.0
+            / sum((weight / normalizer) ** 2 for weight in unnormalized)
+            if normalizer > 0.0
+            else 0.0
+        )
+    else:
+        effective_sample_size = 0.0
+    return _HistoryConstraintRepairAudit(
+        proposed_particles=particle_count,
+        accepted_particles=len(accepted_log_likelihoods),
+        effective_sample_size=effective_sample_size,
+        mean_accepted_log_likelihood=(
+            sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
+            if accepted_log_likelihoods
+            else None
+        ),
+        mean_constraint_repairs=(
+            sum(accepted_repairs) / len(accepted_repairs)
+            if accepted_repairs
             else None
         ),
         rejection_counts=dict(sorted(rejection_counts.items())),

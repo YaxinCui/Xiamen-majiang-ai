@@ -407,3 +407,15 @@ listwise soft-ranking loss；两者均使用 v6 独立 Q encoder/head，并启�
 超过冻结 policy 的排序证据。停止继续扩大该数据或调 Q loss；不做 200/400 墙、不晋升。下一阶段回到更根本的信息
 集问题：先实现可验证、全公开历史条件化的 sequential belief proposal（必须先报告可接受率、ESS、与 toy exact
 posterior 的校准），再考虑用其多 world 目标重新构造长程行动价值。当前网页 AI 和 run4 checkpoint 保持不变。
+
+### 全公开历史约束修复 proposal：接受率恢复，但权重 ESS 淘汰
+
+为区分“随机暗手下公开行动不合法”的 rejection 问题和行为似然本身的问题，新增 core 专用、audit-only 的
+`core_public_history_constraint_repair_v0`。当他家的已观察弃牌/吃/碰/明杠缺少所需暗牌时，它只在未知墙和
+非本家暗手间做物理牌守恒交换；不触碰本家手牌、私有摸牌 reservation、公开副露或导出数据，也没有接入 collector。
+
+固定 seed 953 的 9-event 单元夹具，100 个 proposal 中朴素重放接受 **0** 个；修复后接受 **94** 个，平均
+3.38 次交换。但以冻结 Teacher 行为概率加权的 ESS 仅 **3.55/94（3.8%）**，长前缀探针约 1%。此外交换 proposal
+的密度尚未显式计算，不能把当前权重当作严格 posterior 修正。故该方案只证明错误来源，**不通过** belief 数据、
+Q 训练或实战评测门槛；run4 和网页默认策略不变。下一步应先在可枚举小牌墙上实现带 proposal-density 的逐事件
+条件化，再决定是否重启多 world 行动价值采集。

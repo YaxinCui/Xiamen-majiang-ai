@@ -11,6 +11,7 @@ from xiamen_mahjong.training import (
     PUBLIC_ACTION_SEQUENCE_DIM,
     RulePolicyModel,
     StateValueBaseline,
+    _audit_constraint_repaired_history_prefix,
     _audit_resampled_history_prefix,
     _frozen_behavior_action_likelihood,
     _sample_latest_discard_conditioned_world,
@@ -742,6 +743,41 @@ class TrainingTests(unittest.TestCase):
         self.assertLess(particle_audit.acceptance_rate, 0.1)
         self.assertNotIn("wall", particle_audit.payload())
         self.assertNotIn("opponent_hands", particle_audit.payload())
+
+        # This separate audit is a constructive proposal only.  It exchanges
+        # unknown physical tiles to satisfy recorded opponent discards/claims,
+        # which should remove the rejection-sampler collapse without exposing
+        # any sampled world or becoming a collection pathway.
+        repaired_audit = _audit_constraint_repaired_history_prefix(
+            snapshots[1],
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            particle_count=100,
+            rng=random.Random(955),
+        )
+        self.assertGreater(repaired_audit.acceptance_rate, 0.8)
+        self.assertGreater(repaired_audit.effective_sample_size, 0.0)
+        self.assertGreater(repaired_audit.mean_constraint_repairs or 0.0, 0.0)
+        repaired_payload = repaired_audit.payload()
+        self.assertEqual(
+            repaired_payload["proposal"], "core_public_history_constraint_repair_v0"
+        )
+        self.assertIn("not an exact", repaired_payload["warning"])
+        self.assertNotIn("wall", repaired_payload)
+        self.assertNotIn("opponent_hands", repaired_payload)
+        # Replay works on a deep clone.  Even the source-world oracle must
+        # neither need nor receive a hidden-card exchange when it is already
+        # legal, and the audit cannot mutate the retained candidate trace.
+        source_actor_hand = tuple(snapshots[1].initial_game.players[0].hand)
+        source_wall = tuple(snapshots[1].initial_game.wall)
+        source_repaired = _replay_snapshot_public_history(
+            snapshots[1],
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            allow_constraint_repairs=True,
+        )
+        self.assertTrue(source_repaired.accepted, source_repaired.rejection_reason)
+        self.assertEqual(source_repaired.constraint_repairs, 0)
+        self.assertEqual(tuple(snapshots[1].initial_game.players[0].hand), source_actor_hand)
+        self.assertEqual(tuple(snapshots[1].initial_game.wall), source_wall)
 
         trajectories, _summary = collect_counterfactual_action_value_trajectories(
             policy,
