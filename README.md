@@ -250,6 +250,39 @@ checkpoint，仍由全新牌墙上的四座轮换配对评测决定。
 按 policy 头选牌；只有 Q 的隔离实战评测胜出，才可显式使用
 `scripts/evaluate_policy.py --action-selection action_value` 测试 Q 头，绝不可凭离线 Q 指标替换网页 AI。
 
+### 已执行动作的后状态校准（诊断，不选牌）
+
+`TeacherDecision.executed_index` 记录行为策略实际执行的合法动作，和 Teacher 的
+`chosen_index` 分离。下面的训练只用该实际动作的终局净分、己方获胜和对手获胜结果；它不会把一条
+continuation 扩写成所有候选的 Q 标签，也不会改变 policy logits 或网页默认 AI。
+
+先采集“每局仅一个随机干预、随后回到冻结 run4”的按墙分组语料；`executed_probability` 是可审计目标，
+不会作为模型输入：
+
+```bash
+.venv/bin/python scripts/collect_candidate_teacher_dagger_trajectories.py \
+  --checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --seed-count 240 --seed 202608360 \
+  --uniform-exploration-probability 0.40 --intervention-max-decisions 16 \
+  --train-fraction 0.7 --validation-fraction 0.15 --device cuda \
+  --output-dir artifacts/afterstate-intervention-classic-v1-run1
+```
+
+```bash
+.venv/bin/python scripts/train_afterstate_outcomes.py \
+  --train artifacts/afterstate-intervention-classic-v1-run1/train.trajectories.jsonl \
+  --validation artifacts/afterstate-intervention-classic-v1-run1/validation.trajectories.jsonl \
+  --test artifacts/afterstate-intervention-classic-v1-run1/test.trajectories.jsonl \
+  --init-checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --require-known-propensity --only-randomized-actions \
+  --output-dir artifacts/policy-value-afterstate-intervention-classic-v1-run1 \
+  --device cuda
+```
+
+默认只接收 Teacher self-play 和 candidate-vs-Teacher DAgger 的一致后续策略，随机行为轨迹默认排除。
+检查点会标记为 `diagnostic_only_not_authorized_for_action_selection`；只有在按墙隔离的校准、行为支持度审计
+及新的 200/400 墙配对实战均通过后，才可以测试小幅 policy-prior 混合。
+
 若要探索超越 Teacher 的方向，可对 policy-value 候选做终局净分 PPO 微调。它只允许一席
 候选策略采样，三席始终冻结为 Teacher；策略仍只能从规则引擎的合法动作中选择。该命令
 输出的是研究 checkpoint，不会自动替换网页 AI：

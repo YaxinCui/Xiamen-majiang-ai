@@ -71,6 +71,14 @@ class _ScoreAwareFallbackPolicy:
         return tuple(options)[0]
 
 
+class _KnownFirstLegalPolicy(_BatchFirstLegalPolicy):
+    """Deterministic test policy that explicitly exposes its propensity."""
+
+    def action_probability(self, game, player_id, legal, action, *, is_response):
+        self.assert_action = action
+        return 1.0
+
+
 class TrainingTests(unittest.TestCase):
     def test_history_replay_prefers_available_policy_scores_over_argmax_fallback(self):
         game = XiamenMahjongGame(
@@ -270,6 +278,13 @@ class TrainingTests(unittest.TestCase):
                     for decision in trajectory.decisions
                 )
             )
+            self.assertTrue(
+                all(
+                    decision.executed_index == decision.chosen_index
+                    for trajectory in loaded
+                    for decision in trajectory.decisions
+                )
+            )
             replay = Path(directory) / "private-replay.jsonl"
             self.assertEqual(write_trajectory_replay_index(trajectories, replay), 4)
             self.assertIn('"seed"', replay.read_text(encoding="utf-8"))
@@ -370,6 +385,9 @@ class TrainingTests(unittest.TestCase):
                 all(
                     decision.seat == candidate_seat
                     and decision.chosen_action in decision.legal_actions
+                    and decision.executed_index is not None
+                    and decision.legal_actions[decision.executed_index]
+                    in decision.legal_actions
                     for decision in trajectory.decisions
                 )
             )
@@ -406,6 +424,18 @@ class TrainingTests(unittest.TestCase):
                     ),
                     1,
                 )
+
+    def test_candidate_dagger_retains_explicit_behavior_propensity(self):
+        trajectories, _summary = collect_candidate_teacher_dagger_trajectories(
+            _KnownFirstLegalPolicy(), seed_count=1, profile="core", seed=479
+        )
+        self.assertTrue(
+            all(
+                decision.executed_probability == 1.0
+                for trajectory in trajectories
+                for decision in trajectory.decisions
+            )
+        )
 
     def test_counterfactual_action_values_are_safe_and_grouped_by_wall(self):
         policy = NeuralRulePolicyModel(hidden_size=4, seed=587)

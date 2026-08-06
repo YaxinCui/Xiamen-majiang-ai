@@ -271,3 +271,68 @@ iteration 3 **−0.223 ± 0.740**，95% CI **[−1.673, +1.228]**。没有一个
 但全新 23,300,000 起的 200 墙四座轮换筛选相对 run4 为 **−1.88 ± 1.28**，95% CI **[−4.39, +0.63]**。不做
 400 墙终检、不晋升。结论不是 Q 头无法拟合 local-SIR 标签，而是这类局部 posterior 反事实排序仍未能外推为
 完整对局强度；停止继续扩大这条 local-SIR/Q 数据路线，不能将离线排序当作网页 AI 改进证据。
+
+## 2026-08-07：公开后状态 outcome 数据契约（诊断阶段）
+
+对福州麻将工程的只读调研带来一个可迁移但须重新验证的方向：其文档把成功候选描述为
+`policy prior + lookahead / rule + expected score + win probability - risk` 的**保守混合**；同时明确把单隐藏
+世界的动作反事实 Q 与原始 PPO 视为不可靠路线。福州与厦门的规则、计番和可见信息并不相同，因而没有复制
+权重、规则代码或强度结论；这里只采用其数据纪律：先把实际执行动作的长程结果记录清楚，再讨论混合选牌。
+
+为此 `TeacherDecision` 新增可选 `executed_index`。`chosen_index` 始终是 Teacher 的监督建议，
+`executed_index` 则是生成该轨迹的行为策略真正执行的合法动作；旧语料保持 `null` 并可正常读取。Teacher、随机
+探索和 DAgger collector 均已写入这一字段；JSONL 仍不含牌墙、他家暗手或随机种子。这样终局得分才只监督
+它所属的那个动作，绝不把同一条隐藏 continuation 伪装成所有合法动作的 Q 标签。
+
+首轮数据为 run4 对三名冻结 Teacher 的 120 个物理牌墙、四座轮换：480 局、5,282 个候选决策，按墙组隔离为
+3,432/919/931 个 train/validation/test 决策。约 95% 行为动作与 Teacher 建议相同（训练/验证/测试的不同动作数
+为 169/43/51），因此这不是足以支持全候选 argmax 的探索数据，而是先校验长程标签是否可学习的 on-policy
+数据。`policy-value-afterstate-outcome-classic-v1-run1` 从冻结 run4 编码器训练独立的 score、己方获胜和对手获胜
+头；它没有改动 policy logits，报告状态固定为 `diagnostic_only_not_authorized_for_action_selection`。
+
+| 独立集 | 终局净分 MAE | 零预测 MAE | 己方 / 对手胜率 Brier | 实际己方 / 预测己方胜率 | 实际对手 / 预测对手胜率 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| validation（919） | 27.25 分 | 32.09 分 | 0.154 / 0.180 | 24.7% / 25.8% | 70.4% / 74.2% |
+| test（931） | 34.78 分 | 39.66 分 | 0.172 / 0.172 | 28.4% / 27.8% | 71.6% / 72.2% |
+
+这只证明公开特征可预测**已执行动作**在固定后续策略下的软终局结果；它没有观察未执行动作的结果，不能授权
+afterstate head、Q head 或网页 agent 对全体候选直接取 argmax。下一阶段必须先以已知 propensity 的温和随机
+行为混合增加动作覆盖，并在按墙隔离的动作集上做 propensity/支持度审计；只有 score 与两类概率继续通过校准、
+且保守 policy-prior 混合在新牌墙的 200 墙筛选为正，才允许进行 400 墙终检。默认网页 AI 和当前最佳 run4
+在此之前均不变。
+
+### 单动作随机干预：使终局标签匹配目标策略后缀
+
+持续 epsilon 行为会让某个动作之后的整局策略也偏离 run4，因此不能为 run4 的动作价值提供干净标签。collector
+现改为每一局候选座位只随机选一个决策序号：在该点按 `0.4 × uniform + 0.6 × run4` 选合法动作，此前与此后均
+严格执行 run4；每条记录写入实际 `executed_probability`，而随机种子仍从训练 JSONL 剔除。由此，干预点的
+终局结果可解释为“已执行动作 + run4 后续”，而不是局部 SIR 的隐藏世界分支。
+
+`afterstate-intervention-classic-v1-run1` 使用 240 个物理牌墙四座轮换（960 局、10,745 个候选决策）、
+按墙组隔离为 7,338/1,779/1,628 个一般决策；随机干预点为 **419/95/90**，最小已知 propensity 为约 **0.025**。
+训练只取 `executed_probability < 1` 的干预点，并冻结 run4 的 encoder 和 policy head。
+
+| 检查点 | 训练／验证／测试干预点 | 独立测试终局净分 MAE | 零预测 MAE | 己方/对手 Brier | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `policy-value-afterstate-intervention-classic-v1-run1` | 419 / 95 / 90 | **32.38** 分 | 40.47 分 | 0.195 / 0.195 | 标签构造和公开预测均通过最小校准检查，但样本小、尚无未执行候选排序或实战证据；保持 diagnostic-only。 |
+
+该结果与之前的 local-SIR Q 不同：它没有把一个隐藏 continuation 共享给所有动作，并且干预后立即回到目标
+策略。不过这仍是稀疏 logged-bandit 数据，不能凭 head 对未执行动作的外推直接 argmax。下一步是扩大按墙隔离的
+单点干预覆盖、按 action kind／概率分桶审计支持度，并仅在 policy-prior 锚定的小幅混合通过新的 200 墙筛选后，
+才有资格进行 400 墙终检。
+
+### response 定向干预：补齐吃／碰／过覆盖
+
+首轮全阶段干预的 90 个测试点有 64 个弃牌，response 覆盖不足。因此 collector 增加
+`--intervention-phase response`：只在本家 response 决策中计数并选择唯一干预点，弃牌和后续 action 都保持
+冻结 run4。专项数据用另一组 240 个物理牌墙（960 局），获得 train/validation/test **437/56/116** 个干预；
+全部在 response。测试动作组成是吃 54、碰 34、过 23、胡 2、明杠 3，最小 propensity 为 0.133。
+
+`policy-value-afterstate-response-classic-v1-run1` 仍冻结 run4 policy、只训练 outcome head，且仅在
+response 干预数据上选择 epoch。测试的终局净分 MAE 为 **30.84** 分，优于零预测 **34.28** 分；己方／对手胜率
+Brier 为 **0.182 / 0.183**（测试常数基线为约 0.188）。这说明公开 afterstate 特征在吃／碰／过的目标策略后缀
+中有可学习信号。
+
+但 56 个 validation、116 个 test 干预仍不足以校准融合系数、量化候选间排序错误或支持任何 response argmax。
+它不替代此前 response-only Q 的失败结论，也不进入 200 墙实战；下一步先训练多 seed outcome ensemble、报告每个
+候选的均值/离散度和 policy-prior 偏移率，再预注册一个小幅保守混合及其独立 200 墙筛选。

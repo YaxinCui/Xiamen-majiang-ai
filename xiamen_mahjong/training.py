@@ -98,6 +98,18 @@ class TeacherDecision:
     state: dict[str, Any]
     legal_actions: tuple[GameAction, ...]
     chosen_index: int
+    # The action actually executed by the behavior policy that generated this
+    # state.  It can differ from ``chosen_index`` in DAgger/exploration data,
+    # where the latter deliberately remains the frozen Teacher label.  Keeping
+    # both is essential for any future action-conditioned outcome target: a
+    # terminal score is a valid label only for the action that was played.
+    # ``None`` keeps old, exported corpora readable; new collectors set it.
+    executed_index: int | None = None
+    # Conditional probability assigned by the behavior policy to
+    # ``executed_index``.  It is not a model feature; it makes logged
+    # exploration auditable and enables future support/propensity checks.
+    # ``None`` means the legacy behavior's probability is unknown.
+    executed_probability: float | None = None
     # Optional counterfactual rollout returns, one for every legal action.
     # They are intentionally *targets*, never model features.  A record may
     # have been evaluated with the simulator's hidden state, but the exported
@@ -132,6 +144,10 @@ class TeacherDecision:
             payload["action_value_stderrs"] = list(self.action_value_stderrs)
         if self.action_value_gap_stderrs is not None:
             payload["action_value_gap_stderrs"] = list(self.action_value_gap_stderrs)
+        if self.executed_index is not None:
+            payload["executed_index"] = self.executed_index
+        if self.executed_probability is not None:
+            payload["executed_probability"] = self.executed_probability
         if self.seed is not None:
             payload["seed"] = self.seed
         return payload
@@ -144,6 +160,26 @@ class TeacherDecision:
         chosen_index = int(payload["chosen_index"])
         if not 0 <= chosen_index < len(actions):
             raise ValueError("Teacher 轨迹的目标动作索引无效")
+        raw_executed_index = payload.get("executed_index")
+        executed_index = None
+        if raw_executed_index is not None:
+            if isinstance(raw_executed_index, bool) or not isinstance(
+                raw_executed_index, int
+            ) or not 0 <= raw_executed_index < len(actions):
+                raise ValueError("行为动作索引必须对应一项合法动作")
+            executed_index = raw_executed_index
+        raw_executed_probability = payload.get("executed_probability")
+        executed_probability = None
+        if raw_executed_probability is not None:
+            if (
+                executed_index is None
+                or isinstance(raw_executed_probability, bool)
+                or not isinstance(raw_executed_probability, (int, float))
+                or not math.isfinite(float(raw_executed_probability))
+                or not 0.0 < float(raw_executed_probability) <= 1.0
+            ):
+                raise ValueError("行为动作概率必须对应已执行动作且在 (0, 1] 内")
+            executed_probability = float(raw_executed_probability)
         raw_action_values = payload.get("action_values")
         action_values = None
         if raw_action_values is not None:
@@ -200,6 +236,8 @@ class TeacherDecision:
             state=dict(payload["state"]),
             legal_actions=actions,
             chosen_index=chosen_index,
+            executed_index=executed_index,
+            executed_probability=executed_probability,
             action_values=action_values,
             action_value_stderrs=action_value_stderrs,
             action_value_gap_stderrs=action_value_gap_stderrs,
@@ -572,21 +610,39 @@ def collect_exploration_trajectories(
                 player_id = game.current_player
                 legal = tuple(_turn_actions(game, player_id))
                 teacher_action = game.teacher.choose_turn_action(game, player_id)
+                behavior_action = legal[rng.randrange(len(legal))]
                 hand_decisions.append(
-                    _decision(game, hand_seed, player_id, legal, teacher_action)
+                    _decision(
+                        game,
+                        hand_seed,
+                        player_id,
+                        legal,
+                        teacher_action,
+                        executed=behavior_action,
+                        executed_probability=1.0 / len(legal),
+                    )
                 )
                 action_counts[teacher_action.kind] += 1
-                game._apply_turn_action(player_id, legal[rng.randrange(len(legal))])
+                game._apply_turn_action(player_id, behavior_action)
                 continue
             if game.phase == "response":
                 for player_id, options in sorted(game.response_options.items()):
                     legal = tuple(options)
                     teacher_action = game.teacher.choose_response(game, player_id, list(legal))
+                    behavior_action = legal[rng.randrange(len(legal))]
                     hand_decisions.append(
-                        _decision(game, hand_seed, player_id, legal, teacher_action)
+                        _decision(
+                            game,
+                            hand_seed,
+                            player_id,
+                            legal,
+                            teacher_action,
+                            executed=behavior_action,
+                            executed_probability=1.0 / len(legal),
+                        )
                     )
                     action_counts[teacher_action.kind] += 1
-                    game.response_choices[player_id] = legal[rng.randrange(len(legal))]
+                    game.response_choices[player_id] = behavior_action
                 game._resolve_responses()
                 continue
             raise RuntimeError(f"未知探索训练阶段：{game.phase}")
@@ -772,24 +828,40 @@ def collect_dagger_decisions(
                 player_id = game.current_player
                 legal = tuple(_turn_actions(game, player_id))
                 teacher_action = game.teacher.choose_turn_action(game, player_id)
-                decisions.append(_decision(game, hand_seed, player_id, legal, teacher_action))
-                action_counts[teacher_action.kind] += 1
                 chosen = policy.choose_turn_action(game, player_id)
                 if chosen not in legal:
                     raise RuntimeError("DAgger 策略选择了规则引擎未提供的摸牌后动作")
+                decisions.append(
+                    _decision(
+                        game,
+                        hand_seed,
+                        player_id,
+                        legal,
+                        teacher_action,
+                        executed=chosen,
+                    )
+                )
+                action_counts[teacher_action.kind] += 1
                 game._apply_turn_action(player_id, chosen)
                 continue
             if game.phase == "response":
                 for player_id, options in sorted(game.response_options.items()):
                     legal = tuple(options)
                     teacher_action = game.teacher.choose_response(game, player_id, list(legal))
-                    decisions.append(
-                        _decision(game, hand_seed, player_id, legal, teacher_action)
-                    )
-                    action_counts[teacher_action.kind] += 1
                     chosen = policy.choose_response(game, player_id, legal)
                     if chosen not in legal:
                         raise RuntimeError("DAgger 策略选择了规则引擎未提供的响应动作")
+                    decisions.append(
+                        _decision(
+                            game,
+                            hand_seed,
+                            player_id,
+                            legal,
+                            teacher_action,
+                            executed=chosen,
+                        )
+                    )
+                    action_counts[teacher_action.kind] += 1
                     game.response_choices[player_id] = chosen
                 game._resolve_responses()
                 continue
@@ -813,6 +885,7 @@ def collect_candidate_teacher_dagger_trajectories(
     seed_count: int,
     profile: str = "classic",
     seed: int = 20264804,
+    behavior_metadata: Mapping[str, Any] | None = None,
 ) -> tuple[list[TrainingTrajectory], DatasetSummary]:
     """Collect one candidate seat versus three frozen Teachers per wall.
 
@@ -840,6 +913,9 @@ def collect_candidate_teacher_dagger_trajectories(
         hand_seed = seed + seed_offset
         split_group_id = uuid4().hex
         for candidate_seat in range(rules.player_count):
+            reset_episode = getattr(policy, "reset_episode", None)
+            if callable(reset_episode):
+                reset_episode()
             game = XiamenMahjongGame(
                 seed=hand_seed,
                 rules=rules,
@@ -857,11 +933,29 @@ def collect_candidate_teacher_dagger_trajectories(
                     legal = tuple(_turn_actions(game, player_id))
                     if player_id == candidate_seat:
                         teacher_action = baseline.choose_turn_action(game, player_id)
+                        action = policy.choose_turn_action(game, player_id)
+                        if action not in legal:
+                            raise RuntimeError("候选策略选择了规则引擎未提供的摸牌后动作")
+                        action_probability = _behavior_action_probability(
+                            policy,
+                            game,
+                            player_id,
+                            legal,
+                            action,
+                            is_response=False,
+                        )
                         decisions.append(
-                            _decision(game, hand_seed, player_id, legal, teacher_action)
+                            _decision(
+                                game,
+                                hand_seed,
+                                player_id,
+                                legal,
+                                teacher_action,
+                                executed=action,
+                                executed_probability=action_probability,
+                            )
                         )
                         action_counts[teacher_action.kind] += 1
-                        action = policy.choose_turn_action(game, player_id)
                     else:
                         action = baseline.choose_turn_action(game, player_id)
                     if action not in legal:
@@ -873,13 +967,29 @@ def collect_candidate_teacher_dagger_trajectories(
                         legal = tuple(options)
                         if player_id == candidate_seat:
                             teacher_action = baseline.choose_response(game, player_id, list(legal))
+                            action = policy.choose_response(game, player_id, legal)
+                            if action not in legal:
+                                raise RuntimeError("候选策略选择了规则引擎未提供的响应动作")
+                            action_probability = _behavior_action_probability(
+                                policy,
+                                game,
+                                player_id,
+                                legal,
+                                action,
+                                is_response=True,
+                            )
                             decisions.append(
                                 _decision(
-                                    game, hand_seed, player_id, legal, teacher_action
+                                    game,
+                                    hand_seed,
+                                    player_id,
+                                    legal,
+                                    teacher_action,
+                                    executed=action,
+                                    executed_probability=action_probability,
                                 )
                             )
                             action_counts[teacher_action.kind] += 1
-                            action = policy.choose_response(game, player_id, legal)
                         else:
                             action = baseline.choose_response(game, player_id, list(legal))
                         if action not in legal:
@@ -899,6 +1009,7 @@ def collect_candidate_teacher_dagger_trajectories(
                         "collector": "candidate_vs_teacher_dagger",
                         "candidate_seat": candidate_seat,
                         "wall_rotation": candidate_seat,
+                        **dict(behavior_metadata or {}),
                     },
                 )
             )
@@ -3833,12 +3944,28 @@ def _decision(
     player_id: int,
     legal: Sequence[GameAction],
     chosen: GameAction,
+    *,
+    executed: GameAction | None = None,
+    executed_probability: float | None = None,
 ) -> TeacherDecision:
     legal_actions = tuple(legal)
     try:
         chosen_index = legal_actions.index(chosen)
     except ValueError as error:
         raise RuntimeError("Teacher 选择了规则引擎未列出的动作") from error
+    behavior_action = chosen if executed is None else executed
+    if executed is None and executed_probability is None:
+        # The frozen Teacher is deterministic, so ordinary Teacher-labelled
+        # trajectories have a known propensity without additional machinery.
+        executed_probability = 1.0
+    if executed_probability is not None and (
+        not math.isfinite(executed_probability) or not 0.0 < executed_probability <= 1.0
+    ):
+        raise ValueError("行为动作概率必须在 (0, 1] 内")
+    try:
+        executed_index = legal_actions.index(behavior_action)
+    except ValueError as error:
+        raise RuntimeError("行为策略选择了规则引擎未列出的动作") from error
     return TeacherDecision(
         profile=game.rules.profile,
         seed=seed,
@@ -3846,7 +3973,43 @@ def _decision(
         state=_perspective_state(game, player_id),
         legal_actions=legal_actions,
         chosen_index=chosen_index,
+        executed_index=executed_index,
+        executed_probability=executed_probability,
     )
+
+
+def _behavior_action_probability(
+    policy: Any,
+    game: XiamenMahjongGame,
+    player_id: int,
+    legal: Sequence[GameAction],
+    action: GameAction,
+    *,
+    is_response: bool,
+) -> float | None:
+    """Read an optional, auditable behavior propensity from a policy.
+
+    Policies without this explicit interface stay ``None`` rather than being
+    falsely treated as deterministic.  The built-in exploration wrapper uses
+    the signature below and provides the exact conditional probability.
+    """
+
+    probability_fn = getattr(policy, "action_probability", None)
+    if not callable(probability_fn):
+        return None
+    value = probability_fn(
+        game,
+        player_id,
+        tuple(legal),
+        action,
+        is_response=is_response,
+    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError("行为策略 action_probability 必须返回数值")
+    probability = float(value)
+    if not math.isfinite(probability) or not 0.0 < probability <= 1.0:
+        raise ValueError("行为策略 action_probability 必须在 (0, 1] 内")
+    return probability
 
 
 def _policy_decision(

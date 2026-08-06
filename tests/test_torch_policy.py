@@ -288,9 +288,20 @@ class TorchPolicyTests(unittest.TestCase):
         _q_logits, _q_values, action_values = network.forward_with_action_values(
             candidates, mask
         )
+        (
+            _outcome_logits,
+            _outcome_values,
+            _outcome_q,
+            afterstate_scores,
+            afterstate_win_logits,
+            afterstate_opponent_win_logits,
+        ) = network.forward_with_afterstate_outcomes(candidates, mask)
         self.assertEqual(tuple(logits.shape), (2, 3))
         self.assertEqual(tuple(values.shape), (2,))
         self.assertEqual(tuple(action_values.shape), (2, 3))
+        self.assertEqual(tuple(afterstate_scores.shape), (2, 3))
+        self.assertEqual(tuple(afterstate_win_logits.shape), (2, 3))
+        self.assertEqual(tuple(afterstate_opponent_win_logits.shape), (2, 3))
         self.assertEqual(action_values[0, 2].item(), 0.0)
         self.assertLess(logits[0, 2].item(), -1e30)
 
@@ -303,6 +314,10 @@ class TorchPolicyTests(unittest.TestCase):
             len(agent.action_value_scores(decisions[0]) or ()),
             len(decisions[0].legal_actions),
         )
+        afterstate = agent.afterstate_outcomes(decisions[0])
+        self.assertIsNotNone(afterstate)
+        assert afterstate is not None
+        self.assertEqual(len(afterstate[0]), len(decisions[0].legal_actions))
         logits, value = agent.policy_value(decisions[0])
         self.assertEqual(len(logits), len(decisions[0].legal_actions))
         self.assertIsInstance(value, float)
@@ -342,7 +357,14 @@ class TorchPolicyTests(unittest.TestCase):
         legacy_state = {
             key: value
             for key, value in network.state_dict().items()
-            if not key.startswith("action_value_head.")
+            if not key.startswith(
+                (
+                    "action_value_head.",
+                    "afterstate_score_head.",
+                    "afterstate_win_head.",
+                    "afterstate_opponent_win_head.",
+                )
+            )
         }
         with tempfile.TemporaryDirectory() as directory:
             checkpoint = Path(directory) / "legacy-policy-value.pt"

@@ -32,10 +32,11 @@ from .training import (
 )
 
 
-TORCH_POLICY_VALUE_VERSION = "xiamen-candidate-policy-value-v3"
+TORCH_POLICY_VALUE_VERSION = "xiamen-candidate-policy-value-v4"
 _SUPPORTED_TORCH_POLICY_VALUE_VERSIONS = {
     "xiamen-candidate-policy-value-v1",
     "xiamen-candidate-policy-value-v2",
+    "xiamen-candidate-policy-value-v3",
     TORCH_POLICY_VALUE_VERSION,
 }
 ARCHITECTURE_CANDIDATE_MLP = "candidate_mlp"
@@ -72,6 +73,21 @@ class CandidatePolicyValueNetwork(nn.Module):
         self.action_value_head = nn.Linear(hidden_size, 1)
         nn.init.zeros_(self.action_value_head.weight)
         nn.init.zeros_(self.action_value_head.bias)
+        # These heads are trained only on the action actually executed in an
+        # on-policy trajectory.  They are intentionally separate from the
+        # counterfactual Q head: a terminal score, a self-win probability and
+        # an opponent-win probability answer different questions and should
+        # not be collapsed into one noisy action target.
+        self.afterstate_score_head = nn.Linear(hidden_size, 1)
+        self.afterstate_win_head = nn.Linear(hidden_size, 1)
+        self.afterstate_opponent_win_head = nn.Linear(hidden_size, 1)
+        for head in (
+            self.afterstate_score_head,
+            self.afterstate_win_head,
+            self.afterstate_opponent_win_head,
+        ):
+            nn.init.zeros_(head.weight)
+            nn.init.zeros_(head.bias)
         self.value_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
@@ -97,6 +113,40 @@ class CandidatePolicyValueNetwork(nn.Module):
         pooled = (encoded * action_mask.unsqueeze(-1)).sum(dim=1) / denominator
         value = self.value_head(pooled).squeeze(-1)
         return logits, value, action_values
+
+    def forward_with_afterstate_outcomes(
+        self, candidates: Tensor, action_mask: Tensor
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Return policy/state/Q plus action-conditioned public outcomes.
+
+        The three final tensors are respectively normalized terminal score,
+        own-win logit and opponent-win logit.  They stay separate from normal
+        policy inference until independent calibration and paired-game gates
+        authorize a conservative hybrid selector.
+        """
+
+        encoded = self.candidate_encoder(candidates)
+        logits = self.policy_head(encoded).squeeze(-1)
+        logits = logits.masked_fill(~action_mask, torch.finfo(logits.dtype).min)
+        action_values = self.action_value_head(encoded).squeeze(-1)
+        action_values = action_values.masked_fill(~action_mask, 0.0)
+        afterstate_score = self.afterstate_score_head(encoded).squeeze(-1)
+        afterstate_win = self.afterstate_win_head(encoded).squeeze(-1)
+        afterstate_opponent_win = self.afterstate_opponent_win_head(encoded).squeeze(-1)
+        afterstate_score = afterstate_score.masked_fill(~action_mask, 0.0)
+        afterstate_win = afterstate_win.masked_fill(~action_mask, 0.0)
+        afterstate_opponent_win = afterstate_opponent_win.masked_fill(~action_mask, 0.0)
+        denominator = action_mask.sum(dim=1, keepdim=True).clamp_min(1)
+        pooled = (encoded * action_mask.unsqueeze(-1)).sum(dim=1) / denominator
+        value = self.value_head(pooled).squeeze(-1)
+        return (
+            logits,
+            value,
+            action_values,
+            afterstate_score,
+            afterstate_win,
+            afterstate_opponent_win,
+        )
 
     def forward(self, candidates: Tensor, action_mask: Tensor) -> tuple[Tensor, Tensor]:
         """Return masked policy logits and a value for each decision batch."""
@@ -538,6 +588,47 @@ class TorchPolicyValueAgent:
             return None
         return [float(item) for item in action_values[0].detach().cpu()]
 
+    def afterstate_outcomes(
+        self, decision: TeacherDecision
+    ) -> tuple[list[float], list[float], list[float]] | None:
+        """Return public action-conditioned score and win-risk estimates.
+
+        The return is ``(score, own_win_probability, opponent_win_probability)``.
+        It is diagnostic-only: callers must not silently substitute it for
+        policy logits.  Legacy/sequence checkpoints report ``None`` because
+        they have no separately calibrated afterstate heads.
+        """
+
+        if not isinstance(self.network, CandidatePolicyValueNetwork):
+            return None
+        vectors = [
+            _dense_action_features(
+                decision.state, action, feature_version=self.feature_version
+            )
+            for action in decision.legal_actions
+        ]
+        if not vectors:
+            raise ValueError("策略没有可用的合法动作")
+        candidates = torch.tensor([vectors], dtype=torch.float32, device=self.device)
+        mask = torch.ones((1, len(vectors)), dtype=torch.bool, device=self.device)
+        with torch.no_grad():
+            (
+                _logits,
+                _value,
+                _action_values,
+                score,
+                win_logit,
+                opponent_win_logit,
+            ) = self.network.forward_with_afterstate_outcomes(candidates, mask)
+        return (
+            [float(item) for item in score[0].detach().cpu()],
+            [float(item) for item in torch.sigmoid(win_logit[0]).detach().cpu()],
+            [
+                float(item)
+                for item in torch.sigmoid(opponent_win_logit[0]).detach().cpu()
+            ],
+        )
+
     def policy_values_batch(
         self, decisions: Sequence[TeacherDecision]
     ) -> list[tuple[list[float], float]]:
@@ -751,16 +842,31 @@ class TorchPolicyValueAgent:
             device=device,
         )
         state_dict = payload["state_dict"]
-        if (
-            architecture == ARCHITECTURE_CANDIDATE_MLP
-            and payload.get("version")
-            in {"xiamen-candidate-policy-value-v1", "xiamen-candidate-policy-value-v2"}
-        ):
+        if architecture == ARCHITECTURE_CANDIDATE_MLP:
             missing, unexpected = agent.network.load_state_dict(state_dict, strict=False)
-            allowed_missing = {
-                "action_value_head.weight",
-                "action_value_head.bias",
-            }
+            version = str(payload.get("version"))
+            allowed_missing: set[str] = set()
+            if version in {
+                "xiamen-candidate-policy-value-v1",
+                "xiamen-candidate-policy-value-v2",
+            }:
+                allowed_missing.update(
+                    {
+                        "action_value_head.weight",
+                        "action_value_head.bias",
+                    }
+                )
+            if version != TORCH_POLICY_VALUE_VERSION:
+                allowed_missing.update(
+                    {
+                        "afterstate_score_head.weight",
+                        "afterstate_score_head.bias",
+                        "afterstate_win_head.weight",
+                        "afterstate_win_head.bias",
+                        "afterstate_opponent_win_head.weight",
+                        "afterstate_opponent_win_head.bias",
+                    }
+                )
             if set(missing) != allowed_missing or unexpected:
                 raise ValueError("旧 policy-value checkpoint 的参数不完整或不匹配")
         else:
