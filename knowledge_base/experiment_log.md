@@ -242,3 +242,16 @@ iteration 3 **−0.223 ± 0.740**，95% CI **[−1.673, +1.228]**。没有一个
 均方为 **0.513 / 0.263**，critic 为 **0.591 / 0.350**，残差均方变化为 **−33.0%**（负数表示劣化）。这直接
 否定“当前 critic 已降低 PPO 方差”的假设：停止该配置的进一步 self-play，不生成或晋升任何模型。新增
 `scripts/measure_ppo_baseline_variance.py` 固化该检验，且仅写入聚合残差；critic、墙与暗手永不落盘。
+
+## 2026-08-07：公开 Q 头校准门槛
+
+为验证是否值得把动作价值接入 PPO，先冻结 policy 偏好（`--action-value-weight 0`）并只训练可部署的
+`action_value_head`。过程中发现并修复训练器耦合：此前 Q 回归错误地复用了 policy source weight，因而
+`--action-value-weight 0` 也把 Q 标签全置零；现新增独立的 `--action-value-regression-sample-weight`，并有
+单测保证 Q-only 校准确实更新 Q 头而不依赖 policy 偏好权重。
+
+修复后的 `policy-value-public-q-calibration-v1-run2` 在同一 188 个、按物理牌墙隔离的 local-belief paired
+数据上选择 epoch 31。相对零初始化 Q 头，隔离测试的 Q Huber/MAE 从 **0.122 / 30.85 分**降至
+**0.053 / 22.76 分**；但最关键的动作 argmax 排序从 **55.2%** 降至 **48.3%**（仅 29 个状态）。这说明小数据
+足以拟合平均数值，却不足以可靠决定吃/碰/过；不接入 PPO、VRPO 或 Q 选牌，不做实战评测，也不晋升。后续
+动作价值路线必须先大幅提高按墙隔离的有效状态数与排序精度，而不能只降低 MAE。

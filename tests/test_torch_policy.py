@@ -177,6 +177,18 @@ class CheckpointSelectionTests(unittest.TestCase):
         self.assertEqual(valid.tolist(), [[True, True, False]])
         self.assertAlmostEqual(float(aligned_error[0, 0]), 0.0)
 
+    def test_q_regression_samples_are_not_disabled_with_policy_preference(self):
+        from scripts.train_policy_value import action_value_regression_sample_weights
+
+        weights = action_value_regression_sample_weights(
+            torch.tensor([True, False, True]), sample_weight=0.75
+        )
+        self.assertEqual(weights.tolist(), [0.75, 0.0, 0.75])
+        with self.assertRaises(ValueError):
+            action_value_regression_sample_weights(
+                torch.tensor([True]), sample_weight=-0.1
+            )
+
     def test_checkpoint_selection_can_target_a_held_out_action_value_source(self):
         from scripts.train_policy_value import (
             better_validation_checkpoint,

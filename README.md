@@ -231,6 +231,10 @@ Teacher / DAgger 的标签只有“Teacher 会选哪一个动作”，因此上�
 学习相对偏好，后者保留“好多少”的幅度；二者不能互相替代。Q 头目前只在 `candidate_mlp`
 结构中可用，旧 v1/v2 checkpoint 加载时会零初始化该头，原策略输出保持不变。
 
+`--action-value-weight` 只控制反事实标签是否改变 policy 偏好；`--action-value-regression-weight` 与
+`--action-value-regression-sample-weight` 则独立控制 Q 回归。因此可以将前者设为 `0`，先在冻结的
+按牌墙切分数据上校准和验证**公开信息** Q 头，而不会把尚未证实的 Q 排序写入 policy。
+
 无论模拟结果多大，所有动作同分的样本没有排序信号，默认以
 `--action-value-margin-scale 16` 将其权重压到零；若采集时有多次 rollout，还可用
 `--action-value-stderr-scale` 下调高方差目标。若不同合法动作的标准误差异很大，

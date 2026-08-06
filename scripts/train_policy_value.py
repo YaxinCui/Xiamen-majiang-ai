@@ -128,6 +128,15 @@ def parse_args() -> argparse.Namespace:
         help="直接动作 Q 回归损失的权重；0 时仅使用软动作偏好",
     )
     parser.add_argument(
+        "--action-value-regression-sample-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "有动作 Q 标签的样本在直接 Q 回归中的独立权重；"
+            "不受 --action-value-weight 影响，便于只校准公开 Q 头"
+        ),
+    )
+    parser.add_argument(
         "--action-value-target-scale",
         type=float,
         default=80.0,
@@ -486,6 +495,25 @@ def action_value_regression_loss(
     return per_decision_loss, absolute_error, valid
 
 
+def action_value_regression_sample_weights(
+    action_value_mask: torch.Tensor,
+    *,
+    sample_weight: float,
+) -> torch.Tensor:
+    """Weight Q labels independently from the policy-preference source weight.
+
+    ``--action-value-weight`` controls whether a rollout changes the policy
+    target. A Q-only calibration deliberately sets that to zero, so reusing
+    policy weights here silently disabled the Q regression as well. Keeping
+    the controls independent lets a public action-value head be tested before
+    it is allowed to influence PPO or action choice.
+    """
+
+    if sample_weight < 0:
+        raise ValueError("动作 Q 回归样本权重不能为负数")
+    return action_value_mask.to(dtype=torch.float32) * sample_weight
+
+
 def forward_network(
     network: (
         CandidatePolicyValueNetwork
@@ -785,6 +813,7 @@ def main() -> None:
         or args.synthetic_weight <= 0
         or args.action_value_weight < 0
         or args.action_value_regression_weight < 0
+        or args.action_value_regression_sample_weight < 0
         or args.action_value_target_scale <= 0
         or args.action_value_temperature <= 0
         or args.action_value_stderr_scale < 0
@@ -973,8 +1002,9 @@ def main() -> None:
                         stderr_scale=args.action_value_stderr_scale,
                     )
                 )
-                action_value_weights = policy_weights * action_value_mask.to(
-                    policy_weights.dtype
+                action_value_weights = action_value_regression_sample_weights(
+                    action_value_mask,
+                    sample_weight=args.action_value_regression_sample_weight,
                 )
                 action_value_loss = (
                     action_value_loss_values * action_value_weights
@@ -1071,6 +1101,7 @@ def main() -> None:
         "value_scale": args.value_scale,
         "value_weight": args.value_weight,
         "action_value_regression_weight": args.action_value_regression_weight,
+        "action_value_regression_sample_weight": args.action_value_regression_sample_weight,
         "action_value_target_scale": args.action_value_target_scale,
         "action_value_temperature": args.action_value_temperature,
         "action_value_stderr_scale": args.action_value_stderr_scale,

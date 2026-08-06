@@ -142,3 +142,21 @@ value baseline 的残差 std/MSE 为 0.513/0.263，特权 critic 为 0.591/0.350
 “方差稍降但强度未升”的情况，而是 critic 本身尚未比公开 value 更准确；暂停该配置的 PPO 扩容。保留
 `measure_ppo_baseline_variance.py` 作为后续任何 oracle baseline 的硬性门槛：先通过固定策略 A/B，才允许进入
 强度训练与未见牌墙筛选。
+
+## 2026-08-07：VRPO / 动作价值路线的边界
+
+[VRPO](https://arxiv.org/abs/2605.19235) 指出不完全信息自博弈中的方差不只来自 value baseline，还来自后续
+随机动作；其 Q-boosting 使用 centralized action-value critic 和 Expected SARSA(λ) 对动作分布取期望。这一
+结论与本项目反事实 rollout 的 common-random-number / paired-gap 观察相符，但**不能直接照搬**：论文中的
+centralized Q 可见训练全局状态，而厦门网页 actor 只能使用本家与公开信息；刚完成的 oracle critic A/B 也已
+证明当前小数据实现甚至不如公开 value baseline。
+
+因此下一步不是宣称实现 VRPO，而是最小可证伪前置门槛：在既有、按物理牌墙隔离的 paired action-value 数据上
+单独训练项目已有的**公开信息** `action_value_head`，只看未见墙的 Q MAE / argmax 排序是否优于零初始化 head。
+若这个公开 Q 连离线排序都不能稳定改善，就不应把它接入 PPO 或尝试 Expected-SARSA；若通过，才设计 target
+network、冻结行为策略和 actor-on-policy 校准的独立实验。
+
+门槛实验已执行且未通过。实现时先发现 `action-value-weight=0` 会意外把 Q regression 的样本权重同时置零，
+现已拆成独立的 regression sample weight 并加单测。修复后公开 Q 的隔离 MAE 的确从 30.85 分降到 22.76 分，
+但 29 个留出状态的 Q argmax 从 55.2% 下降到 48.3%。数值回归改善却没有可靠的决策排序，不能作为 Q-boosting
+或 Expected-SARSA 的输入；当前瓶颈是每个公共状态的有效、按墙隔离的动作价值数据量，而非再换一个 RL loss。
