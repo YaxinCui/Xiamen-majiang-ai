@@ -168,6 +168,40 @@ class TrainingTests(unittest.TestCase):
         self.assertNotIn("wall", payload)
         self.assertNotIn("opponent_hands", payload)
 
+    def test_resampled_history_rejects_unpositioned_opponent_flower_events(self):
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=2,
+            rules=XiamenRules.from_profile("core"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        snapshots = _run_candidate_base_hand(
+            game,
+            candidate_seat=0,
+            candidate_policy=teacher,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+        )
+        snapshot = next(
+            item
+            for item in snapshots
+            if any(
+                len(item.game.players[seat].flowers)
+                != len(item.initial_game.players[seat].flowers)
+                for seat in range(1, 4)
+            )
+        )
+        proposal = _sample_replay_setup_for_actor(snapshot, rng=random.Random(929))
+        self.assertIsNotNone(proposal)
+        replay = _replay_snapshot_public_history(
+            snapshot,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            initial_game=proposal,
+            condition_actor_draws=True,
+        )
+        self.assertFalse(replay.accepted)
+        self.assertEqual(replay.rejection_reason, "opponent_flower_history_unsupported")
+
     def test_history_replay_prefers_available_policy_scores_over_argmax_fallback(self):
         game = XiamenMahjongGame(
             seed=929,

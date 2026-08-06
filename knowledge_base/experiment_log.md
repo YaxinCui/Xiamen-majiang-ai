@@ -451,6 +451,11 @@ collector/Q 数据门槛；其作用是将下一步明确限定为“可计算�
 这只是一个极窄 setup 事件的**构造正确性**验证：后续摸牌、弃牌、暗杠与多个事件尚未有 density，故不改变 run4、
 不接入 collector/Q/网页，也不能解释为完整 history posterior 或模型强度提升。
 
+继续扩展到 draw→discard 前发现：对手补花的数量虽对玩家可见，但旧 `public_actions` 还未记录其发生位置。为避免
+把遗漏公开观测的 hidden world 当成 posterior，resampled core history replay 现在会拒绝任何含后续对手补花的
+snapshot，理由为 `opponent_flower_history_unsupported`；source-world replay oracle 不受影响。此拒绝有独立回归测试。
+因此下一个 proposal 不是直接重抽墙，而是先把补花写为公开、可重放、可计算 density 的 transition。
+
 ## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
 
 “胜过人类”不能由 Teacher 配对分数替代。网页现在支持显式 `--human-log local_human_data/*.jsonl`：只在

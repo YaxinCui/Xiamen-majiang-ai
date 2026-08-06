@@ -105,6 +105,11 @@ ESS 为 **190.04/256 = 0.742**。这只说明该**一个**可枚举的 setup 约
 弃牌选择、暗杠或多个历史事件，不是 full-history posterior，未接入 collector、Q 标签或网页。下一步须在同一
 exact-density 原则下加入一个“对手摸牌后弃牌”的 transition，并先以小牌墙精确后验校准。
 
+在设计该 transition 前还发现一个公开观测缺口：对手补花后的花数量对玩家可见，但旧 `public_actions` 没有把
+补花定位到逐事件历史中。resampled replay 现对任何包含**后续对手补花**的 core snapshot 明确返回
+`opponent_flower_history_unsupported`，而不是把它误当作可条件化世界；源局 replay oracle 不受此限制。补花
+public transition 与其 density 是 draw→discard proposal 的前置工作，未完成前相关前缀保持拒绝。
+
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 
 作为完整序列 proposal 前的受控中间步骤，新增 `latest_normal_draw_discard_sir_v1`。它只作用于

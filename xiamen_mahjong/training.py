@@ -2201,6 +2201,26 @@ def _replay_snapshot_public_history(
         return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "setup_prefix")
     if game.rules.profile != "core":
         return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "profile")
+    if condition_actor_draws and any(
+        len(snapshot.game.players[seat].flowers)
+        != len(snapshot.initial_game.players[seat].flowers)
+        for seat in range(game.rules.player_count)
+        if seat != trace.actor_seat
+    ):
+        # Opponent flower counts are publicly visible, but the historic
+        # ``public_actions`` format does not yet position their replacement
+        # draws relative to other events. A resampled hidden-world replay
+        # therefore cannot honestly condition on a later opponent flower.
+        # Reject this prefix until an explicit public flower transition and
+        # density are implemented; source-world replay remains available as a
+        # rules oracle and does not take this resampling path.
+        return _HistoryReplayResult(
+            False,
+            0.0,
+            float("-inf"),
+            cursor,
+            "opponent_flower_history_unsupported",
+        )
 
     # The opening dealer draw already exists in ``initial_game``.  Later
     # candidate draws must agree with the private trace even when no public
