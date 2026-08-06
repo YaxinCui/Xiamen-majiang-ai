@@ -18,6 +18,7 @@ import json
 import math
 from pathlib import Path
 import random
+import subprocess
 import sys
 from typing import Any, Sequence
 
@@ -260,6 +261,23 @@ def freeze_policy_snapshot(policy: TorchPolicyValueAgent) -> TorchPolicyValueAge
     snapshot.network.load_state_dict(copy.deepcopy(policy.network.state_dict()))
     snapshot.network.eval()
     return snapshot
+
+
+def source_revision() -> str | None:
+    """Return the checked-out source revision without making training depend on Git."""
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    revision = result.stdout.strip()
+    return revision or None
 
 
 def _sample_opponent(
@@ -1034,6 +1052,7 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     report: dict[str, Any] = {
         "algorithm": "legal_action_ppo_terminal_score_v1",
+        "source_revision": source_revision(),
         "profile": args.profile,
         "checkpoint_source": str(args.checkpoint),
         "device": args.device,
