@@ -1,0 +1,54 @@
+{
+  "experiment": "one_ply_lookahead_teacher_public_information_pilot",
+  "status": "rejected",
+  "profile": "classic",
+  "first_seed": 202608401,
+  "seed_count": 20,
+  "games": 80,
+  "opponent_labels": [
+    "heuristic_teacher_0",
+    "heuristic_teacher_1",
+    "heuristic_teacher_2"
+  ],
+  "candidate": {
+    "kind": "one_ply_lookahead_teacher",
+    "candidate_wins": 2,
+    "draws": 1,
+    "candidate_score_total": -1712,
+    "candidate_score_mean": -21.4,
+    "candidate_score_stderr": 2.540487934899204,
+    "candidate_win_rate": 0.025,
+    "candidate_scores": [
+      -38, -36, -28, -39, -14, -20, -22, -20, -17, -36, -20, -17, -30, -22,
+      -24, -26, -22, -26, -42, -20, -26, -26, -24, -18, -46, -28, -20, -10,
+      -20, -26, -19, -20, -20, -17, -17, 51, -8, 0, -18, -40, -40, -38, -22,
+      -22, -30, -38, -38, -20, -36, -10, -9, -18, -20, -30, -24, -42, -24,
+      -19, -24, -22, -24, -40, -22, -22, -38, -12, -40, -13, 114, -22, -18,
+      -10, -24, -28, -34, -11, -18, -18, -9, -26
+    ]
+  },
+  "reference": {
+    "kind": "heuristic_teacher",
+    "candidate_wins": 20,
+    "draws": 0,
+    "candidate_score_total": 0,
+    "candidate_score_mean": 0.0,
+    "candidate_score_stderr": 0.0,
+    "candidate_win_rate": 0.25,
+    "candidate_scores": [
+      117, -39, -39, -39, -15, -15, -15, 45, -28, -28, -28, 84, 78, -26, -26,
+      -26, -26, -26, 78, -26, -8, 24, -8, -8, -20, -20, -20, 60, -20, -20, 60,
+      -20, -22, 66, -22, -22, 36, -12, -12, -12, 66, -22, -22, -22, -30, 90,
+      -30, -30, -18, -18, 54, -18, -12, 36, -12, -12, -22, 66, -22, -22, -24,
+      72, -24, -24, -12, -12, 36, -12, -22, -22, 66, -22, -32, -32, -32, 96,
+      39, -13, -13, -13
+    ]
+  },
+  "paired_score_comparison": {
+    "paired_seed_score_delta_mean": -21.4,
+    "paired_seed_score_delta_stderr": 2.540487934899204,
+    "paired_seed_score_delta_95pct_low": -26.37935635240244,
+    "paired_seed_score_delta_95pct_high": -16.42064364759756
+  },
+  "decision": "20-wall pilot already has a strongly negative paired upper bound. Do not tune, expand, use for training labels, or expose in the browser."
+}

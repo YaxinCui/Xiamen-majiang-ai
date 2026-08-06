@@ -399,6 +399,16 @@ test 墙组报告一次；test 的平均值、MAE 或准确率都不能绕过两
   --profile classic --hands 200 --seed 24000000 --device cuda
 ```
 
+规则候选也必须走同一评测接口。`--one-ply-lookahead-teacher-candidate` 是一个只使用本家手牌和公开
+河/副露/翻金的一步前瞻筛选器，**不是**网页 AI；其首个独立 20 墙筛选已显著劣于 Teacher，保留该开关仅为
+复核负结果：
+
+```bash
+.venv/bin/python scripts/evaluate_policy.py \
+  --one-ply-lookahead-teacher-candidate \
+  --profile classic --hands 20 --seed 202608401
+```
+
 如需降低训练期终局净分的高方差，可加 `--privileged-critic`。它的 critic 仅在该次 PPO 进程内读取
 完整模拟状态作为 advantage baseline；`TeacherDecision`、网页 actor、JSONL、报告和保存的
 `policy-value-ppo-iteration-*.pt` 都不会携带其特征或权重。该路径默认关闭，且仍必须通过未见牌墙评测：

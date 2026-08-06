@@ -1,7 +1,12 @@
+import copy
 import unittest
 
 from xiamen_mahjong.game import XiamenMahjongGame
-from xiamen_mahjong.agents import AvailabilityTeacherAgent, GameAction
+from xiamen_mahjong.agents import (
+    AvailabilityTeacherAgent,
+    GameAction,
+    OnePlyLookaheadTeacherAgent,
+)
 from xiamen_mahjong.rules import XiamenRules
 from xiamen_mahjong.tiles import BASE_TILE_COUNT, WHITE_DRAGON, gold_indicator_index
 
@@ -291,6 +296,39 @@ class GameTests(unittest.TestCase):
     def test_availability_teacher_rejects_negative_wait_value(self):
         with self.assertRaises(ValueError):
             AvailabilityTeacherAgent(wait_copy_value=-0.1)
+
+    def test_one_ply_teacher_uses_only_public_information(self):
+        game = XiamenMahjongGame(
+            seed=202608391,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        altered = copy.deepcopy(game)
+        opponent = next(player for player in altered.players if player.seat != player_id)
+        wall_index = next(
+            index for index, tile in enumerate(altered.wall) if tile != opponent.hand[0]
+        )
+        opponent.hand[0], altered.wall[wall_index] = (
+            altered.wall[wall_index],
+            opponent.hand[0],
+        )
+        opponent.hand.sort()
+
+        agent = OnePlyLookaheadTeacherAgent()
+        original = agent.choose_turn_action(game, player_id)
+        changed_hidden_state = agent.choose_turn_action(altered, player_id)
+        ranked = agent.explain_discard(game, player_id)
+
+        self.assertEqual(original, changed_hidden_state)
+        self.assertTrue(ranked)
+        self.assertTrue(all("next_draw_score" in item for item in ranked))
+        self.assertTrue(
+            all("immediate_shape_score" in item for item in ranked)
+        )
+        if original.kind == "discard":
+            self.assertIn(original.tile, game.players[player_id].hand)
 
     def test_public_state_marks_the_current_drawn_tile(self):
         game = XiamenMahjongGame(seed=71, rules=XiamenRules.classic(), dealer=0)

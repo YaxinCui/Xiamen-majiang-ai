@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from xiamen_mahjong.agents import HeuristicTeacherAgent
+from xiamen_mahjong.agents import HeuristicTeacherAgent, OnePlyLookaheadTeacherAgent
 from xiamen_mahjong.evaluation import (
     evaluate_against_opponent_roster,
     paired_score_comparison,
@@ -49,6 +49,11 @@ def parse_args() -> argparse.Namespace:
         "--teacher-candidate",
         action="store_true",
         help="以规则 Teacher 作为候选，建立与 checkpoint 相同对手阵容下的联赛基线",
+    )
+    candidate_group.add_argument(
+        "--one-ply-lookahead-teacher-candidate",
+        action="store_true",
+        help="以公开信息一步前瞻规则候选进行筛选；仅用于实验，绝不自动晋升网页 AI",
     )
     parser.add_argument("--profile", choices=("classic", "core"), default="classic")
     parser.add_argument(
@@ -143,10 +148,15 @@ def load_opponent_roster(args: argparse.Namespace):
 
 def main() -> None:
     args = parse_args()
-    if args.teacher_candidate:
+    rule_candidate = args.teacher_candidate or args.one_ply_lookahead_teacher_candidate
+    if rule_candidate:
         if args.action_selection is not None:
-            raise ValueError("teacher-candidate 不支持 action-selection")
-        policy = HeuristicTeacherAgent()
+            raise ValueError("规则候选不支持 action-selection")
+        policy = (
+            OnePlyLookaheadTeacherAgent()
+            if args.one_ply_lookahead_teacher_candidate
+            else HeuristicTeacherAgent()
+        )
     else:
         policy = load_policy(
             args.checkpoint,
@@ -164,20 +174,24 @@ def main() -> None:
     )
     payload = result.payload(include_scores=args.include_scores)
     payload["candidate_kind"] = (
-        "heuristic_teacher" if args.teacher_candidate else "checkpoint"
+        "one_ply_lookahead_teacher"
+        if args.one_ply_lookahead_teacher_candidate
+        else "heuristic_teacher"
+        if args.teacher_candidate
+        else "checkpoint"
     )
-    payload["checkpoint"] = None if args.teacher_candidate else str(args.checkpoint)
+    payload["checkpoint"] = None if rule_candidate else str(args.checkpoint)
     payload["checkpoint_sha256"] = (
-        None if args.teacher_candidate else checkpoint_sha256(args.checkpoint)
+        None if rule_candidate else checkpoint_sha256(args.checkpoint)
     )
     payload["inference_device"] = (
         args.device
-        if not args.teacher_candidate and args.checkpoint.suffix in {".pt", ".pth"}
+        if not rule_candidate and args.checkpoint.suffix in {".pt", ".pth"}
         else None
     )
     payload["action_selection"] = (
         getattr(policy, "action_selection", None)
-        if not args.teacher_candidate and args.checkpoint.suffix in {".pt", ".pth"}
+        if not rule_candidate and args.checkpoint.suffix in {".pt", ".pth"}
         else None
     )
     payload["opponent_roster"] = opponent_identities

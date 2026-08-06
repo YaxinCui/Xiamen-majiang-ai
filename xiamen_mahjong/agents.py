@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 from .hand import hand_quality, is_winning_hand, wait_tiles
+from .scoring import classic_score
 from .tiles import BASE_TILE_COUNT, is_base_tile, tile_name
 
 
@@ -246,6 +248,184 @@ class AvailabilityTeacherAgent(HeuristicTeacherAgent):
                     "score": round(score, 3),
                     "waits": [tile_name(wait) for wait in waits],
                     "wait_availability": availability,
+                }
+            )
+        return sorted(candidates, key=lambda item: (-float(item["score"]), int(item["tile"])))
+
+
+class OnePlyLookaheadTeacherAgent(HeuristicTeacherAgent):
+    """Experimental public-information one-ply discard Teacher.
+
+    Unlike :class:`HeuristicTeacherAgent`, which ranks the hand immediately
+    after a discard, this candidate enumerates the actor's *next* possible
+    playable draw.  Each face is weighted by the number of copies not already
+    visible in the actor's hand, rivers, exposed melds, or gold indicator.
+    It then chooses the best legal follow-up discard by cheap hand-shape
+    quality, with an exact engine-compatible self-draw settlement value when
+    the next draw completes the hand.
+
+    This is intentionally a small, deterministic screening candidate.  It
+    never reads ``game.wall`` or an opponent's ``hand``; it is not promoted to
+    the browser or training data unless it beats the frozen Teacher on a
+    prespecified independent evaluation.
+    """
+
+    def _public_visible_counts(self, game, player_id: int) -> Counter[int]:
+        """Count base-tile faces known unavailable from public information.
+
+        The actor's own concealed hand is known to that actor.  For every
+        other player we deliberately inspect only exposed rivers and melds,
+        never their concealed hand, flowers' replacement draws, or the wall.
+        """
+
+        visible = Counter(
+            tile for tile in game.players[player_id].hand if is_base_tile(tile)
+        )
+        for player in game.players:
+            visible.update(tile for tile in player.discards if is_base_tile(tile))
+            visible.update(
+                tile
+                for meld in player.melds
+                for tile in meld["tiles"]
+                if is_base_tile(tile)
+            )
+        if game.gold_indicator is not None and is_base_tile(game.gold_indicator):
+            visible[game.gold_indicator] += 1
+        return visible
+
+    def _shape_score(self, game, player_id: int, hand: list[int], discarded: int) -> float:
+        """Return the cheap post-discard shape value used at the leaf."""
+
+        player = game.players[player_id]
+        quality = hand_quality(
+            hand,
+            game.gold_tile,
+            meld_count=len(player.melds),
+            melds_required=game.rules.melds_required,
+            wildcard_tiles=game.wildcard_tiles,
+            proxy_tile=game.gold_proxy_tile,
+            proxy_as=game.gold_tile,
+        )
+        return quality - (7.0 if discarded == game.gold_tile else 0.0)
+
+    def _allowed_discards(self, game, player_id: int, hand: list[int]) -> list[int]:
+        """Apply the public honor-follow restriction to a hypothetical hand."""
+
+        if not game.rules.enable_forced_honor_follow:
+            return sorted(set(hand))
+        appeared_honors = {
+            tile
+            for player in game.players
+            for tile in player.discards
+            if 27 <= tile < BASE_TILE_COUNT
+            and tile not in {game.gold_tile, game.gold_proxy_tile}
+        }
+        forced = sorted(
+            tile
+            for tile in set(hand)
+            if 27 <= tile < BASE_TILE_COUNT
+            and hand.count(tile) == 1
+            and tile in appeared_honors
+        )
+        return forced or sorted(set(hand))
+
+    def _is_winning_hand(self, game, player_id: int, hand: list[int]) -> bool:
+        player = game.players[player_id]
+        return is_winning_hand(
+            hand,
+            game.gold_tile,
+            meld_count=len(player.melds),
+            melds_required=game.rules.melds_required,
+            allow_seven_pairs=game.rules.allow_seven_pairs,
+            wildcard_tiles=game.wildcard_tiles,
+            proxy_tile=game.gold_proxy_tile,
+            proxy_as=game.gold_tile,
+        )
+
+    def _self_draw_value(self, game, player_id: int, hand: list[int]) -> float:
+        """Use the same settlement scale as the engine for an immediate win."""
+
+        player = game.players[player_id]
+        if game.rules.enable_complex_water_scoring:
+            winner = SimpleNamespace(
+                hand=hand,
+                flowers=player.flowers,
+                melds=player.melds,
+            )
+            return float(
+                classic_score(
+                    winner,
+                    is_dealer=player_id == game.dealer,
+                    wildcard_tiles=game.wildcard_tiles,
+                    gold_tile=game.gold_tile,
+                    win_type=game._self_draw_win_type(player_id),
+                    rules=game.rules,
+                    dealer_streak=game.dealer_streak,
+                    proxy_tile=game.gold_proxy_tile,
+                    proxy_as=game.gold_tile,
+                ).total
+            )
+        multiplier = 1 + len(player.flowers) + hand.count(game.gold_tile)
+        return float(game.rules.base_score * multiplier * 3)
+
+    def _next_draw_value(
+        self,
+        game,
+        player_id: int,
+        hand_after_discard: list[int],
+        visible: Counter[int],
+    ) -> float:
+        weighted_total = 0.0
+        remaining_total = 0
+        for drawn_tile in range(BASE_TILE_COUNT):
+            remaining = max(0, 4 - visible[drawn_tile])
+            if not remaining:
+                continue
+            next_hand = [*hand_after_discard, drawn_tile]
+            if self._is_winning_hand(game, player_id, next_hand):
+                value = self._self_draw_value(game, player_id, next_hand)
+            else:
+                value = max(
+                    self._shape_score(
+                        game,
+                        player_id,
+                        self._remove_one(next_hand, discarded),
+                        discarded,
+                    )
+                    for discarded in self._allowed_discards(game, player_id, next_hand)
+                )
+            weighted_total += remaining * value
+            remaining_total += remaining
+        if not remaining_total:
+            raise RuntimeError("公开剩余张数为空，无法进行一步前瞻")
+        return weighted_total / remaining_total
+
+    @staticmethod
+    def _remove_one(hand: list[int], tile: int) -> list[int]:
+        result = list(hand)
+        result.remove(tile)
+        return result
+
+    def explain_discard(self, game, player_id: int) -> list[dict[str, object]]:
+        player = game.players[player_id]
+        visible = self._public_visible_counts(game, player_id)
+        allowed = set(self._allowed_discards(game, player_id, player.hand))
+        candidates = []
+        for tile in sorted(set(player.hand)):
+            if tile not in allowed:
+                continue
+            candidate = self._remove_one(player.hand, tile)
+            immediate_shape = self._shape_score(game, player_id, candidate, tile)
+            next_draw_score = self._next_draw_value(
+                game, player_id, candidate, visible
+            )
+            candidates.append(
+                {
+                    "tile": tile,
+                    "name": tile_name(tile),
+                    "score": round(next_draw_score, 3),
+                    "immediate_shape_score": round(immediate_shape, 3),
+                    "next_draw_score": round(next_draw_score, 3),
                 }
             )
         return sorted(candidates, key=lambda item: (-float(item["score"]), int(item["tile"])))
