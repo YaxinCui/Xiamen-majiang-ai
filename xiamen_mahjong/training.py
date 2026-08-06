@@ -2530,6 +2530,7 @@ def collect_counterfactual_action_value_trajectories(
     samples_per_hand: int = 1,
     rollouts_per_action: int = 1,
     response_sample_probability: float = 0.35,
+    decision_phase: str = "all",
     opponents: Sequence[tuple[str, Any]] = (),
     teacher_opponent_probability: float = 1.0,
     belief_resample: bool = False,
@@ -2589,6 +2590,8 @@ def collect_counterfactual_action_value_trajectories(
         raise ValueError("belief_latest_discard_min_ess_fraction 必须在 0 到 1 之间")
     if not 0.0 <= response_sample_probability <= 1.0:
         raise ValueError("response_sample_probability 必须在 0 和 1 之间")
+    if decision_phase not in {"all", "discard", "response"}:
+        raise ValueError("decision_phase 必须是 all、discard 或 response")
     if not 0.0 <= teacher_opponent_probability <= 1.0:
         raise ValueError("teacher_opponent_probability 必须在 0 和 1 之间")
     if teacher_opponent_probability < 1.0 and not opponents:
@@ -2639,7 +2642,14 @@ def collect_counterfactual_action_value_trajectories(
             response_snapshots = [
                 snapshot for snapshot in snapshots if snapshot.game.phase == "response"
             ]
-            if belief_latest_discard_particles:
+            discard_snapshots = [
+                snapshot for snapshot in snapshots if snapshot.game.phase == "discard"
+            ]
+            if decision_phase == "response":
+                selected_pool = response_snapshots
+            elif decision_phase == "discard":
+                selected_pool = discard_snapshots
+            elif belief_latest_discard_particles:
                 selected_pool = [
                     snapshot
                     for snapshot in response_snapshots
@@ -2839,6 +2849,7 @@ def collect_counterfactual_action_value_trajectories(
                             "samples_per_hand": samples_per_hand,
                             "rollouts_per_action": rollouts_per_action,
                             "rollout_batch_size": rollout_batch_size,
+                            "decision_phase": decision_phase,
                             "return_semantics": "candidate_terminal_net_score_q_pi",
                             "continuation": "frozen_candidate_and_opponents",
                             "belief_resample": belief_resample,

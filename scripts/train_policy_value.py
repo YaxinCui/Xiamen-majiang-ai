@@ -137,6 +137,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--action-value-centered-regression",
+        action="store_true",
+        help=(
+            "按每个信息集的合法动作均值中心化 Q 回归；训练相对行动优势，"
+            "不让所有动作共享的终局分数主导排序。"
+        ),
+    )
+    parser.add_argument(
+        "--action-value-rank-loss-weight",
+        type=float,
+        default=0.0,
+        help="独立 Q listwise 排序损失的权重；0 时保持仅回归。",
+    )
+    parser.add_argument(
+        "--action-value-rank-temperature",
+        type=float,
+        default=16.0,
+        help="Q listwise 目标的终局分数温度（分）。",
+    )
+    parser.add_argument(
+        "--freeze-policy-path-for-q-only",
+        action="store_true",
+        help=(
+            "只训练独立 Q encoder/head；要求 policy 偏好与 state-value 权重均为 0，"
+            "避免 AdamW 权重衰减移动冻结 policy。"
+        ),
+    )
+    parser.add_argument(
         "--action-value-target-scale",
         type=float,
         default=80.0,
@@ -187,7 +215,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--checkpoint-selection-metric",
-        choices=("policy_loss", "action_value_huber_loss"),
+        choices=(
+            "policy_loss",
+            "action_value_huber_loss",
+            "action_value_rank_accuracy",
+        ),
         default="policy_loss",
         help="best checkpoint 的主指标；直接 Q 回归应使用 action_value_huber_loss",
     )
@@ -218,6 +250,19 @@ def source_weight(source: str, args: argparse.Namespace) -> float:
     if source == "counterfactual_action_value_rollout":
         return args.action_value_weight
     return 1.0
+
+
+def configure_q_only_trainable_parameters(
+    network: CandidatePolicyValueNetwork,
+) -> list[torch.nn.Parameter]:
+    """Freeze every deployment path and expose only the independent Q path."""
+
+    for parameter in network.parameters():
+        parameter.requires_grad = False
+    for module in (network.action_value_encoder, network.action_value_head):
+        for parameter in module.parameters():
+            parameter.requires_grad = True
+    return [parameter for parameter in network.parameters() if parameter.requires_grad]
 
 
 def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
@@ -465,6 +510,7 @@ def action_value_regression_loss(
     target_scale: float,
     action_value_stderrs: torch.Tensor | None = None,
     stderr_scale: float = 0.0,
+    centered_regression: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Return per-decision robust Q loss, absolute error and valid action mask.
 
@@ -482,8 +528,18 @@ def action_value_regression_loss(
         raise ValueError("action-value-stderr-scale 不能为负数")
     valid = action_mask & action_value_mask.unsqueeze(1)
     targets = action_values / target_scale
+    predictions = predicted_action_values
+    if centered_regression:
+        valid_float = valid.to(dtype=predicted_action_values.dtype)
+        center_denominator = valid_float.sum(dim=1, keepdim=True).clamp_min(1.0)
+        targets = targets - (
+            targets * valid_float
+        ).sum(dim=1, keepdim=True) / center_denominator
+        predictions = predictions - (
+            predictions * valid_float
+        ).sum(dim=1, keepdim=True) / center_denominator
     per_action_loss = F.smooth_l1_loss(
-        predicted_action_values, targets, reduction="none"
+        predictions, targets, reduction="none"
     )
     weights = valid.to(predicted_action_values.dtype)
     if action_value_stderrs is not None and stderr_scale > 0:
@@ -491,8 +547,35 @@ def action_value_regression_loss(
         weights = weights * uncertainty
     denominator = weights.sum(dim=1).clamp_min(1.0)
     per_decision_loss = (per_action_loss * weights).sum(dim=1) / denominator
-    absolute_error = (predicted_action_values - targets).abs()
+    absolute_error = (predictions - targets).abs()
     return per_decision_loss, absolute_error, valid
+
+
+def action_value_listwise_rank_loss(
+    predicted_action_values: torch.Tensor,
+    *,
+    action_values: torch.Tensor,
+    action_value_mask: torch.Tensor,
+    action_mask: torch.Tensor,
+    target_scale: float,
+    temperature: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return a per-information-set soft ranking loss for the independent Q path."""
+
+    if target_scale <= 0 or temperature <= 0:
+        raise ValueError("Q listwise 的 target-scale 与 temperature 必须为正数")
+    valid = action_mask & action_value_mask.unsqueeze(1)
+    predicted_logits = (predicted_action_values * target_scale / temperature).masked_fill(
+        ~action_mask, torch.finfo(predicted_action_values.dtype).min
+    )
+    target_logits = (action_values / temperature).masked_fill(
+        ~action_mask, torch.finfo(action_values.dtype).min
+    )
+    target_distribution = F.softmax(target_logits, dim=1)
+    per_decision_loss = -(
+        target_distribution * F.log_softmax(predicted_logits, dim=1)
+    ).sum(dim=1)
+    return per_decision_loss, action_value_mask
 
 
 def action_value_regression_sample_weights(
@@ -512,6 +595,31 @@ def action_value_regression_sample_weights(
     if sample_weight < 0:
         raise ValueError("动作 Q 回归样本权重不能为负数")
     return action_value_mask.to(dtype=torch.float32) * sample_weight
+
+
+def action_value_prediction_is_optimal(
+    predictions: Sequence[float],
+    targets: Sequence[float],
+    valid_indices: Sequence[int],
+    *,
+    tolerance: float = 1e-6,
+) -> tuple[bool, bool]:
+    """Score a Q decision without penalizing any action tied for target best."""
+
+    if not valid_indices:
+        raise ValueError("Q 排序评估至少需要一个合法动作")
+    predicted_best = max(
+        valid_indices, key=lambda index: (predictions[index], -index)
+    )
+    target_maximum = max(targets[index] for index in valid_indices)
+    has_tied_optimum = (
+        sum(
+            abs(targets[index] - target_maximum) <= tolerance
+            for index in valid_indices
+        )
+        > 1
+    )
+    return targets[predicted_best] >= target_maximum - tolerance, has_tied_optimum
 
 
 def forward_network(
@@ -554,6 +662,7 @@ def evaluate(
     action_value_stderr_scale: float,
     action_value_confidence_z: float,
     action_value_pairwise_confidence_z: float,
+    action_value_centered_regression: bool,
 ) -> dict[str, Any]:
     network.eval()
     totals: dict[str, dict[str, float]] = defaultdict(
@@ -568,6 +677,7 @@ def evaluate(
             "action_value_absolute_error": 0.0,
             "action_value_rank_correct": 0.0,
             "action_value_rank_count": 0.0,
+            "action_value_target_tie_count": 0.0,
             "mae": 0.0,
             "mse": 0.0,
         }
@@ -620,6 +730,7 @@ def evaluate(
                     target_scale=action_value_target_scale,
                     action_value_stderrs=action_value_stderrs,
                     stderr_scale=action_value_stderr_scale,
+                    centered_regression=action_value_centered_regression,
                 )
                 q_losses_cpu = q_losses.detach().cpu().tolist()
                 q_absolute_errors_cpu = q_absolute_errors.detach().cpu().tolist()
@@ -650,22 +761,14 @@ def evaluate(
                         q_absolute_errors_cpu[index][action_index]
                         for action_index in valid_indices
                     )
-                    predicted_best = max(
+                    rank_correct, target_has_tie = action_value_prediction_is_optimal(
+                        q_predictions_cpu[index],
+                        q_targets_cpu[index],
                         valid_indices,
-                        key=lambda action_index: (
-                            q_predictions_cpu[index][action_index],
-                            -action_index,
-                        ),
-                    )
-                    target_best = max(
-                        valid_indices,
-                        key=lambda action_index: (
-                            q_targets_cpu[index][action_index],
-                            -action_index,
-                        ),
                     )
                     bucket["action_value_rank_count"] += 1
-                    bucket["action_value_rank_correct"] += predicted_best == target_best
+                    bucket["action_value_rank_correct"] += rank_correct
+                    bucket["action_value_target_tie_count"] += target_has_tie
                 if masks_cpu[index]:
                     error = values_cpu[index] - targets_cpu[index]
                     bucket["value_count"] += 1
@@ -701,6 +804,10 @@ def evaluate(
                 bucket["action_value_rank_correct"]
                 / bucket["action_value_rank_count"]
             )
+            result["action_value_target_tie_rate"] = (
+                bucket["action_value_target_tie_count"]
+                / bucket["action_value_rank_count"]
+            )
         return result
     overall = {
         "count": 0.0,
@@ -713,6 +820,7 @@ def evaluate(
         "action_value_absolute_error": 0.0,
         "action_value_rank_correct": 0.0,
         "action_value_rank_count": 0.0,
+        "action_value_target_tie_count": 0.0,
         "mae": 0.0,
         "mse": 0.0,
     }
@@ -742,6 +850,14 @@ def better_validation_checkpoint(
         ) < (
             float(best["action_value_huber_loss"]),
             -float(best["action_value_rank_accuracy"]),
+        )
+    if metric == "action_value_rank_accuracy":
+        return (
+            -float(candidate["action_value_rank_accuracy"]),
+            float(candidate["action_value_huber_loss"]),
+        ) < (
+            -float(best["action_value_rank_accuracy"]),
+            float(best["action_value_huber_loss"]),
         )
     if metric != "policy_loss":
         raise ValueError("不支持的 checkpoint 选择指标")
@@ -773,7 +889,7 @@ def checkpoint_selection_metrics(
             raise ValueError(f"验证集缺少 checkpoint 选择来源：{source}")
     decision_key = (
         "action_value_decisions"
-        if metric == "action_value_huber_loss"
+        if metric in {"action_value_huber_loss", "action_value_rank_accuracy"}
         else "decisions"
     )
     if int(metrics[decision_key]) < minimum_decisions:
@@ -781,19 +897,20 @@ def checkpoint_selection_metrics(
             f"checkpoint 选择来源 {source} 只有 {int(metrics[decision_key])} 条决策，"
             f"低于最小要求 {minimum_decisions}"
         )
-    if metric == "action_value_huber_loss":
+    if metric in {"action_value_huber_loss", "action_value_rank_accuracy"}:
         required = {"action_value_huber_loss", "action_value_rank_accuracy"}
         missing = sorted(required.difference(metrics))
         if missing:
             raise ValueError(
                 "checkpoint 选择来源缺少直接动作 Q 指标：" + ", ".join(missing)
             )
-        return {
+        values = {
             "action_value_huber_loss": float(metrics["action_value_huber_loss"]),
             "action_value_rank_accuracy": float(
                 metrics["action_value_rank_accuracy"]
             ),
         }
+        return values
     if metric != "policy_loss":
         raise ValueError("不支持的 checkpoint 选择指标")
     return {"policy_loss": float(metrics["policy_loss"]), "accuracy": float(metrics["accuracy"])}
@@ -814,8 +931,10 @@ def main() -> None:
         or args.action_value_weight < 0
         or args.action_value_regression_weight < 0
         or args.action_value_regression_sample_weight < 0
+        or args.action_value_rank_loss_weight < 0
         or args.action_value_target_scale <= 0
         or args.action_value_temperature <= 0
+        or args.action_value_rank_temperature <= 0
         or args.action_value_stderr_scale < 0
         or args.action_value_confidence_z < 0
         or args.action_value_pairwise_confidence_z < 0
@@ -913,6 +1032,22 @@ def main() -> None:
             "直接动作 Q 回归当前仅支持 candidate_mlp；"
             "请设 --action-value-regression-weight 0，或使用 candidate_mlp"
         )
+    if args.freeze_policy_path_for_q_only:
+        if not isinstance(network, CandidatePolicyValueNetwork):
+            raise ValueError("Q-only 冻结当前仅支持 candidate_mlp")
+        if (
+            args.action_value_weight != 0
+            or args.value_weight != 0
+            or (
+                args.action_value_regression_weight <= 0
+                and args.action_value_rank_loss_weight <= 0
+            )
+        ):
+            raise ValueError(
+                "Q-only 冻结要求 --action-value-weight 0、--value-weight 0，"
+                "且至少一个 Q 回归／排序损失权重为正数"
+            )
+        configure_q_only_trainable_parameters(network)
     if isinstance(network, ResidualPublicSequencePolicyValueNetwork):
         base_parameters = list(network.candidate_encoder.parameters()) + list(
             network.base_policy_head.parameters()
@@ -948,6 +1083,7 @@ def main() -> None:
         policy_total = 0.0
         value_total = 0.0
         action_value_total = 0.0
+        action_value_rank_total = 0.0
         batches = 0
         for start in range(0, len(indices), args.batch_size):
             rows = [train[index] for index in indices[start : start + args.batch_size]]
@@ -1000,6 +1136,7 @@ def main() -> None:
                         target_scale=args.action_value_target_scale,
                         action_value_stderrs=action_value_stderrs,
                         stderr_scale=args.action_value_stderr_scale,
+                        centered_regression=args.action_value_centered_regression,
                     )
                 )
                 action_value_weights = action_value_regression_sample_weights(
@@ -1011,10 +1148,33 @@ def main() -> None:
                 ).sum() / action_value_weights.sum().clamp_min(1.0)
             else:
                 action_value_loss = torch.zeros((), device=device)
+            if args.action_value_rank_loss_weight > 0 and action_value_mask.any():
+                if predicted_action_values is None:
+                    raise RuntimeError("当前网络没有动作 Q 头")
+                action_value_rank_loss_values, action_value_rank_mask = (
+                    action_value_listwise_rank_loss(
+                        predicted_action_values,
+                        action_values=action_values,
+                        action_value_mask=action_value_mask,
+                        action_mask=mask,
+                        target_scale=args.action_value_target_scale,
+                        temperature=args.action_value_rank_temperature,
+                    )
+                )
+                action_value_rank_weights = action_value_regression_sample_weights(
+                    action_value_rank_mask,
+                    sample_weight=args.action_value_regression_sample_weight,
+                )
+                action_value_rank_loss = (
+                    action_value_rank_loss_values * action_value_rank_weights
+                ).sum() / action_value_rank_weights.sum().clamp_min(1.0)
+            else:
+                action_value_rank_loss = torch.zeros((), device=device)
             loss = (
                 policy_loss
                 + args.value_weight * value_loss
                 + args.action_value_regression_weight * action_value_loss
+                + args.action_value_rank_loss_weight * action_value_rank_loss
             )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -1023,6 +1183,7 @@ def main() -> None:
             policy_total += float(policy_loss.detach().cpu())
             value_total += float(value_loss.detach().cpu())
             action_value_total += float(action_value_loss.detach().cpu())
+            action_value_rank_total += float(action_value_rank_loss.detach().cpu())
             batches += 1
         validation_metrics = evaluate(
             network,
@@ -1036,6 +1197,7 @@ def main() -> None:
             action_value_stderr_scale=args.action_value_stderr_scale,
             action_value_confidence_z=args.action_value_confidence_z,
             action_value_pairwise_confidence_z=args.action_value_pairwise_confidence_z,
+            action_value_centered_regression=args.action_value_centered_regression,
         )
         history.append(
             {
@@ -1043,6 +1205,7 @@ def main() -> None:
                 "train_policy_loss": policy_total / batches,
                 "train_value_loss": value_total / batches,
                 "train_action_value_huber_loss": action_value_total / batches,
+                "train_action_value_listwise_rank_loss": action_value_rank_total / batches,
                 "validation": validation_metrics["overall"],
             }
         )
@@ -1075,6 +1238,7 @@ def main() -> None:
         action_value_stderr_scale=args.action_value_stderr_scale,
         action_value_confidence_z=args.action_value_confidence_z,
         action_value_pairwise_confidence_z=args.action_value_pairwise_confidence_z,
+        action_value_centered_regression=args.action_value_centered_regression,
     )
     test_metrics = evaluate(
         network,
@@ -1088,6 +1252,7 @@ def main() -> None:
         action_value_stderr_scale=args.action_value_stderr_scale,
         action_value_confidence_z=args.action_value_confidence_z,
         action_value_pairwise_confidence_z=args.action_value_pairwise_confidence_z,
+        action_value_centered_regression=args.action_value_centered_regression,
     )
     report = {
         "model": "candidate_policy_value",
@@ -1102,6 +1267,10 @@ def main() -> None:
         "value_weight": args.value_weight,
         "action_value_regression_weight": args.action_value_regression_weight,
         "action_value_regression_sample_weight": args.action_value_regression_sample_weight,
+        "action_value_centered_regression": args.action_value_centered_regression,
+        "action_value_rank_loss_weight": args.action_value_rank_loss_weight,
+        "action_value_rank_temperature": args.action_value_rank_temperature,
+        "freeze_policy_path_for_q_only": args.freeze_policy_path_for_q_only,
         "action_value_target_scale": args.action_value_target_scale,
         "action_value_temperature": args.action_value_temperature,
         "action_value_stderr_scale": args.action_value_stderr_scale,
@@ -1138,6 +1307,16 @@ def main() -> None:
                 "optionally_pairwise_gap_minus_pairwise_confidence_z_times_gap_stderr"
             ),
         },
+        "action_value_regression_target": (
+            "per_information_set_centered_relative_advantage"
+            if args.action_value_centered_regression
+            else "absolute_terminal_net_score"
+        ),
+        "action_value_rank_target": (
+            "softmax(action_value / action_value_rank_temperature)"
+            if args.action_value_rank_loss_weight > 0
+            else None
+        ),
         "checkpoint_selection": {
             "split": "validation",
             "source": args.checkpoint_selection_source,
@@ -1145,7 +1324,11 @@ def main() -> None:
             "metric": (
                 "lowest_action_value_huber_loss_then_highest_action_value_rank_accuracy"
                 if args.checkpoint_selection_metric == "action_value_huber_loss"
-                else "lowest_policy_loss_then_highest_accuracy"
+                else (
+                    "highest_action_value_rank_accuracy_then_lowest_action_value_huber_loss"
+                    if args.checkpoint_selection_metric == "action_value_rank_accuracy"
+                    else "lowest_policy_loss_then_highest_accuracy"
+                )
             ),
             "selected_epoch": best_epoch,
             "selected_validation": best_validation,

@@ -177,6 +177,56 @@ class CheckpointSelectionTests(unittest.TestCase):
         self.assertEqual(valid.tolist(), [[True, True, False]])
         self.assertAlmostEqual(float(aligned_error[0, 0]), 0.0)
 
+    def test_centered_q_loss_removes_the_common_information_set_score(self):
+        from scripts.train_policy_value import action_value_regression_loss
+
+        predictions = torch.tensor([[0.5, -0.5]])
+        targets = torch.tensor([[80.0, 0.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True]])
+        centered_loss, centered_error, _valid = action_value_regression_loss(
+            predictions,
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+            centered_regression=True,
+        )
+        absolute_loss, _absolute_error, _valid = action_value_regression_loss(
+            predictions,
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+        )
+        self.assertAlmostEqual(float(centered_loss[0]), 0.0)
+        self.assertTrue(torch.allclose(centered_error, torch.zeros_like(centered_error)))
+        self.assertGreater(float(absolute_loss[0]), 0.0)
+
+    def test_q_listwise_rank_loss_rewards_the_target_order(self):
+        from scripts.train_policy_value import action_value_listwise_rank_loss
+
+        targets = torch.tensor([[40.0, -40.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True]])
+        aligned, _mask = action_value_listwise_rank_loss(
+            torch.tensor([[0.5, -0.5]]),
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+            temperature=16.0,
+        )
+        reversed_loss, _mask = action_value_listwise_rank_loss(
+            torch.tensor([[-0.5, 0.5]]),
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+            temperature=16.0,
+        )
+        self.assertLess(float(aligned[0]), float(reversed_loss[0]))
+
     def test_q_regression_samples_are_not_disabled_with_policy_preference(self):
         from scripts.train_policy_value import action_value_regression_sample_weights
 
@@ -249,6 +299,25 @@ class CheckpointSelectionTests(unittest.TestCase):
                 q_first,
                 metric="action_value_huber_loss",
             )
+        )
+        self.assertTrue(
+            better_validation_checkpoint(
+                q_first,
+                q_better,
+                metric="action_value_rank_accuracy",
+            )
+        )
+        self.assertEqual(
+            checkpoint_selection_metrics(
+                validation,
+                source="counterfactual_action_value_rollout",
+                minimum_decisions=20,
+                metric="action_value_rank_accuracy",
+            ),
+            {
+                "action_value_huber_loss": 0.7,
+                "action_value_rank_accuracy": 0.0,
+            },
         )
 
     def test_held_out_rare_action_uses_neutral_class_weight(self):
@@ -360,6 +429,8 @@ class TorchPolicyTests(unittest.TestCase):
             if not key.startswith(
                 (
                     "action_value_head.",
+                    "action_value_encoder.",
+                    "afterstate_encoder.",
                     "afterstate_score_head.",
                     "afterstate_win_head.",
                     "afterstate_opponent_win_head.",
@@ -407,6 +478,134 @@ class TorchPolicyTests(unittest.TestCase):
                 response_only.scores(decisions[0]),
                 response_only.policy_value(decisions[0])[0],
             )
+
+    def test_v4_checkpoint_loads_when_only_the_independent_outcome_encoder_is_new(self):
+        """v4 outcome heads predate the v5 independent outcome encoder."""
+        from xiamen_mahjong.torch_policy import (
+            CandidatePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+        from xiamen_mahjong.training import collect_teacher_decisions
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        v4_state = {
+            key: value
+            for key, value in network.state_dict().items()
+            if not key.startswith(("afterstate_encoder.", "action_value_encoder."))
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "v4-policy-value.pt"
+            torch.save(
+                {
+                    "version": "xiamen-candidate-policy-value-v4",
+                    "model": "candidate_policy_value",
+                    "architecture": "candidate_mlp",
+                    "feature_version": 3,
+                    "feature_dim": 145,
+                    "hidden_size": 16,
+                    "attention_heads": 4,
+                    "state_dict": v4_state,
+                    "metadata": {},
+                },
+                checkpoint,
+            )
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            decisions, _ = collect_teacher_decisions(hands=1, profile="core", seed=772)
+            outcomes = restored.afterstate_outcomes(decisions[0])
+            self.assertIsNotNone(outcomes)
+            assert outcomes is not None
+            self.assertEqual(len(outcomes[0]), len(decisions[0].legal_actions))
+
+    def test_v5_checkpoint_loads_when_only_the_independent_q_encoder_is_new(self):
+        """v5 outcome checkpoints predate the v6 independent Q encoder."""
+        from xiamen_mahjong.torch_policy import (
+            CandidatePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        v5_state = {
+            key: value
+            for key, value in network.state_dict().items()
+            if not key.startswith("action_value_encoder.")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "v5-policy-value.pt"
+            torch.save(
+                {
+                    "version": "xiamen-candidate-policy-value-v5",
+                    "model": "candidate_policy_value",
+                    "architecture": "candidate_mlp",
+                    "feature_version": 3,
+                    "feature_dim": 145,
+                    "hidden_size": 16,
+                    "attention_heads": 4,
+                    "state_dict": v5_state,
+                    "metadata": {},
+                },
+                checkpoint,
+            )
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            self.assertIsInstance(restored.network, CandidatePolicyValueNetwork)
+
+    def test_q_encoder_changes_do_not_change_policy_or_value_outputs(self):
+        from xiamen_mahjong.torch_policy import CandidatePolicyValueNetwork
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        candidates = torch.rand((2, 3, 145))
+        mask = torch.tensor([[True, True, False], [True, True, True]])
+        policy_before, value_before, _q_before = network.forward_with_action_values(
+            candidates, mask
+        )
+        with torch.no_grad():
+            network.action_value_encoder[0].weight.add_(0.25)
+            network.action_value_head.weight.fill_(0.5)
+            network.action_value_head.bias.fill_(0.25)
+        policy_after, value_after, q_after = network.forward_with_action_values(
+            candidates, mask
+        )
+        self.assertTrue(torch.equal(policy_before, policy_after))
+        self.assertTrue(torch.equal(value_before, value_after))
+        self.assertTrue(torch.isfinite(q_after[mask]).all())
+
+    def test_q_only_training_freezes_every_non_q_parameter(self):
+        from scripts.train_policy_value import configure_q_only_trainable_parameters
+        from xiamen_mahjong.torch_policy import CandidatePolicyValueNetwork
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        trainable = configure_q_only_trainable_parameters(network)
+        expected = {
+            id(parameter)
+            for module in (network.action_value_encoder, network.action_value_head)
+            for parameter in module.parameters()
+        }
+        self.assertEqual({id(parameter) for parameter in trainable}, expected)
+        self.assertTrue(
+            all(
+                parameter.requires_grad == (id(parameter) in expected)
+                for parameter in network.parameters()
+            )
+        )
+
+    def test_q_rank_metric_accepts_any_action_tied_for_best_target(self):
+        from scripts.train_policy_value import action_value_prediction_is_optimal
+
+        self.assertEqual(
+            action_value_prediction_is_optimal(
+                predictions=[3.0, 1.0],
+                targets=[10.0, 10.0],
+                valid_indices=[0, 1],
+            ),
+            (True, True),
+        )
+        self.assertEqual(
+            action_value_prediction_is_optimal(
+                predictions=[3.0, 1.0],
+                targets=[9.0, 10.0],
+                valid_indices=[0, 1],
+            ),
+            (False, False),
+        )
 
     def test_public_sequence_transformer_masks_events_and_round_trips(self):
         from xiamen_mahjong.torch_policy import (

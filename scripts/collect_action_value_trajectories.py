@@ -63,6 +63,12 @@ def parse_args() -> argparse.Namespace:
         default=0.35,
         help="存在响应局面时，从响应局面抽样的概率",
     )
+    parser.add_argument(
+        "--decision-phase",
+        choices=("all", "discard", "response"),
+        default="all",
+        help="all 保持原有混合抽样；其余值只采集指定阶段的反事实决策。",
+    )
     parser.add_argument("--seed", type=int, default=20266808)
     parser.add_argument("--split-salt", default="counterfactual-action-value-v1")
     parser.add_argument("--train-fraction", type=float, default=0.8)
@@ -150,6 +156,7 @@ def main() -> None:
         samples_per_hand=args.samples_per_hand,
         rollouts_per_action=args.rollouts_per_action,
         response_sample_probability=args.response_sample_probability,
+        decision_phase=args.decision_phase,
         opponents=opponents,
         teacher_opponent_probability=args.teacher_opponent_probability,
         belief_resample=args.belief_resample,
@@ -190,6 +197,7 @@ def main() -> None:
         "rollouts_per_action": args.rollouts_per_action,
         "rollout_batch_size": args.rollout_batch_size,
         "response_sample_probability": args.response_sample_probability,
+        "decision_phase": args.decision_phase,
         "opponent_pool": {
             "teacher_probability": args.teacher_opponent_probability,
             "frozen_checkpoints": [str(path) for path in args.opponent_checkpoint],

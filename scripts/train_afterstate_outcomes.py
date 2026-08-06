@@ -52,8 +52,29 @@ class AfterstateExample:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--train", type=Path, required=True)
+    parser.add_argument(
+        "--additional-train",
+        type=Path,
+        action="append",
+        default=[],
+        help="可重复指定；追加按物理牌墙独立的同分区干预数据。",
+    )
     parser.add_argument("--validation", type=Path, required=True)
+    parser.add_argument(
+        "--additional-validation",
+        type=Path,
+        action="append",
+        default=[],
+        help="可重复指定；只能追加与训练墙组不重叠的验证数据。",
+    )
     parser.add_argument("--test", type=Path, required=True)
+    parser.add_argument(
+        "--additional-test",
+        type=Path,
+        action="append",
+        default=[],
+        help="可重复指定；只能追加与训练/验证墙组不重叠的测试数据。",
+    )
     parser.add_argument("--init-checkpoint", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--feature-version", type=int, choices=(3,), default=3)
@@ -347,6 +368,34 @@ def source_counts(examples: Iterable[AfterstateExample]) -> dict[str, int]:
     return dict(sorted(Counter(example.source for example in examples).items()))
 
 
+def load_partition(
+    paths: Iterable[Path],
+    *,
+    feature_version: int,
+    value_scale: float,
+    sources: set[str],
+    require_known_propensity: bool,
+    only_randomized_actions: bool,
+    decision_phase: str,
+) -> list[AfterstateExample]:
+    """Combine only pre-partitioned, externally disjoint wall groups."""
+
+    examples: list[AfterstateExample] = []
+    for path in paths:
+        examples.extend(
+            load_examples(
+                path,
+                feature_version=feature_version,
+                value_scale=value_scale,
+                sources=sources,
+                require_known_propensity=require_known_propensity,
+                only_randomized_actions=only_randomized_actions,
+                decision_phase=decision_phase,
+            )
+        )
+    return examples
+
+
 def propensity_summary(examples: Iterable[AfterstateExample]) -> dict[str, float | int | None]:
     records = list(examples)
     values = [
@@ -386,8 +435,8 @@ def main() -> None:
         device = torch.device(args.device)
     sources = allowed_sources(args)
     feature_dim = NEURAL_FEATURE_DIMS[args.feature_version]
-    train = load_examples(
-        args.train,
+    train = load_partition(
+        (args.train, *args.additional_train),
         feature_version=args.feature_version,
         value_scale=args.value_scale,
         sources=sources,
@@ -395,8 +444,8 @@ def main() -> None:
         only_randomized_actions=args.only_randomized_actions,
         decision_phase=args.decision_phase,
     )
-    validation = load_examples(
-        args.validation,
+    validation = load_partition(
+        (args.validation, *args.additional_validation),
         feature_version=args.feature_version,
         value_scale=args.value_scale,
         sources=sources,
@@ -404,8 +453,8 @@ def main() -> None:
         only_randomized_actions=args.only_randomized_actions,
         decision_phase=args.decision_phase,
     )
-    test = load_examples(
-        args.test,
+    test = load_partition(
+        (args.test, *args.additional_test),
         feature_version=args.feature_version,
         value_scale=args.value_scale,
         sources=sources,
@@ -422,6 +471,8 @@ def main() -> None:
     if not args.unfreeze_encoder:
         for parameter in network.parameters():
             parameter.requires_grad = False
+        for parameter in network.afterstate_encoder.parameters():
+            parameter.requires_grad = True
         for head in (
             network.afterstate_score_head,
             network.afterstate_win_head,
@@ -529,16 +580,20 @@ def main() -> None:
             "target": "only the logged executed_index action",
             "excluded_default_source": "random_legal_teacher_labeled",
             "reason": "its random continuation does not match deployment behavior",
-            "encoder_frozen": not args.unfreeze_encoder,
+            "policy_encoder_frozen": not args.unfreeze_encoder,
+            "outcome_encoder_trainable": True,
             "known_propensity_required": args.require_known_propensity,
             "only_randomized_actions": args.only_randomized_actions,
             "decision_phase": args.decision_phase,
         },
         "sources": sorted(sources),
         "inputs": {
-            "train": str(args.train),
-            "validation": str(args.validation),
-            "test": str(args.test),
+            "train": [str(args.train), *(str(path) for path in args.additional_train)],
+            "validation": [
+                str(args.validation),
+                *(str(path) for path in args.additional_validation),
+            ],
+            "test": [str(args.test), *(str(path) for path in args.additional_test)],
         },
         "counts": {
             "train": len(train),

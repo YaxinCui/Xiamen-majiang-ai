@@ -510,6 +510,25 @@ class TrainingTests(unittest.TestCase):
                 )
             )
 
+    def test_counterfactual_response_only_collection_never_exports_discard_decisions(self):
+        policy = NeuralRulePolicyModel(hidden_size=4, seed=588)
+        trajectories, summary = collect_counterfactual_action_value_trajectories(
+            policy,
+            seed_count=3,
+            profile="core",
+            seed=588,
+            decision_phase="response",
+        )
+        self.assertGreater(len(trajectories), 0)
+        self.assertEqual(summary.response_decisions, len(trajectories))
+        self.assertTrue(
+            all(
+                decision.state["phase"] == "response"
+                for trajectory in trajectories
+                for decision in trajectory.decisions
+            )
+        )
+
     def test_belief_resampled_action_values_keep_only_actor_visible_state(self):
         policy = NeuralRulePolicyModel(hidden_size=4, seed=931)
         trajectories, summary = collect_counterfactual_action_value_trajectories(

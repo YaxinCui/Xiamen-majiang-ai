@@ -32,11 +32,13 @@ from .training import (
 )
 
 
-TORCH_POLICY_VALUE_VERSION = "xiamen-candidate-policy-value-v4"
+TORCH_POLICY_VALUE_VERSION = "xiamen-candidate-policy-value-v6"
 _SUPPORTED_TORCH_POLICY_VALUE_VERSIONS = {
     "xiamen-candidate-policy-value-v1",
     "xiamen-candidate-policy-value-v2",
     "xiamen-candidate-policy-value-v3",
+    "xiamen-candidate-policy-value-v4",
+    "xiamen-candidate-policy-value-v5",
     TORCH_POLICY_VALUE_VERSION,
 }
 ARCHITECTURE_CANDIDATE_MLP = "candidate_mlp"
@@ -70,6 +72,16 @@ class CandidatePolicyValueNetwork(nn.Module):
         # action, in the same normalized units used by the trainer.  Starting
         # from zero is intentional: loading a v1/v2 checkpoint then retains
         # its established policy exactly until explicit Q supervision arrives.
+        # Counterfactual-Q calibration is another off-policy objective.  Give
+        # it an independent encoder so a Q-only experiment cannot mutate the
+        # frozen policy logits simply through shared representation updates.
+        self.action_value_encoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+        )
+        self.action_value_encoder.load_state_dict(self.candidate_encoder.state_dict())
         self.action_value_head = nn.Linear(hidden_size, 1)
         nn.init.zeros_(self.action_value_head.weight)
         nn.init.zeros_(self.action_value_head.bias)
@@ -78,6 +90,17 @@ class CandidatePolicyValueNetwork(nn.Module):
         # counterfactual Q head: a terminal score, a self-win probability and
         # an opponent-win probability answer different questions and should
         # not be collapsed into one noisy action target.
+        # Long-horizon outcome prediction gets an independent candidate
+        # encoder.  The policy path stays frozen during default outcome
+        # calibration, so improving these heads cannot silently alter the
+        # established run4 action logits.
+        self.afterstate_encoder = nn.Sequential(
+            nn.Linear(feature_dim, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+        )
+        self.afterstate_encoder.load_state_dict(self.candidate_encoder.state_dict())
         self.afterstate_score_head = nn.Linear(hidden_size, 1)
         self.afterstate_win_head = nn.Linear(hidden_size, 1)
         self.afterstate_opponent_win_head = nn.Linear(hidden_size, 1)
@@ -107,7 +130,8 @@ class CandidatePolicyValueNetwork(nn.Module):
         encoded = self.candidate_encoder(candidates)
         logits = self.policy_head(encoded).squeeze(-1)
         logits = logits.masked_fill(~action_mask, torch.finfo(logits.dtype).min)
-        action_values = self.action_value_head(encoded).squeeze(-1)
+        action_value_encoded = self.action_value_encoder(candidates)
+        action_values = self.action_value_head(action_value_encoded).squeeze(-1)
         action_values = action_values.masked_fill(~action_mask, 0.0)
         denominator = action_mask.sum(dim=1, keepdim=True).clamp_min(1)
         pooled = (encoded * action_mask.unsqueeze(-1)).sum(dim=1) / denominator
@@ -128,11 +152,15 @@ class CandidatePolicyValueNetwork(nn.Module):
         encoded = self.candidate_encoder(candidates)
         logits = self.policy_head(encoded).squeeze(-1)
         logits = logits.masked_fill(~action_mask, torch.finfo(logits.dtype).min)
-        action_values = self.action_value_head(encoded).squeeze(-1)
+        action_value_encoded = self.action_value_encoder(candidates)
+        action_values = self.action_value_head(action_value_encoded).squeeze(-1)
         action_values = action_values.masked_fill(~action_mask, 0.0)
-        afterstate_score = self.afterstate_score_head(encoded).squeeze(-1)
-        afterstate_win = self.afterstate_win_head(encoded).squeeze(-1)
-        afterstate_opponent_win = self.afterstate_opponent_win_head(encoded).squeeze(-1)
+        afterstate_encoded = self.afterstate_encoder(candidates)
+        afterstate_score = self.afterstate_score_head(afterstate_encoded).squeeze(-1)
+        afterstate_win = self.afterstate_win_head(afterstate_encoded).squeeze(-1)
+        afterstate_opponent_win = self.afterstate_opponent_win_head(
+            afterstate_encoded
+        ).squeeze(-1)
         afterstate_score = afterstate_score.masked_fill(~action_mask, 0.0)
         afterstate_win = afterstate_win.masked_fill(~action_mask, 0.0)
         afterstate_opponent_win = afterstate_opponent_win.masked_fill(~action_mask, 0.0)
@@ -859,6 +887,24 @@ class TorchPolicyValueAgent:
             if version != TORCH_POLICY_VALUE_VERSION:
                 allowed_missing.update(
                     {
+                        "action_value_encoder.0.weight",
+                        "action_value_encoder.0.bias",
+                        "action_value_encoder.2.weight",
+                        "action_value_encoder.2.bias",
+                    }
+                )
+            if version in {
+                "xiamen-candidate-policy-value-v1",
+                "xiamen-candidate-policy-value-v2",
+                "xiamen-candidate-policy-value-v3",
+                "xiamen-candidate-policy-value-v4",
+            }:
+                allowed_missing.update(
+                    {
+                        "afterstate_encoder.0.weight",
+                        "afterstate_encoder.0.bias",
+                        "afterstate_encoder.2.weight",
+                        "afterstate_encoder.2.bias",
                         "afterstate_score_head.weight",
                         "afterstate_score_head.bias",
                         "afterstate_win_head.weight",
@@ -867,8 +913,21 @@ class TorchPolicyValueAgent:
                         "afterstate_opponent_win_head.bias",
                     }
                 )
-            if set(missing) != allowed_missing or unexpected:
+            # v1/v2 have neither Q nor outcome heads, v3/v4 have the heads
+            # but no independent outcome encoder, and v5 has an outcome
+            # encoder but no independent Q encoder. Treat these documented,
+            # optional additions as a subset so a valid checkpoint is not
+            # rejected merely because it already contains a newer head.
+            if not set(missing).issubset(allowed_missing) or unexpected:
                 raise ValueError("旧 policy-value checkpoint 的参数不完整或不匹配")
+            if any(key.startswith("afterstate_encoder.") for key in missing):
+                agent.network.afterstate_encoder.load_state_dict(
+                    agent.network.candidate_encoder.state_dict()
+                )
+            if any(key.startswith("action_value_encoder.") for key in missing):
+                agent.network.action_value_encoder.load_state_dict(
+                    agent.network.candidate_encoder.state_dict()
+                )
         else:
             agent.network.load_state_dict(state_dict)
         agent.network.to(agent.device)

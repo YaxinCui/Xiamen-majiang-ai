@@ -283,6 +283,43 @@ continuation 扩写成所有候选的 Q 标签，也不会改变 policy logits �
 检查点会标记为 `diagnostic_only_not_authorized_for_action_selection`；只有在按墙隔离的校准、行为支持度审计
 及新的 200/400 墙配对实战均通过后，才可以测试小幅 policy-prior 混合。
 
+若有多个按物理牌墙隔离的单点干预墙组，可用 `--additional-train`、`--additional-validation` 和
+`--additional-test` 只追加同一分区；v5 会训练独立的 afterstate encoder，因此不会改写冻结 policy logits。可先
+用 `scripts/audit_afterstate_ensemble.py` 审计 logged-action 校准、成员离散度及假设性 policy-prior 偏移，再用
+`scripts/evaluate_afterstate_response_ensemble.py` 在**全新** 200 墙四座轮换中筛选。后者只允许 response top-k
+的实验重排，默认状态仍是 `experimental_not_authorized_for_browser_or_promotion`；200 墙配对 95% 下界不为正时，
+禁止进行 400 墙、发布或替换网页 AI。
+
+### response 定向反事实 Q（离线门槛，尚不选牌）
+
+可显式只收集 response 的逐合法动作分支；每个分支的暗牌和牌墙只在规则 collector 内存中使用，导出的输入和
+JSONL 仍只有本家手牌、公开状态、合法动作与对齐的终局分数。它是 Monte-Carlo 监督数据，不是网页运行时 oracle：
+
+```bash
+.venv/bin/python scripts/collect_action_value_trajectories.py \
+  --checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --seed-count 240 --samples-per-hand 2 \
+  --decision-phase response --rollout-batch-size 32 --device cuda \
+  --output-dir artifacts/counterfactual-action-value-response-direct-classic-v1
+```
+
+Q-only 校准必须启用独立 Q encoder 和 policy 路径冻结；`--action-value-weight 0` 与 `--value-weight 0` 是强制组合，
+不能让 Q loss 或 AdamW weight decay 修改 run4 policy。先用 `audit_response_q_policy.py` 在按墙隔离的留出集比较 Q
+和冻结 policy 的最优率／后悔配对区间；两项 95% 下界都为正之前，Q 不能进入真实对局：
+
+```bash
+.venv/bin/python scripts/audit_response_q_policy.py \
+  --checkpoint artifacts/policy-value-direct-response-q/policy-value.pt \
+  --reference artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --data artifacts/counterfactual-action-value-response-direct-classic-v1/test.trajectories.jsonl \
+  --device cuda
+```
+
+训练器还提供 `--action-value-centered-regression`（去掉同一信息集各动作共享的绝对终局分）和
+`--action-value-rank-loss-weight`（独立 Q 的 listwise 排序损失）；它们只用于离线消融，不会自动选牌。若使用
+`--policy-top-k` 或 `--minimum-q-advantage-points` 审计选择器，阈值必须只在 validation 墙组确定，并在从未使用的
+test 墙组报告一次；test 的平均值、MAE 或准确率都不能绕过两项正向置信下界和后续真实对局验收。
+
 若要探索超越 Teacher 的方向，可对 policy-value 候选做终局净分 PPO 微调。它只允许一席
 候选策略采样，三席始终冻结为 Teacher；策略仍只能从规则引擎的合法动作中选择。该命令
 输出的是研究 checkpoint，不会自动替换网页 AI：

@@ -336,3 +336,74 @@ Brier 为 **0.182 / 0.183**（测试常数基线为约 0.188）。这说明公�
 但 56 个 validation、116 个 test 干预仍不足以校准融合系数、量化候选间排序错误或支持任何 response argmax。
 它不替代此前 response-only Q 的失败结论，也不进入 200 墙实战；下一步先训练多 seed outcome ensemble、报告每个
 候选的均值/离散度和 policy-prior 偏移率，再预注册一个小幅保守混合及其独立 200 墙筛选。
+
+### response outcome ensemble：校准通过、实战否决
+
+为避免 outcome 训练改变已验证的 run4 policy，网络升级为 v5：新增独立的 `afterstate_encoder`，它从 run4
+candidate encoder 初始化，但默认训练时只有它和 score／己方胜率／对手胜率三头可更新；policy encoder、policy
+logits、Q 和 value 均冻结。v1 的 240 墙与另一组 v2 的 240 墙 response 单点随机干预按原有物理墙分区追加，得到
+**844 / 148 / 220** 个 train / validation / test 干预点。五个独立随机种子训练为 ensemble；每个 checkpoint 都
+保留 `diagnostic_only_not_authorized_for_action_selection` 状态。
+
+联合独立测试集上，ensemble 对已执行动作的 score MAE 为 **28.92** 分（零预测 **32.94**），己方／对手 Brier 为
+**0.165 / 0.172**；平均 score ensemble 标准差为 **2.77** 分。它说明第二批数据提高了 *logged-action* outcome
+校准，却不表示未执行候选的排序正确。审计还显示：在 validation 的 run4 policy top-2 候选内，score LCB 会改动
+**36.5%** 的 response 决策，足以构成可检验、但仍受 policy-prior 限制的干预。
+
+预注册候选只在 response 阶段使用该五模型的 `mean(score) - 1.0 × std(score)` 重排 run4 policy top-2；所有
+摸牌／弃牌仍逐位复用冻结 run4 policy。它在从训练、验证、测试均隔离的 **23,400,000** 起 200 个物理牌墙、四座
+轮换中相对 run4 的配对净分为 **−3.821 ± 1.319**，95% CI **[−6.406, −1.236]**。候选胡率为 21.75%，run4 为
+25.25%。负向下界明确，故**不进行 400 墙复核、不晋升、不接入网页**。
+
+结论：执行动作的终局校准不是 response 反事实排序的充分条件；有限策略先验集合和 ensemble LCB 也不能弥补该
+数据识别缺口。停止继续扩展这一 selector 或调融合系数。下一轮改为构造规模化、同一环境样本中逐合法 response
+动作分支到结算的直接 Monte-Carlo Q 数据；私有状态只留在 collector 内存，导出／输入仍严格限于本家手牌和公开
+信息。它将先以小型按墙隔离 pilot 验证覆盖、方差和离线排序，再决定是否值得训练或实战筛选。
+
+## 2026-08-07：direct-response Q pilot 与冻结路径门槛
+
+counterfactual collector 新增显式 `--decision-phase response`；与旧的混合抽样不同，它只导出 response 决策，
+没有 response 的牌局直接跳过。每个选中的公开／本家私有信息集在 collector 内存中克隆为所有合法动作的分支，并
+在冻结 run4 后缀与 Teacher 对手下结算。分支所用的暗手和牌墙既不进入 action feature，也不进入 JSONL 或 manifest；
+跨大量牌墙时，它们是信息集条件终局分布的 Monte-Carlo 样本，而非部署时可见输入。
+
+60 个全新 classic 物理牌墙的 pilot（每座最多两个 response，单分支）得到 **416** 个决策／**920** 条分支，
+动作为 pass 255、chi 84、pong 73、hu 3、ming_kan 1，平均动作回报跨度 **34.40** 分。按墙隔离为
+267 / 64 / 85 train / validation / test，所有 416 个导出决策均为 response，证明定向采集及边界检查可用；但单个
+hidden world 的标签方差仍需要靠扩大墙组而非把同一 world 重复当作独立 rollout。
+
+为保证 Q-only 诊断不影响当前 best policy，网络升级为 v6：Q head 使用独立的 `action_value_encoder`，从 run4
+candidate encoder 初始化；`--freeze-policy-path-for-q-only` 进一步冻结所有非 Q 参数，避免即使损失系数为零时
+AdamW 的 weight decay 仍轻微移动共享 policy 路径。回归测试和实际 pilot 均确认 run4 与训练后 checkpoint 的
+policy logits 最大绝对差为 **0.0**；v1–v5 checkpoint 仍可加载并以 candidate encoder 初始化缺失的独立编码器。
+
+pilot 的冻结 Q 在 85 个独立测试决策上 MAE 为 **32.32** 分（零 Q 36.30 分），但 MAE 不是选择证据。修正
+“多个动作同为最优”后的 tie-aware 指标中，Q 最优动作率 60.0%，run4 policy 为 62.35%，29.4% 目标有最优并列。
+`audit_response_q_policy.py` 给出的配对 Q−policy 最优率差为 **−2.35pp**，95% CI **[−15.87pp, +11.16pp]**；
+policy−Q 后悔改善为 **+1.74** 分，95% CI **[−7.09, +10.57]**。两项都不通过，故 pilot 不进入真实 200 墙评测、
+不晋升。
+
+后续 direct-response Q 只有同时满足以下离线门槛才允许真实筛选：policy identity 与 run4 完全一致；按未见物理
+牌墙的 Q−policy 最优率差和 policy−Q 后悔改善的 95% 下界都大于零；随后仍须在全新 200 墙、四座轮换中通过配对
+净分正下界，才有资格做 400 墙复核。下一步只扩大互不重叠的 direct-response 墙组，不改 selector 或网页默认 AI。
+
+### direct-response Q scale-a：三种排序目标的共同反证
+
+独立 scale-a 使用 240 个全新 classic 物理牌墙，收集 **1,666** 个 response 决策与 **3,699** 条逐合法动作分支；
+按墙隔离为 1,265 / 202 / 199 train / validation / test。未见测试包含 pass 131、chi 37、pong 27、hu 2、
+ming_kan 2，平均动作回报跨度 26.53 分。所有 rollout 均为同一信息集的动作分支，且未导出牌墙或他家暗手。
+
+先以四个独立 seed 的绝对 Q ensemble 在 run4 policy top-2 内重排：测试平均后悔改善 **+2.23** 分，但 95% CI
+**[−1.78, +6.23]**；最优动作率差 **−1.51pp**，95% CI **[−8.13pp, +5.11pp]**。随后只用 validation 墙组尝试
+0／1／2／4／8／12／16 分 Q 优势阈值；没有任何阈值使最优率和后悔改善的下界同时为正，故不对 test 做阈值挑选。
+
+为检验绝对终局分数的共同噪声是否是瓶颈，训练器又加入按信息集中心化的 Q advantage regression，以及独立 Q
+listwise soft-ranking loss；两者均使用 v6 独立 Q encoder/head，并启用 `--freeze-policy-path-for-q-only`。中心化模型
+在 top-2 中只覆盖 15.1% 决策，测试最优率持平、后悔改善 **+0.21** 分，95% CI **[−1.53, +1.96]**；validation
+阈值同样没有正下界。listwise 单模型虽有正均值（最优率 +1.01pp、后悔 +2.67 分），但四 seed ensemble 回落为最优率
+**−1.51pp**，95% CI **[−8.83pp, +5.81pp]**，后悔改善 **+0.77** 分，95% CI **[−3.34, +4.88]**。
+
+结论：在当前 run4 访问分布、完整隐藏 world 的单样本分支与约 1.7k response 信息集下，direct-response Q 没有可靠
+超过冻结 policy 的排序证据。停止继续扩大该数据或调 Q loss；不做 200/400 墙、不晋升。下一阶段回到更根本的信息
+集问题：先实现可验证、全公开历史条件化的 sequential belief proposal（必须先报告可接受率、ESS、与 toy exact
+posterior 的校准），再考虑用其多 world 目标重新构造长程行动价值。当前网页 AI 和 run4 checkpoint 保持不变。
