@@ -33,12 +33,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--action-selection",
-        choices=("policy", "action_value"),
+        choices=("policy", "action_value", "response_action_value"),
         help=".pt 候选的选牌头；默认使用 checkpoint 保存的模式（通常为 policy）",
     )
     parser.add_argument(
         "--reference-action-selection",
-        choices=("policy", "action_value"),
+        choices=("policy", "action_value", "response_action_value"),
         default="policy",
         help="配对基准 .pt 的选牌头；默认 policy，避免意外比较两个实验规则",
     )

@@ -332,6 +332,7 @@ class TorchPolicyTests(unittest.TestCase):
     def test_v2_candidate_checkpoint_loads_with_a_zero_initialized_q_head(self):
         from xiamen_mahjong.torch_policy import (
             ACTION_SELECTION_ACTION_VALUE,
+            ACTION_SELECTION_RESPONSE_ACTION_VALUE,
             CandidatePolicyValueNetwork,
             TorchPolicyValueAgent,
         )
@@ -369,6 +370,21 @@ class TorchPolicyTests(unittest.TestCase):
                 all(value == 0.0 for value in restored.action_value_scores(decisions[0]) or ())
             )
             self.assertEqual(restored.action_selection, ACTION_SELECTION_ACTION_VALUE)
+
+            response_only = TorchPolicyValueAgent.load(
+                checkpoint,
+                device="cpu",
+                action_selection=ACTION_SELECTION_RESPONSE_ACTION_VALUE,
+            )
+            self.assertEqual(
+                response_only.action_selection, ACTION_SELECTION_RESPONSE_ACTION_VALUE
+            )
+            # Generic scoring remains policy-only without an explicit response
+            # context, avoiding accidental Q selection for discard decisions.
+            self.assertEqual(
+                response_only.scores(decisions[0]),
+                response_only.policy_value(decisions[0])[0],
+            )
 
     def test_public_sequence_transformer_masks_events_and_round_trips(self):
         from xiamen_mahjong.torch_policy import (

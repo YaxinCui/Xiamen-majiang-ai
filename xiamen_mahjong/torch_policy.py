@@ -43,9 +43,11 @@ ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER = "public_sequence_transformer"
 ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL = "public_sequence_residual"
 ACTION_SELECTION_POLICY = "policy"
 ACTION_SELECTION_ACTION_VALUE = "action_value"
+ACTION_SELECTION_RESPONSE_ACTION_VALUE = "response_action_value"
 _SUPPORTED_ACTION_SELECTIONS = {
     ACTION_SELECTION_POLICY,
     ACTION_SELECTION_ACTION_VALUE,
+    ACTION_SELECTION_RESPONSE_ACTION_VALUE,
 }
 
 
@@ -463,14 +465,32 @@ class TorchPolicyValueAgent:
         logits, value = self._forward(candidates, action_mask, decision)
         return logits, value, None
 
-    def scores(self, decision: TeacherDecision) -> list[float]:
-        if self.action_selection == ACTION_SELECTION_POLICY:
+    def _scores_for_selection(
+        self, decision: TeacherDecision, *, action_selection: str
+    ) -> list[float]:
+        if action_selection == ACTION_SELECTION_POLICY:
             scores, _value = self.policy_value(decision)
             return scores
         action_values = self.action_value_scores(decision)
         if action_values is None:
             raise ValueError("当前网络结构没有动作价值头，不能使用动作价值选牌")
         return action_values
+
+    def scores(self, decision: TeacherDecision) -> list[float]:
+        """Return the general selector score without inferring game phase.
+
+        ``response_action_value`` is intentionally policy here: callers that
+        know they are resolving a response must use :meth:`choose_response`.
+        This prevents a response-only Q head from silently ranking discard
+        actions in generic batched/analysis code.
+        """
+
+        selection = (
+            ACTION_SELECTION_POLICY
+            if self.action_selection == ACTION_SELECTION_RESPONSE_ACTION_VALUE
+            else self.action_selection
+        )
+        return self._scores_for_selection(decision, action_selection=selection)
 
     def policy_value(self, decision: TeacherDecision) -> tuple[list[float], float]:
         """Run one legal candidate set once and return policy logits plus value."""
@@ -637,7 +657,10 @@ class TorchPolicyValueAgent:
         back into a policy-logit agent.
         """
 
-        if self.action_selection == ACTION_SELECTION_POLICY:
+        if self.action_selection in {
+            ACTION_SELECTION_POLICY,
+            ACTION_SELECTION_RESPONSE_ACTION_VALUE,
+        }:
             return [scores for scores, _value in self.policy_values_batch(decisions)]
         action_values = self.action_value_scores_batch(decisions)
         if action_values is None:
@@ -657,13 +680,29 @@ class TorchPolicyValueAgent:
 
     def choose_turn_action(self, game: XiamenMahjongGame, player_id: int) -> GameAction:
         legal = tuple(_turn_actions(game, player_id))
-        return self.predict_action(_decision(game, game.seed or 0, player_id, legal, legal[0]))
+        decision = _decision(game, game.seed or 0, player_id, legal, legal[0])
+        # Q labels currently cover only public response states. Never apply a
+        # response-only checkpoint to turn/discard choices without turn Q data.
+        if self.action_selection == ACTION_SELECTION_RESPONSE_ACTION_VALUE:
+            scores, _value = self.policy_value(decision)
+            return decision.legal_actions[
+                max(range(len(scores)), key=lambda index: (scores[index], -index))
+            ]
+        return self.predict_action(decision)
 
     def choose_response(
         self, game: XiamenMahjongGame, player_id: int, options: Sequence[GameAction]
     ) -> GameAction:
         legal = tuple(options)
-        return self.predict_action(_decision(game, game.seed or 0, player_id, legal, legal[0]))
+        decision = _decision(game, game.seed or 0, player_id, legal, legal[0])
+        if self.action_selection == ACTION_SELECTION_RESPONSE_ACTION_VALUE:
+            scores = self._scores_for_selection(
+                decision, action_selection=ACTION_SELECTION_ACTION_VALUE
+            )
+            return decision.legal_actions[
+                max(range(len(scores)), key=lambda index: (scores[index], -index))
+            ]
+        return self.predict_action(decision)
 
     def save(self, path: str | Path, *, metadata: dict[str, Any] | None = None) -> None:
         destination = Path(path)
