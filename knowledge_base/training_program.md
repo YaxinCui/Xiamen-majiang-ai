@@ -97,10 +97,11 @@ ESS/接受率和不泄露私有世界的回归测试。只有连续事件通过�
 未知对手起手牌／花槽与“补花→暗摸底牌→公开弃牌可行”联立为一个 post-setup reference proposal：其组合概率与
 条件抽样都通过微型枚举回归。开局端已补上骰位翻金：`gold_indicator_index` 与引擎共用同一环形扫描规则，固定墙的
 条件 sampler 及“翻金 + 庄家已知首摸”联合 sampler 均与穷举小牌墙对照；重建测试覆盖首摸补花并验证本家可见状态、
-金指示牌和 144 张物理牌守恒。但这项 opening proposal 尚未与后续对手 draw→discard 条件联合，故旧 post-setup
-audit 的结果不变：固定 core seed 271 的花牌前缀虽达到 256/256 结构重放，冻结 Teacher 行为权重 ESS 仅
-17.76/256（6.9%），不接入 collector/Q/网页。普通全历史重放继续拒绝未获专门授权的花牌 transition；补杠／明杠后的
-replacement draw 也尚未形成公开 draw transition。这是保护正确性的限制，不是缺失事件可以忽略的许可。
+金指示牌和 144 张物理牌守恒。opening 已进一步与“庄家首弃→下家公开补花／暗摸→公开弃牌可行”合成单一
+per-particle `p/q` proposal，并在微型牌墙穷举校准。固定 core seed 271 的 256 粒子审计达到 256/256 结构重放，
+但冻结 Teacher 行为权重 ESS 只有 **9.55/256（3.7%）**（旧 post-setup reference 为 17.76/256），不接入
+collector/Q/网页。普通全历史重放继续拒绝未获专门授权的花牌 transition；补杠／明杠后的 replacement draw 也尚未
+形成公开 draw transition。这是保护正确性的限制，不是缺失事件可以忽略的许可。
 
 ## 实验记录模板
 

@@ -1502,6 +1502,57 @@ class _InitialNormalDrawDensityAudit:
 
 
 @dataclass(frozen=True)
+class _OpeningNormalDrawDensityAudit:
+    """Aggregate audit for the opening-aware first-opponent-draw proposal."""
+
+    proposed_particles: int
+    initialized_particles: int
+    accepted_particles: int
+    minimum_prior_over_proposal: float | None
+    maximum_prior_over_proposal: float | None
+    effective_sample_size: float
+    mean_accepted_log_likelihood: float | None
+    rejection_counts: dict[str, int]
+
+    @property
+    def acceptance_rate(self) -> float:
+        return self.accepted_particles / self.proposed_particles
+
+    @property
+    def effective_sample_fraction(self) -> float:
+        return (
+            self.effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposal": "core_opening_first_opponent_draw_density_v0",
+            "proposal_density": (
+                "structured_deal_prior_conditioned_on_opening_gold_actor_draw_"
+                "and_first_opponent_draw_discard_feasibility"
+            ),
+            "proposal_density_ratio": "per_particle_prior_over_proposal",
+            "proposed_particles": self.proposed_particles,
+            "initialized_particles": self.initialized_particles,
+            "accepted_particles": self.accepted_particles,
+            "acceptance_rate": self.acceptance_rate,
+            "minimum_prior_over_proposal": self.minimum_prior_over_proposal,
+            "maximum_prior_over_proposal": self.maximum_prior_over_proposal,
+            "effective_sample_size": self.effective_sample_size,
+            "effective_sample_fraction": self.effective_sample_fraction,
+            "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
+            "rejection_counts": dict(self.rejection_counts),
+            "warning": (
+                "Opening-aware one-transition audit only; later actor-private "
+                "draws, later public history and collector authorization are "
+                "outside this proposal."
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class _SequentialHistoryBeliefAudit:
     """Safe aggregate diagnostics for an exact-base-proposal SMC audit.
 
@@ -2212,7 +2263,7 @@ def _sample_structured_setup_given_gold_indicator_and_opening_draw(
     collector.
     """
 
-    if not is_base_tile(indicator) or opening_tile == indicator:
+    if not is_base_tile(indicator):
         return None
     prefix = [*opening_flowers, opening_tile]
     preliminary = _sample_structured_setup_given_wall_prefix(
@@ -2276,6 +2327,231 @@ def _sample_structured_setup_given_gold_indicator_and_opening_draw(
                 opponent_flowers=allocation.opponent_flowers,
                 wall=tuple([*allocation.wall[:index], *allocation.wall[index + 1 :]]),
                 condition_probability=condition_probability,
+            )
+
+
+def _sample_structured_setup_given_opening_gold_and_first_opponent_draw(
+    pool: Counter[int],
+    *,
+    opponent_hand_sizes: Sequence[int],
+    opponent_flower_sizes: Sequence[int],
+    pre_flip_wall_size: int,
+    indicator: int,
+    dice: tuple[int, int],
+    opening_flowers: Sequence[int],
+    opening_tile: int,
+    opponent_draw_flowers: Sequence[int],
+    drawer_index: int,
+    required_drawer_tile: int,
+    rng: random.Random,
+) -> _StructuredSetupDrawProposal | None:
+    """Jointly condition an opening and the next opponent normal draw.
+
+    The pre-flip wall begins with the dealer's fully known opening draw.  The
+    next normal draw belongs to the first opponent after the dealer discards:
+    its flower faces are public, its base face is hidden, and its initial hand
+    plus that hidden base must contain the following public discard. The gold
+    indicator is selected later in the same pre-flip wall by the engine's
+    dice rule.  This function samples those dependencies in order and returns
+    a per-particle ``p/q``; it is not a complete public-history sampler.
+    """
+
+    if (
+        len(opponent_hand_sizes) != len(opponent_flower_sizes)
+        or not 0 <= drawer_index < len(opponent_hand_sizes)
+        or not is_base_tile(indicator)
+        or not is_base_tile(opening_tile)
+        or not is_base_tile(required_drawer_tile)
+        or any(
+            not isinstance(tile, int) or is_base_tile(tile)
+            for tile in [*opening_flowers, *opponent_draw_flowers]
+        )
+    ):
+        return None
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    base_total = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile)
+    )
+    flower_total = sum(
+        count for tile, count in remaining.items() if not is_base_tile(tile)
+    )
+    base_hand_slots = sum(opponent_hand_sizes)
+    flower_hand_slots = sum(opponent_flower_sizes)
+    base_wall_remaining = base_total - base_hand_slots
+    flower_wall_remaining = flower_total - flower_hand_slots
+    if (
+        base_wall_remaining < 0
+        or flower_wall_remaining < 0
+        or base_wall_remaining + flower_wall_remaining != pre_flip_wall_size
+        or sum(remaining.values())
+        != base_hand_slots + flower_hand_slots + pre_flip_wall_size
+    ):
+        return None
+
+    probability = 1.0
+    positions_remaining = pre_flip_wall_size
+    base_total_remaining = base_total
+    flower_total_remaining = flower_total
+
+    def consume_known_wall_face(tile: int) -> bool:
+        nonlocal probability
+        nonlocal positions_remaining
+        nonlocal base_wall_remaining
+        nonlocal flower_wall_remaining
+        nonlocal base_total_remaining
+        nonlocal flower_total_remaining
+        if positions_remaining <= 0 or remaining[tile] <= 0:
+            return False
+        if is_base_tile(tile):
+            if base_wall_remaining <= 0 or base_total_remaining <= 0:
+                return False
+            probability *= base_wall_remaining / positions_remaining
+            probability *= remaining[tile] / base_total_remaining
+            base_wall_remaining -= 1
+            base_total_remaining -= 1
+        else:
+            if flower_wall_remaining <= 0 or flower_total_remaining <= 0:
+                return False
+            probability *= flower_wall_remaining / positions_remaining
+            probability *= remaining[tile] / flower_total_remaining
+            flower_wall_remaining -= 1
+            flower_total_remaining -= 1
+        remaining[tile] -= 1
+        positions_remaining -= 1
+        return True
+
+    opening_prefix = [*opening_flowers, opening_tile]
+    for tile in opening_prefix:
+        if not consume_known_wall_face(tile):
+            return None
+    for flower in opponent_draw_flowers:
+        if not consume_known_wall_face(flower):
+            return None
+    if base_wall_remaining <= 0 or positions_remaining <= 0:
+        return None
+    # The next opponent draw ends on an unknown base. Its physical identity is
+    # jointly sampled with the drawer's initial hand under discard feasibility.
+    probability *= base_wall_remaining / positions_remaining
+    base_wall_remaining -= 1
+    positions_remaining -= 1
+    conditioned_group = _sample_multivariate_hand_given_required_tiles(
+        Counter(
+            {
+                tile: count
+                for tile, count in remaining.items()
+                if is_base_tile(tile) and count > 0
+            }
+        ),
+        hand_size=opponent_hand_sizes[drawer_index] + 1,
+        required_tiles=(required_drawer_tile,),
+        rng=rng,
+    )
+    if conditioned_group is None:
+        return None
+    group, group_probability = conditioned_group
+    probability *= group_probability
+    rng.shuffle(group)
+    opponent_draw_tile = group.pop()
+    conditioned_drawer_hand = tuple(sorted(group))
+    remaining.subtract(Counter([*conditioned_drawer_hand, opponent_draw_tile]))
+    if any(count < 0 for count in remaining.values()):
+        return None  # pragma: no cover - protected by conditioned_group
+
+    full_prefix = [*opening_prefix, *opponent_draw_flowers, opponent_draw_tile]
+    prefix_length = len(full_prefix)
+    remaining_flower_count = sum(
+        count
+        for tile, count in remaining.items()
+        if count > 0 and not is_base_tile(tile)
+    )
+    start = pre_flip_wall_size - sum(dice)
+    # The first scan leg must contain a base after both early draws. This
+    # guarantees that gold removal never shifts either observed prefix.
+    if (
+        start < prefix_length
+        or start - prefix_length + 1 <= remaining_flower_count
+    ):
+        return None
+    remaining_base_count = sum(
+        count
+        for tile, count in remaining.items()
+        if count > 0 and is_base_tile(tile)
+    )
+    if remaining[indicator] <= 0 or remaining_base_count <= 0:
+        # This sampled discard-feasibility group took every physical copy of
+        # the indicator face. Its conditional likelihood is zero, so drop the
+        # particle instead of silently resampling the group.
+        return None
+    probability *= remaining[indicator] / remaining_base_count
+
+    while True:
+        base_values = [
+            tile
+            for tile, count in remaining.items()
+            if is_base_tile(tile)
+            for _ in range(count)
+        ]
+        flower_values = [
+            tile
+            for tile, count in remaining.items()
+            if not is_base_tile(tile)
+            for _ in range(count)
+        ]
+        rng.shuffle(base_values)
+        rng.shuffle(flower_values)
+        expected_base_values = (
+            base_hand_slots - opponent_hand_sizes[drawer_index] + base_wall_remaining
+        )
+        expected_flower_values = flower_hand_slots + flower_wall_remaining
+        if len(base_values) != expected_base_values or len(flower_values) != expected_flower_values:
+            return None  # pragma: no cover - protected by conservation checks
+        base_offset = 0
+        flower_offset = 0
+        opponent_hands: list[tuple[int, ...]] = []
+        opponent_flowers: list[tuple[int, ...]] = []
+        for index, (hand_size, flower_size) in enumerate(
+            zip(opponent_hand_sizes, opponent_flower_sizes)
+        ):
+            if index == drawer_index:
+                opponent_hands.append(conditioned_drawer_hand)
+            else:
+                opponent_hands.append(
+                    tuple(sorted(base_values[base_offset : base_offset + hand_size]))
+                )
+                base_offset += hand_size
+            opponent_flowers.append(
+                tuple(sorted(flower_values[flower_offset : flower_offset + flower_size]))
+            )
+            flower_offset += flower_size
+        tail_kinds = ["base"] * base_wall_remaining + [
+            "flower"
+        ] * flower_wall_remaining
+        rng.shuffle(tail_kinds)
+        wall = list(full_prefix)
+        for kind in tail_kinds:
+            if kind == "base":
+                wall.append(base_values[base_offset])
+                base_offset += 1
+            else:
+                wall.append(flower_values[flower_offset])
+                flower_offset += 1
+        if (
+            base_offset != len(base_values)
+            or flower_offset != len(flower_values)
+            or len(wall) != pre_flip_wall_size
+        ):
+            return None  # pragma: no cover - protected by conservation checks
+        indicator_index = gold_indicator_index(wall, dice)
+        if (
+            indicator_index is not None
+            and indicator_index >= prefix_length
+            and wall[indicator_index] == indicator
+        ):
+            return _StructuredSetupDrawProposal(
+                opponent_hands=tuple(opponent_hands),
+                opponent_flowers=tuple(opponent_flowers),
+                wall=tuple([*wall[:indicator_index], *wall[indicator_index + 1 :]]),
+                condition_probability=probability,
             )
 
 
@@ -2410,7 +2686,6 @@ def _sample_post_gold_wall_given_indicator_and_opening_draw(
     if (
         not is_base_tile(indicator)
         or not is_base_tile(opening_tile)
-        or opening_tile == indicator
         or any(
             not isinstance(tile, int) or is_base_tile(tile)
             for tile in opening_flowers
@@ -2592,6 +2867,118 @@ def _sample_replay_setup_given_opening_gold_and_draw(
         sampled,
         prior_over_proposal=allocation.condition_probability,
         condition_probability=allocation.condition_probability,
+    )
+
+
+def _sample_replay_setup_given_opening_and_first_opponent_draw(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    rng: random.Random,
+) -> tuple[_SetupReplayProposal, int, int] | None:
+    """Reconstruct the narrow opening-to-first-opponent-draw particle.
+
+    Returns the private setup proposal, the public replay boundary and the
+    one draw-event index whose flower transition is structurally conditioned.
+    The recognizer excludes later actor-private draws and non-atomic prefixes,
+    so this cannot silently stand in for a full-history sampler.
+    """
+
+    constraint = _initial_normal_draw_discard_constraint(snapshot)
+    if constraint is None:
+        return None
+    target_public_action_count, drawer_seat, draw_flowers, draw_index, discard_tile = (
+        constraint
+    )
+    trace = snapshot.actor_trace
+    source = snapshot.initial_game
+    actor_seat = trace.actor_seat
+    if (
+        source.gold_indicator is None
+        or source.gold_dice is None
+        or source.current_player != actor_seat
+        or source.phase != "discard"
+    ):
+        return None
+    actor = source.players[actor_seat]
+    opening_tile = source.last_drawn_tiles[actor_seat]
+    opening_flowers = tuple(source.last_drawn_flowers[actor_seat])
+    if (
+        opening_tile is None
+        or opening_tile not in actor.hand
+        or not is_base_tile(opening_tile)
+        or not all(not is_base_tile(tile) for tile in opening_flowers)
+    ):
+        return None
+    actor_hand_before_draw = list(actor.hand)
+    actor_hand_before_draw.remove(opening_tile)
+    actor_flowers_before_draw = list(actor.flowers)
+    for flower in opening_flowers:
+        try:
+            actor_flowers_before_draw.remove(flower)
+        except ValueError:
+            return None
+
+    pool = Counter(base_wall())
+
+    def consume(tiles: Iterable[int]) -> bool:
+        counts = Counter(tiles)
+        if any(pool[tile] < count for tile, count in counts.items()):
+            return False
+        pool.subtract(counts)
+        return True
+
+    if not consume(actor_hand_before_draw) or not consume(actor_flowers_before_draw):
+        return None
+    opponent_seats = tuple(
+        player.seat for player in source.players if player.seat != actor_seat
+    )
+    try:
+        drawer_index = opponent_seats.index(drawer_seat)
+    except ValueError:
+        return None  # pragma: no cover - constraint excludes actor drawer
+    opening_prefix_size = len(opening_flowers) + 1
+    allocation = _sample_structured_setup_given_opening_gold_and_first_opponent_draw(
+        pool,
+        opponent_hand_sizes=tuple(
+            len(source.players[seat].hand) for seat in opponent_seats
+        ),
+        opponent_flower_sizes=tuple(
+            len(source.players[seat].flowers) for seat in opponent_seats
+        ),
+        pre_flip_wall_size=len(source.wall) + 1 + opening_prefix_size,
+        indicator=source.gold_indicator,
+        dice=source.gold_dice,
+        opening_flowers=opening_flowers,
+        opening_tile=opening_tile,
+        opponent_draw_flowers=draw_flowers,
+        drawer_index=drawer_index,
+        required_drawer_tile=discard_tile,
+        rng=rng,
+    )
+    if allocation is None or allocation.wall[:opening_prefix_size] != tuple(
+        [*opening_flowers, opening_tile]
+    ):
+        return None
+    sampled = copy.deepcopy(source)
+    for seat, hand, flowers in zip(
+        opponent_seats, allocation.opponent_hands, allocation.opponent_flowers
+    ):
+        sampled.players[seat].hand = list(hand)
+        sampled.players[seat].flowers = list(flowers)
+        sampled.last_drawn_tiles[seat] = None
+        sampled.last_drawn_flowers[seat] = ()
+    sampled.wall = list(allocation.wall[opening_prefix_size:])
+    if len(sampled.wall) != len(source.wall):
+        return None  # pragma: no cover - protected by conservation checks
+    sampled.random = random.Random(rng.randrange(2**63))
+    return (
+        _SetupReplayProposal(
+            sampled,
+            prior_over_proposal=allocation.condition_probability,
+            condition_probability=allocation.condition_probability,
+        ),
+        target_public_action_count,
+        draw_index,
     )
 
 
@@ -4015,6 +4402,82 @@ def _audit_initial_normal_draw_density(
         accepted_particles=len(accepted_log_likelihoods),
         condition_probability=(
             condition_probabilities[0] if len(unique_probabilities) == 1 else None
+        ),
+        effective_sample_size=effective_sample_size,
+        mean_accepted_log_likelihood=(
+            sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
+            if accepted_log_likelihoods
+            else None
+        ),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
+def _audit_opening_first_opponent_draw_density(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+) -> _OpeningNormalDrawDensityAudit:
+    """Audit the opening-aware, one-opponent-draw exact proposal.
+
+    This replaces neither the general replay sampler nor a full belief. It
+    exposes the structural acceptance and behavior-weight ESS required to
+    decide whether this narrow construction can advance (it currently cannot
+    enter a collector on its own).
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    accepted_log_likelihoods: list[float] = []
+    importance_weights: list[float] = []
+    prior_over_proposals: list[float] = []
+    rejection_counts: Counter[str] = Counter()
+    initialized = 0
+    for _ in range(particle_count):
+        prepared = _sample_replay_setup_given_opening_and_first_opponent_draw(
+            snapshot,
+            rng=rng,
+        )
+        if prepared is None:
+            rejection_counts["setup_proposal"] += 1
+            continue
+        proposal, target_public_action_count, draw_index = prepared
+        initialized += 1
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=proposal.game,
+            condition_actor_draws=True,
+            target_public_action_count=target_public_action_count,
+            conditioned_opponent_flower_draw_indices=frozenset({draw_index}),
+        )
+        if not result.accepted:
+            rejection_counts[result.rejection_reason or "unknown"] += 1
+            continue
+        accepted_log_likelihoods.append(result.log_likelihood)
+        prior_over_proposals.append(proposal.prior_over_proposal)
+        importance_weights.append(proposal.prior_over_proposal * result.likelihood)
+    normalizer = sum(importance_weights)
+    effective_sample_size = (
+        normalizer * normalizer / sum(weight * weight for weight in importance_weights)
+        if normalizer > 0.0
+        else 0.0
+    )
+    return _OpeningNormalDrawDensityAudit(
+        proposed_particles=particle_count,
+        initialized_particles=initialized,
+        accepted_particles=len(accepted_log_likelihoods),
+        minimum_prior_over_proposal=(
+            min(prior_over_proposals) if prior_over_proposals else None
+        ),
+        maximum_prior_over_proposal=(
+            max(prior_over_proposals) if prior_over_proposals else None
         ),
         effective_sample_size=effective_sample_size,
         mean_accepted_log_likelihood=(

@@ -16,6 +16,7 @@ from xiamen_mahjong.training import (
     StateValueBaseline,
     _audit_constraint_repaired_history_prefix,
     _audit_initial_normal_draw_density,
+    _audit_opening_first_opponent_draw_density,
     _audit_initial_setup_response_claim_density,
     _audit_resampled_history_prefix,
     _audit_sequential_history_prefix,
@@ -31,6 +32,7 @@ from xiamen_mahjong.training import (
     _sample_post_gold_wall_given_indicator_and_opening_draw,
     _sample_structured_setup_given_normal_draw_flowers,
     _sample_structured_setup_given_gold_indicator_and_opening_draw,
+    _sample_structured_setup_given_opening_gold_and_first_opponent_draw,
     _sample_wall_given_normal_draw_flowers,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
@@ -202,6 +204,21 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(Counter([*wall, 0]), pool)
             self.assertAlmostEqual(condition_probability, 1.0 / 45.0)
 
+        # Indicator and opening tile may share a face while using different
+        # physical copies; rejecting that case would distort real gold draws.
+        same_face = _sample_post_gold_wall_given_indicator_and_opening_draw(
+            Counter({0: 3, 1: 1, 34: 1, 35: 1}),
+            indicator=0,
+            dice=(1, 1),
+            opening_flowers=(34,),
+            opening_tile=0,
+            rng=random.Random(25_999),
+        )
+        self.assertIsNotNone(same_face)
+        same_wall, same_probability = same_face or ([], 0.0)
+        self.assertEqual(same_wall[:2], [34, 0])
+        self.assertAlmostEqual(same_probability, 1.0 / 15.0)
+
     def test_structured_gold_and_opening_draw_proposal_has_exact_density(self):
         # One concealed base-hand slot and a five-tile pre-flip wall share
         # [0, 0, 1, 2, 34, 35]. The known opening prefix [34, 1] has
@@ -243,6 +260,59 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(proposal.wall[:2], (34, 1))
             self.assertEqual(Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool)
             self.assertAlmostEqual(proposal.condition_probability, 1.0 / 40.0)
+
+    def test_opening_and_first_opponent_draw_proposal_has_calibrated_weights(self):
+        # One opponent base-hand slot and six pre-flip wall slots share the
+        # labelled multiset [0, 0, 1, 2, 3, 34, 35]. We observe dealer
+        # [34, 1], opponent [35, hidden base], a following discard of 2, and
+        # indicator face 0. Enumeration gives a prior event probability 1/450.
+        pool = Counter({0: 2, 1: 1, 2: 1, 3: 1, 34: 1, 35: 1})
+        labeled_faces = (0, 0, 1, 2, 3, 34, 35)
+        valid = 0
+        event_count = 0
+        for ordering in permutations(range(len(labeled_faces))):
+            hand = labeled_faces[ordering[0]]
+            wall = [labeled_faces[index] for index in ordering[1:]]
+            if hand >= 34:
+                continue
+            valid += 1
+            selected = gold_indicator_index(wall, (1, 1))
+            if (
+                wall[:3] == [34, 1, 35]
+                and wall[3] < 34
+                and 2 in {hand, wall[3]}
+                and selected is not None
+                and wall[selected] == 0
+            ):
+                event_count += 1
+        self.assertEqual(event_count / valid, 1.0 / 450.0)
+        weights: list[float] = []
+        for index in range(1_500):
+            sampled = _sample_structured_setup_given_opening_gold_and_first_opponent_draw(
+                pool,
+                opponent_hand_sizes=(1,),
+                opponent_flower_sizes=(0,),
+                pre_flip_wall_size=6,
+                indicator=0,
+                dice=(1, 1),
+                opening_flowers=(34,),
+                opening_tile=1,
+                opponent_draw_flowers=(35,),
+                drawer_index=0,
+                required_drawer_tile=2,
+                rng=random.Random(40_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            proposal = sampled
+            assert proposal is not None
+            self.assertEqual(proposal.wall[:3], (34, 1, 35))
+            self.assertLess(proposal.wall[3], 34)
+            self.assertIn(2, {proposal.opponent_hands[0][0], proposal.wall[3]})
+            self.assertEqual(
+                Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool
+            )
+            weights.append(proposal.condition_probability)
+        self.assertAlmostEqual(sum(weights) / len(weights), 1.0 / 450.0, delta=0.00015)
 
     def test_opening_gold_setup_reconstruction_preserves_actor_information(self):
         teacher = HeuristicTeacherAgent()
@@ -379,6 +449,50 @@ class TrainingTests(unittest.TestCase):
         )
         self.assertIn("prior_over_proposal", payload["proposal_density_ratio"])
         self.assertIn("not authorized", payload["warning"])
+
+    def test_opening_aware_normal_draw_audit_reports_particle_density_range(self):
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=271,
+            rules=XiamenRules.from_profile("core"),
+            dealer=0,
+            auto_advance=False,
+            human_seat=-1,
+        )
+        opponents = {seat: ("heuristic_teacher", teacher) for seat in range(1, 4)}
+        snapshot = next(
+            item
+            for item in _run_candidate_base_hand(
+                game,
+                candidate_seat=0,
+                candidate_policy=teacher,
+                opponents=opponents,
+            )
+            if _initial_normal_draw_discard_constraint(item) is not None
+        )
+        audit = _audit_opening_first_opponent_draw_density(
+            snapshot,
+            opponents=opponents,
+            particle_count=64,
+            rng=random.Random(41_917),
+        )
+        self.assertEqual(audit.initialized_particles, 64)
+        self.assertEqual(audit.accepted_particles, 64)
+        self.assertIsNotNone(audit.minimum_prior_over_proposal)
+        self.assertIsNotNone(audit.maximum_prior_over_proposal)
+        self.assertLess(
+            audit.minimum_prior_over_proposal or 0.0,
+            audit.maximum_prior_over_proposal or 0.0,
+        )
+        self.assertGreater(audit.effective_sample_size, 0.0)
+        payload = audit.payload()
+        self.assertEqual(
+            payload["proposal"], "core_opening_first_opponent_draw_density_v0"
+        )
+        self.assertEqual(
+            payload["proposal_density_ratio"], "per_particle_prior_over_proposal"
+        )
+        self.assertIn("outside", payload["warning"])
 
     def test_exact_density_audit_covers_only_initial_response_claims(self):
         teacher = HeuristicTeacherAgent()

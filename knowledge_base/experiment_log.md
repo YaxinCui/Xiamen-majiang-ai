@@ -462,9 +462,11 @@ hand／flower-slot、花序列与公开弃牌的结构可行性联立；微型�
 随后开局翻金 transition 已补齐：将引擎骰位环形扫描／跳花规则抽为共享 `gold_indicator_index`，固定墙的
 `P(indicator face)` 条件 sampler 与小牌墙完整枚举一致；“翻金 + 庄家已知首摸”还验证了联合结构概率。两个 core
 重建夹具（seed 271、seed 32，其中后者首摸补花）均保持本家手/花、公开金指示牌/骰子、牌墙长度与 144 张物理牌
-多重集。它只修复 opening prior，尚未与后续对手 draw→discard 联合，故不改变前述 **17.76/256（6.9%）** ESS 的
-拒绝结论，也不接入 collector/Q/网页。普通重放仍以 `opponent_flower_transition_unsupported` 安全拒绝；下一步推导
-opening 与首个对手 draw→discard 的联合 density 后重新审计。
+多重集。随后 opening 与首位对手 draw→discard（含公开弃牌可行性）合并为层次 proposal；标号微型牌墙的枚举先验
+为 **1/450**，proposal 的平均 per-particle `p/q` 与之相符。真实 core seed 271、256 粒子审计已达 **256/256**
+结构接受，但 `p/q` 随隐藏分配为 `2.5967952709322814e-07` 到 `1.0387181083729125e-06`，Teacher 行为加权 ESS 仅
+**9.55/256（3.7%）**，比旧 reference 更低。因此继续拒绝 collector/Q/网页；普通重放仍以
+`opponent_flower_transition_unsupported` 安全拒绝。下一步先校准行为条件 proposal，而不是继续延长该前缀。
 
 ## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
 

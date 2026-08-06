@@ -118,12 +118,17 @@ transition。现已将此规则抽为 `gold_indicator_index`，供引擎与 beli
 界，又构造了“翻金 + 庄家已知首摸（含补花和私有底牌）”的联合 structured proposal；微型枚举得到相同 `p/q`，两个
 core seed（其中 seed 32 首摸补花）重建后均保留本家可见状态、金指示牌、骰子与完整物理牌多重集。
 
-该 opening transition 仍未与下一位对手的 draw→discard／公开副露联合；所以它只是修复了先验起点，尚非完整规则发牌
-posterior，也不能取代旧 post-setup audit。固定 core、dealer 0、seed 271 的首弃→下家补花→弃牌前缀（公开花为
-`(40,)`）中，旧 reference proposal 256/256 均结构重放成功，`p/q=0.0012275911710061692`；但冻结 Teacher 的行为
-似然 ESS 只有 **17.76/256 = 6.9%**。该 audit 继续被拒绝进入 collector/Q/网页，普通重放仍以
-`opponent_flower_transition_unsupported` 拒绝未授权花 transition；源局 replay oracle 不受影响。下一步把 opening
-proposal 与首个对手 draw→discard 的联合组合密度推导出来，再重新测 ESS。
+opening transition 现已与下一位对手的首个 draw→discard 联合：先固定庄家首摸的花序列与私有 base，再固定下家公开
+花序列；将其初始暗手与该次隐藏 base 作为一组，以多元超几何条件为“含公开弃牌牌面”采样；最后在剩余 structured
+slots 上按真实骰位翻金规则 rejection。该层次 proposal 返回**每粒子** `p/q`，因为公开弃牌条件会改变剩余金指示牌
+牌面的质量。标号微型牌墙穷举验证 proposal weight 的 Monte-Carlo 均值等于真实联合先验事件概率。
+
+固定 core、dealer 0、seed 271 的首弃→下家补 `(40,)`→弃 18 前缀中，该 opening-aware proposal 256/256 均结构
+重放成功；每粒子 `p/q` 落在 `2.5967952709322814e-07` 至 `1.0387181083729125e-06`，但冻结 Teacher 行为似然 ESS
+只有 **9.55/256 = 3.7%**，甚至低于旧 post-setup reference 的 6.9%。因此它仍不是完整 posterior、更不能进入
+collector/Q/网页；普通重放仍以 `opponent_flower_transition_unsupported` 拒绝未授权花 transition，源局 replay oracle
+不受影响。下一步不再扩大该 prefix，而是建立可校准的对手行为 proposal／likelihood，并先在同一小牌墙验证其不会让
+重要性权重退化。
 
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 
