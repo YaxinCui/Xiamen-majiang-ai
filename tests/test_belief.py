@@ -41,6 +41,38 @@ class ParticleBeliefTests(unittest.TestCase):
         self.assertLess(diagnostics.effective_sample_size, diagnostics.particle_count)
         self.assertTrue(math.isfinite(diagnostics.log_evidence))
 
+    def test_importance_corrected_constraint_proposal_matches_exact_mini_deck(self):
+        # The actor visibly holds tile 2.  The four unknown physical tiles are
+        # 0, 0, 1, 1 and the opponent receives two.  Before behavior is
+        # observed, the three *hand-type* priors are P(00)=1/6, P(01)=2/3,
+        # P(11)=1/6.  We observe a public discard of tile 1, whose behavior
+        # likelihood is 0 for 00, 0.8 for 01, and 0.6 for 11.
+        #
+        # A legal-action-constrained proposal omits impossible 00 hands and
+        # deliberately samples q(01)=3/4, q(11)=1/4.  The three 01 entries
+        # and one 11 entry are a deterministic stratification of q.  Each
+        # receives p/q before observing the action, so this is the exact
+        # importance-correction contract a future Mahjong proposal needs.
+        particles = ["01", "01", "01", "11"]
+        belief = SequentialParticleBelief(
+            particles,
+            initial_weights=[8.0 / 9.0, 8.0 / 9.0, 8.0 / 9.0, 2.0 / 3.0],
+            seed=53,
+            resample_ess_fraction=0.0,
+        )
+        likelihood = {"01": 0.8, "11": 0.6}
+        diagnostics = belief.observe(
+            "discard_1",
+            lambda hand, _event, _rng: (hand, likelihood[hand]),
+        )
+        # Exact posterior: (2/3 * 0.8) / (2/3 * 0.8 + 1/6 * 0.6) = 16/19.
+        self.assertAlmostEqual(
+            belief.expectation(lambda hand: hand == "01"), 16.0 / 19.0
+        )
+        self.assertEqual(diagnostics.observation_count, 1)
+        self.assertGreater(diagnostics.effective_sample_size, 0.0)
+        self.assertTrue(math.isfinite(diagnostics.log_evidence))
+
     def test_resampling_records_pre_resample_degeneracy_but_normalizes_next_state(self):
         belief = SequentialParticleBelief(
             [True] * 20 + [False] * 20,

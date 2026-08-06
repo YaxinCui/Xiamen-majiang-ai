@@ -74,9 +74,13 @@ class SequentialParticleBelief(Generic[ParticleT, ObservationT]):
     mutate the original particle, because implementations often retain game
     clones for continuation rollout.
 
-    Resampling is systematic and uses a private RNG.  It is an internal Monte
-    Carlo operation only; its seed and particles must not appear in exported
-    training JSONL.
+    ``initial_weights`` may encode an explicit importance correction such as
+    ``prior_density / proposal_density`` for particles sampled from a
+    constrained proposal.  They are normalized before the first observation;
+    callers remain responsible for retaining no particle/world identities in
+    exports. Resampling is systematic and uses a private RNG.  It is an
+    internal Monte Carlo operation only; its seed and particles must not
+    appear in exported training JSONL.
     """
 
     def __init__(
@@ -85,13 +89,25 @@ class SequentialParticleBelief(Generic[ParticleT, ObservationT]):
         *,
         seed: int = 20260806,
         resample_ess_fraction: float = 0.5,
+        initial_weights: Sequence[float] | None = None,
     ):
         if not particles:
             raise ValueError("粒子 belief 至少需要一个粒子")
         if not 0.0 <= resample_ess_fraction <= 1.0:
             raise ValueError("resample_ess_fraction 必须在 0 到 1 之间")
         self._particles = list(particles)
-        self._weights = [1.0 / len(self._particles)] * len(self._particles)
+        if initial_weights is None:
+            self._weights = [1.0 / len(self._particles)] * len(self._particles)
+        else:
+            if len(initial_weights) != len(self._particles):
+                raise ValueError("initial_weights 必须与粒子数量一致")
+            unnormalized = [float(weight) for weight in initial_weights]
+            if any(not math.isfinite(weight) or weight < 0.0 for weight in unnormalized):
+                raise ValueError("initial_weights 必须为有限的非负数")
+            normalizer = sum(unnormalized)
+            if normalizer <= 0.0:
+                raise ValueError("initial_weights 至少需要一个正数")
+            self._weights = [weight / normalizer for weight in unnormalized]
         self._rng = random.Random(seed)
         self._resample_ess_fraction = float(resample_ess_fraction)
         self._observation_count = 0
