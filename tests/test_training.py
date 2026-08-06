@@ -1,4 +1,5 @@
 import tempfile
+from types import SimpleNamespace
 import unittest
 from collections import Counter
 from itertools import permutations
@@ -76,6 +77,20 @@ class _BatchFirstLegalPolicy:
             [-float(index) for index in range(len(decision.legal_actions))]
             for decision in decisions
         ]
+
+
+class InterventionCollectorTests(unittest.TestCase):
+    def test_teacher_base_is_an_explicit_no_checkpoint_behavior(self):
+        from scripts.collect_candidate_teacher_dagger_trajectories import load_base_policy
+
+        policy, identity = load_base_policy(
+            SimpleNamespace(teacher_base=True, checkpoint=None, device="cpu")
+        )
+
+        self.assertIsInstance(policy, HeuristicTeacherAgent)
+        self.assertEqual(identity["kind"], "heuristic_teacher")
+        self.assertIsNone(identity["checkpoint"])
+        self.assertIsNone(identity["inference_device"])
 
 
 class _ScoreAwareFallbackPolicy:

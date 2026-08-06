@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from xiamen_mahjong.agents import GameAction
+from xiamen_mahjong.agents import GameAction, HeuristicTeacherAgent
 from xiamen_mahjong.training import (
     _turn_actions,
     collect_candidate_teacher_dagger_trajectories,
@@ -125,7 +125,20 @@ class SingleInterventionEpsilonBehavior:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, required=True)
+    base_group = parser.add_mutually_exclusive_group(required=True)
+    base_group.add_argument(
+        "--checkpoint",
+        type=Path,
+        help="冻结的 policy-value 行为基线；只用于收集，不会在本脚本中更新",
+    )
+    base_group.add_argument(
+        "--teacher-base",
+        action="store_true",
+        help=(
+            "以网页默认 HeuristicTeacher 作为单点随机干预的行为与后缀基线；"
+            "用于收集直接对 Teacher 的因果 response 数据。"
+        ),
+    )
     parser.add_argument("--profile", choices=("classic", "core"), default="classic")
     parser.add_argument("--seed-count", type=int, default=100)
     parser.add_argument("--seed", type=int, default=20265004)
@@ -180,6 +193,24 @@ def load_policy(path: Path, *, device: str = "cpu"):
     return TorchPolicyValueAgent.load(path, device=device)
 
 
+def load_base_policy(args: argparse.Namespace):
+    """Resolve an explicitly named frozen checkpoint or the rule Teacher."""
+
+    if args.teacher_base:
+        return HeuristicTeacherAgent(), {
+            "kind": "heuristic_teacher",
+            "checkpoint": None,
+            "inference_device": None,
+        }
+    if args.checkpoint is None:  # pragma: no cover - argparse enforces one choice.
+        raise ValueError("必须指定 --checkpoint 或 --teacher-base")
+    return load_policy(args.checkpoint, device=args.device), {
+        "kind": "policy_value_checkpoint",
+        "checkpoint": str(args.checkpoint),
+        "inference_device": args.device,
+    }
+
+
 def main() -> None:
     args = parse_args()
     if args.seed_count <= 0:
@@ -188,7 +219,7 @@ def main() -> None:
         raise ValueError("uniform-exploration-probability 必须在 [0, 1) 内")
     if args.intervention_max_decisions <= 0:
         raise ValueError("intervention-max-decisions 必须为正数")
-    base_policy = load_policy(args.checkpoint, device=args.device)
+    base_policy, base_identity = load_base_policy(args)
     behavior_seed = (
         args.behavior_seed if args.behavior_seed is not None else args.seed + 40_000_000
     )
@@ -206,6 +237,7 @@ def main() -> None:
         seed=args.seed,
         behavior_metadata={
             "behavior_policy": "single_intervention_epsilon_uniform",
+            "base_policy": base_identity["kind"],
             "uniform_exploration_probability": args.uniform_exploration_probability,
             "intervention_max_decisions": args.intervention_max_decisions,
             "intervention_phase": args.intervention_phase,
@@ -232,15 +264,16 @@ def main() -> None:
     report = {
         "source": "candidate_vs_teacher_dagger",
         "profile": args.profile,
-        "behavior_checkpoint": str(args.checkpoint),
+        "behavior_base": base_identity,
         "behavior_policy": {
             "type": "single_intervention_epsilon_uniform",
+            "base_policy": base_identity["kind"],
             "uniform_exploration_probability": args.uniform_exploration_probability,
             "intervention_max_decisions": args.intervention_max_decisions,
             "intervention_phase": args.intervention_phase,
             "seed_in_training_jsonl": False,
         },
-        "inference_device": args.device,
+        "inference_device": base_identity["inference_device"],
         "seed_count": args.seed_count,
         "seat_rotations_per_seed": 4,
         "summary": summary.payload(),

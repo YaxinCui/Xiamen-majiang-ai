@@ -612,3 +612,15 @@ head）终检。结果为 **−0.8550 ± 0.6448** 分/局，95% CI **[−2.1189,
 下界不为正、点估计也转负，因此 run3 不升级、不替换网页 Teacher、也不再被描述为下一轮优化的最强冻结起点。该
 结果不宣称 run3 已显著弱于 Teacher（区间仍跨 0），但足以否定其具有已验证优势。完整可复核产物为
 `artifacts/evaluation-run3-vs-teacher-terminal-202608431.json`。
+
+## 2026-08-07：Teacher 单点 response 干预收集器（基础设施）
+
+既然 run3 与 run4 都不再是可验证的最强基线，扩展 run4 后状态 selector 或从其继续 PPO 都不符合证据。为获得
+直接对网页默认 Teacher 的因果数据，`collect_candidate_teacher_dagger_trajectories.py` 现允许 `--teacher-base`。
+它以 Teacher 作为干预前、干预后和三名对手的冻结策略；只在一个预选 response 位置按已知
+`ε × uniform + (1−ε) × Teacher` 行为采样，并导出真实执行动作和其 propensity。manifest 显式写入
+`behavior_base=heuristic_teacher`、无 checkpoint／无推理设备，避免将规则 Teacher 伪装成神经参数来源。
+
+core 小规模 smoke（3 个物理墙、12 个换座手）确认该路径可完成结算、生成安全 split 轨迹，并保持规则 Teacher
+身份。尚未收集经典训练墙、训练 outcome/Q 头或测试 selector，因此这不是模型或强度实验。后续先做独立 OPE/支持度
+审计，再决定是否值得生成足量经典数据。

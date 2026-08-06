@@ -338,6 +338,18 @@ continuation 扩写成所有候选的 Q 标签，也不会改变 policy logits �
 检查点会标记为 `diagnostic_only_not_authorized_for_action_selection`；只有在按墙隔离的校准、行为支持度审计
 及新的 200/400 墙配对实战均通过后，才可以测试小幅 policy-prior 混合。
 
+run4 的后状态 selector 已被独立实战否决，不能继续作为新的数据行为基线。若要研究“是否能在 Teacher 的某一个
+响应点安全偏离”，可改用 `--teacher-base` 收集因果单点干预：干预前后均严格回到 Teacher，只有随机选中的一个
+response 按已知概率采样。它是数据收集入口，不是部署 selector；产物仍须先有独立的校准和离线支持度证据：
+
+```bash
+.venv/bin/python scripts/collect_candidate_teacher_dagger_trajectories.py \
+  --teacher-base --profile classic --seed-count 240 --seed 202608451 \
+  --uniform-exploration-probability 0.40 --intervention-max-decisions 16 \
+  --intervention-phase response --train-fraction 0.7 --validation-fraction 0.15 \
+  --output-dir artifacts/teacher-response-intervention-v1
+```
+
 若有多个按物理牌墙隔离的单点干预墙组，可用 `--additional-train`、`--additional-validation` 和
 `--additional-test` 只追加同一分区；v5 会训练独立的 afterstate encoder，因此不会改写冻结 policy logits。可先
 用 `scripts/audit_afterstate_ensemble.py` 审计 logged-action 校准、成员离散度及假设性 policy-prior 偏移，再用
