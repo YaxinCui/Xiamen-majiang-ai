@@ -298,8 +298,8 @@ iteration 3 **−0.223 ± 0.740**，95% CI **[−1.673, +1.228]**。没有一个
 这只证明公开特征可预测**已执行动作**在固定后续策略下的软终局结果；它没有观察未执行动作的结果，不能授权
 afterstate head、Q head 或网页 agent 对全体候选直接取 argmax。下一阶段必须先以已知 propensity 的温和随机
 行为混合增加动作覆盖，并在按墙隔离的动作集上做 propensity/支持度审计；只有 score 与两类概率继续通过校准、
-且保守 policy-prior 混合在新牌墙的 200 墙筛选为正，才允许进行 400 墙终检。默认网页 AI 和当前最佳 run4
-在此之前均不变。
+且保守 policy-prior 混合在新牌墙的 200 墙筛选为正，才允许进行 400 墙终检。当时冻结的 run4 仅作为
+历史实验起点；网页默认始终是 Teacher。
 
 ### 单动作随机干预：使终局标签匹配目标策略后缀
 
@@ -406,7 +406,8 @@ listwise soft-ranking loss；两者均使用 v6 独立 Q encoder/head，并启�
 结论：在当前 run4 访问分布、完整隐藏 world 的单样本分支与约 1.7k response 信息集下，direct-response Q 没有可靠
 超过冻结 policy 的排序证据。停止继续扩大该数据或调 Q loss；不做 200/400 墙、不晋升。下一阶段回到更根本的信息
 集问题：先实现可验证、全公开历史条件化的 sequential belief proposal（必须先报告可接受率、ESS、与 toy exact
-posterior 的校准），再考虑用其多 world 目标重新构造长程行动价值。当前网页 AI 和 run4 checkpoint 保持不变。
+posterior 的校准），再考虑用其多 world 目标重新构造长程行动价值。网页默认维持 Teacher；run4 保留为历史
+实验 checkpoint，不能据此宣称强度。
 
 ### 全公开历史约束修复 proposal：接受率恢复，但权重 ESS 淘汰
 
@@ -417,7 +418,7 @@ posterior 的校准），再考虑用其多 world 目标重新构造长程行动
 固定 seed 953 的 9-event 单元夹具，100 个 proposal 中朴素重放接受 **0** 个；修复后接受 **94** 个，平均
 3.38 次交换。但以冻结 Teacher 行为概率加权的 ESS 仅 **3.55/94（3.8%）**，长前缀探针约 1%。此外交换 proposal
 的密度尚未显式计算，不能把当前权重当作严格 posterior 修正。故该方案只证明错误来源，**不通过** belief 数据、
-Q 训练或实战评测门槛；run4 和网页默认策略不变。下一步应先在可枚举小牌墙上实现带 proposal-density 的逐事件
+Q 训练或实战评测门槛；网页默认 Teacher 不变。下一步应先在可枚举小牌墙上实现带 proposal-density 的逐事件
 条件化，再决定是否重启多 world 行动价值采集。
 
 ### 重要性修正的微型物理牌墙校准
@@ -483,8 +484,8 @@ hand／flower-slot、花序列与公开弃牌的结构可行性联立；微型�
 人类”的结论。
 
 为进行受控试玩，`serve_web_game.py --ai-checkpoint <policy-value.pt>` 会将三名 AI 显式替换为该 checkpoint，
-网页标识为 `EXPLICIT EXPERIMENTAL CHECKPOINT`；没有参数时仍是 Teacher。run4 checkpoint 已通过“加载、响应、
-人类一手、AI 自动推进”的规则引擎冒烟检查。该路径仅提供未来人类 A/B 与数据采集能力，**不构成** run4
+网页标识为 `EXPLICIT EXPERIMENTAL CHECKPOINT`；没有参数时仍是 Teacher。显式 checkpoint 已通过“加载、响应、
+人类一手、AI 自动推进”的规则引擎冒烟检查。该路径仅提供未来人类 A/B 与数据采集能力，不构成任何 checkpoint
 战胜人类的结论。
 
 ## 2026-08-07：信息集 rollout 规则基线（初筛未通过）
@@ -498,3 +499,25 @@ mode 后，1 belief world 在预注册 10 墙、经典换座筛选相对 Teacher
 **[−14.892, +11.342]**）；2 worlds 在另一 5 墙筛选为 **−9.30 ± 5.704**（**[−20.480, +1.880]**）。均无正向
 证据，故不接入网页、不开更大筛选，也不产生训练数据。该组件仅保留为日后有经校准 belief/value 时的安全
 信息集搜索基线。
+
+## 2026-08-07：独立回归评测——淘汰 run4，冻结 Teacher 默认
+
+为检验“DAgger 混合验证集更高一致率”是否真的提高实战强度，使用此前未参与训练或 checkpoint 选择的
+经典档 **80** 个物理牌墙（seed `202608081` 起），每墙四座轮换；推理固定为 CUDA、policy head。评测 CLI
+现在同时记录 checkpoint SHA-256，避免同名参数文件被替换后让历史结果失去身份。
+
+| 候选 | 对三名 Teacher 的均分（每局） | 胡率 | 结论 |
+| --- | ---: | ---: | --- |
+| run3 | **+1.3375 ± 1.3770**，95% CI **[−1.3615, +4.0365]** | 26.25% | 方向为正，但区间跨 0；只可作显式实验候选。 |
+| run4-dagger | **−2.3813 ± 1.1274**，95% CI **[−4.5911, −0.1714]** | 22.19% | 相对 Teacher 已显著为负，不可试玩默认或再作为训练起点。 |
+
+同一批牌墙的配对 run4 − run3 为 **−3.7188 ± 1.5691**，95% CI **[−6.7942, −0.6433]**，因此 run4 的退化不是
+牌墙难度差异。可复核评测产物为 `artifacts/evaluation-run3-vs-teacher-independent-202608081.json` 和
+`artifacts/evaluation-run4-vs-teacher-independent-202608081.json`；两个参数 SHA-256 分别为
+`01616a38ff34af71f1774995d5d3f9e08c4408fd85757ad563d9dfa339b19f70` 与
+`e8a23464717762421ff6616c95d4b290188864d8d0363a0dac19f80500e39909`。
+
+同日对 `InformationSetRolloutAgent` 做了另一组经典 10 墙 response-only 诊断（1 个 belief world、seed
+`202608071`）：**−4.975 ± 4.862**，95% CI **[−14.504, +4.554]**。这与先前的初筛一样没有正向证据；不扩大
+搜索、不让它产生训练标签。下一轮优化应重新构造可验证的强度来源（经审计的人类数据、或通过联赛门槛的
+自博弈），而不是继续在 Teacher/DAgger 轨迹上微调。

@@ -36,12 +36,13 @@ python3 scripts/serve_web_game.py \
 
 ```bash
 .venv/bin/python scripts/serve_web_game.py \
-  --ai-checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --ai-checkpoint artifacts/policy-value-classic-v1-run3/policy-value.pt \
   --ai-device cpu \
-  --human-log local_human_data/run4-vs-human.jsonl
+  --human-log local_human_data/run3-vs-human.jsonl
 ```
 
-这只是受控试玩和数据采集路径，不构成该 checkpoint 胜过人类的证据。
+这只是受控试玩和数据采集路径，不构成该 checkpoint 胜过人类的证据。run3 是当前较少退化的神经网络实验候选；
+它相对 Teacher 的独立 80 墙评测仍未通过正向置信区间门槛，网页默认继续使用 Teacher。
 
 记录达到一定数量后，先运行只读质量审计，而不是直接训练：
 

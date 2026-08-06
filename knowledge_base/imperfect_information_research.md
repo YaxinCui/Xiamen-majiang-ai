@@ -63,7 +63,7 @@ fallback），并逐条比对生成的公开 event。固定 `seed=953` 的 13 �
 但其冻结 Teacher 行为似然的加权 ESS 只有 **3.55/94 = 0.038**。更长前缀的初步探针亦可降至约 1%，
 说明高接受率只是把拒绝退化变成了严重的权重退化；而且该交换 proposal 尚未计算自身密度，不能把该
 ESS 解释为严格 posterior ESS。因此它**不通过**进入 multi-world 价值数据的门槛，不能声称是 sequential
-posterior，也不能替换现有局部 SIR 或网页默认 run4。
+posterior，也不能替换现有局部 SIR 或网页默认 Teacher。
 
 下一项研究不是继续扩大该修复采样，而是定义有显式条件密度的逐事件 proposal（含抽牌/本家私有摸牌、
 弃牌、公开副露与行为模型温度校准），在可枚举小牌墙上同精确 posterior 对照；只有接受率、proposal

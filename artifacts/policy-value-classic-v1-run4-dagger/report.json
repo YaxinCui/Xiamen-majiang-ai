@@ -1,0 +1,400 @@
+{
+  "model": "candidate_policy_value",
+  "feature_version": 3,
+  "feature_dim": 145,
+  "hidden_size": 128,
+  "device": "cuda",
+  "seed": 20260816,
+  "value_scale": 80.0,
+  "value_weight": 0.25,
+  "inputs": {
+    "train": [
+      "artifacts/trajectory-balanced-classic-v3-run1/train.trajectories.jsonl",
+      "artifacts/candidate-teacher-dagger-classic-v1-run1/train.trajectories.jsonl"
+    ],
+    "validation": [
+      "artifacts/trajectory-balanced-classic-v3-run1/validation.trajectories.jsonl",
+      "artifacts/candidate-teacher-dagger-classic-v1-run1/validation.trajectories.jsonl"
+    ],
+    "test": "artifacts/trajectory-balanced-classic-v3-run1/test.trajectories.jsonl",
+    "init_checkpoint": "artifacts/policy-value-classic-v1-run3/policy-value.pt"
+  },
+  "class_weights": {
+    "add_kan": 6.0,
+    "advance_tour": 6.0,
+    "an_kan": 6.0,
+    "chi": 2.5801584927614485,
+    "discard": 1.0,
+    "hu": 6.0,
+    "ming_kan": 6.0,
+    "pass": 6.0,
+    "pong": 2.9717799923816326
+  },
+  "source_weights": {
+    "heuristic_teacher_self_play": 1.0,
+    "candidate_vs_teacher_dagger": 1.0,
+    "random_legal_teacher_labeled": 0.35,
+    "physical_response_pass_search": 1.0,
+    "engine_validated_tour_curriculum": 1.0
+  },
+  "checkpoint_selection": {
+    "split": "validation",
+    "metric": "lowest_policy_loss_then_highest_accuracy",
+    "selected_epoch": 20,
+    "selected_validation": {
+      "decisions": 2266.0,
+      "accuracy": 0.9571932921447485,
+      "policy_loss": 0.19055412612592457,
+      "value_decisions": 1465.0,
+      "value_mae_scaled": 0.38013488527756095,
+      "value_rmse_scaled": 0.5211724687619187
+    },
+    "final_epoch": 20
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_policy_loss": 0.11053497039458969,
+      "train_value_loss": 0.11990897707415349,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9452780229479258,
+        "policy_loss": 0.21493025757110557,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3636485234335217,
+        "value_rmse_scaled": 0.5256116198498177
+      }
+    },
+    {
+      "epoch": 2,
+      "train_policy_loss": 0.10519429725227934,
+      "train_value_loss": 0.11788569842324112,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9505736981465137,
+        "policy_loss": 0.21361514124128703,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3687019523067889,
+        "value_rmse_scaled": 0.526178100132014
+      }
+    },
+    {
+      "epoch": 3,
+      "train_policy_loss": 0.10357643455041177,
+      "train_value_loss": 0.11698575125950755,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9510150044130626,
+        "policy_loss": 0.21356203993915732,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.39794454024119286,
+        "value_rmse_scaled": 0.5347908717294231
+      }
+    },
+    {
+      "epoch": 4,
+      "train_policy_loss": 0.09933055254320304,
+      "train_value_loss": 0.1160662772529053,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9541041482789056,
+        "policy_loss": 0.20599904530062843,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3859163758990199,
+        "value_rmse_scaled": 0.5311993375683907
+      }
+    },
+    {
+      "epoch": 5,
+      "train_policy_loss": 0.09801783249007934,
+      "train_value_loss": 0.11629218314633225,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9554280670785525,
+        "policy_loss": 0.20317624615290142,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3661976522680232,
+        "value_rmse_scaled": 0.5193811144850573
+      }
+    },
+    {
+      "epoch": 6,
+      "train_policy_loss": 0.09638943545746081,
+      "train_value_loss": 0.11617392820842339,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9558693733451015,
+        "policy_loss": 0.2051177503323496,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.37890290408792554,
+        "value_rmse_scaled": 0.520998726277703
+      }
+    },
+    {
+      "epoch": 7,
+      "train_policy_loss": 0.09693549516977686,
+      "train_value_loss": 0.11493717924211964,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9607237422771403,
+        "policy_loss": 0.1969606867175317,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3758762389179891,
+        "value_rmse_scaled": 0.531848008747715
+      }
+    },
+    {
+      "epoch": 8,
+      "train_policy_loss": 0.09268739853392947,
+      "train_value_loss": 0.11423871553305423,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9593998234774934,
+        "policy_loss": 0.1994089018103129,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.408488238914377,
+        "value_rmse_scaled": 0.5420200030805887
+      }
+    },
+    {
+      "epoch": 9,
+      "train_policy_loss": 0.09168669090352276,
+      "train_value_loss": 0.11526993346033675,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9549867608120035,
+        "policy_loss": 0.2051767746730423,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.36107151861598163,
+        "value_rmse_scaled": 0.52114142558635
+      }
+    },
+    {
+      "epoch": 10,
+      "train_policy_loss": 0.09032700351919189,
+      "train_value_loss": 0.1141673880770351,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9611650485436893,
+        "policy_loss": 0.19813601282301954,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3758950908372732,
+        "value_rmse_scaled": 0.5243819791677973
+      }
+    },
+    {
+      "epoch": 11,
+      "train_policy_loss": 0.08795771536163309,
+      "train_value_loss": 0.11537302511207985,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9514563106796117,
+        "policy_loss": 0.2047909776710967,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3731574993288151,
+        "value_rmse_scaled": 0.5219164493802265
+      }
+    },
+    {
+      "epoch": 12,
+      "train_policy_loss": 0.08622825676293085,
+      "train_value_loss": 0.11245441741564056,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9602824360105914,
+        "policy_loss": 0.19690319972749593,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.39145928402351843,
+        "value_rmse_scaled": 0.5324712494269499
+      }
+    },
+    {
+      "epoch": 13,
+      "train_policy_loss": 0.08667158843441443,
+      "train_value_loss": 0.1131273169409145,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9593998234774934,
+        "policy_loss": 0.19822743433776052,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.37692475856024354,
+        "value_rmse_scaled": 0.5271354486913932
+      }
+    },
+    {
+      "epoch": 14,
+      "train_policy_loss": 0.08475776191687945,
+      "train_value_loss": 0.11373876362587466,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9580759046778464,
+        "policy_loss": 0.21148770858807947,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3549310811588687,
+        "value_rmse_scaled": 0.5186848491521293
+      }
+    },
+    {
+      "epoch": 15,
+      "train_policy_loss": 0.08729291515368404,
+      "train_value_loss": 0.11297750563332529,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9523389232127096,
+        "policy_loss": 0.19581638628320797,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.36884350979211183,
+        "value_rmse_scaled": 0.520827983442062
+      }
+    },
+    {
+      "epoch": 16,
+      "train_policy_loss": 0.08252533647993748,
+      "train_value_loss": 0.1116985243491151,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9593998234774934,
+        "policy_loss": 0.19179494826051466,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3610344681990533,
+        "value_rmse_scaled": 0.5158266189711808
+      }
+    },
+    {
+      "epoch": 17,
+      "train_policy_loss": 0.08044587205531019,
+      "train_value_loss": 0.11258452882369359,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9598411297440423,
+        "policy_loss": 0.19403240729936305,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.3692996722808165,
+        "value_rmse_scaled": 0.5254929973816319
+      }
+    },
+    {
+      "epoch": 18,
+      "train_policy_loss": 0.07922864451327107,
+      "train_value_loss": 0.11164335025982423,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9558693733451015,
+        "policy_loss": 0.19415261206845588,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.43049059446468796,
+        "value_rmse_scaled": 0.551624816169597
+      }
+    },
+    {
+      "epoch": 19,
+      "train_policy_loss": 0.07951487273429379,
+      "train_value_loss": 0.1131116904769883,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9580759046778464,
+        "policy_loss": 0.19146447999143748,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.39538923711372925,
+        "value_rmse_scaled": 0.5304934316521899
+      }
+    },
+    {
+      "epoch": 20,
+      "train_policy_loss": 0.0781580808600693,
+      "train_value_loss": 0.11233887415040623,
+      "validation": {
+        "decisions": 2266.0,
+        "accuracy": 0.9571932921447485,
+        "policy_loss": 0.19055412612592457,
+        "value_decisions": 1465.0,
+        "value_mae_scaled": 0.38013488527756095,
+        "value_rmse_scaled": 0.5211724687619187
+      }
+    }
+  ],
+  "validation": {
+    "overall": {
+      "decisions": 2266.0,
+      "accuracy": 0.9571932921447485,
+      "policy_loss": 0.19055412612592457,
+      "value_decisions": 1465.0,
+      "value_mae_scaled": 0.38013488527756095,
+      "value_rmse_scaled": 0.5211724687619187
+    },
+    "by_source": {
+      "candidate_vs_teacher_dagger": {
+        "decisions": 491.0,
+        "accuracy": 0.9633401221995926,
+        "policy_loss": 0.16732813900782456,
+        "value_decisions": 491.0,
+        "value_mae_scaled": 0.32924620632287077,
+        "value_rmse_scaled": 0.4531571378749047
+      },
+      "engine_validated_tour_curriculum": {
+        "decisions": 12.0,
+        "accuracy": 1.0,
+        "policy_loss": 0.0,
+        "value_decisions": 0.0
+      },
+      "physical_response_pass_search": {
+        "decisions": 9.0,
+        "accuracy": 1.0,
+        "policy_loss": 0.0,
+        "value_decisions": 0.0
+      },
+      "random_legal_teacher_labeled": {
+        "decisions": 780.0,
+        "accuracy": 0.9564102564102565,
+        "policy_loss": 0.258472295449138,
+        "value_decisions": 0.0
+      },
+      "teacher_self_play": {
+        "decisions": 974.0,
+        "accuracy": 0.9537987679671458,
+        "policy_loss": 0.15198063973118636,
+        "value_decisions": 974.0,
+        "value_mae_scaled": 0.40578821316950436,
+        "value_rmse_scaled": 0.5522930117972785
+      }
+    }
+  },
+  "test": {
+    "overall": {
+      "decisions": 1192.0,
+      "accuracy": 0.947986577181208,
+      "policy_loss": 0.16846097173848187,
+      "value_decisions": 521.0,
+      "value_mae_scaled": 0.38415954165668326,
+      "value_rmse_scaled": 0.5209350671307574
+    },
+    "by_source": {
+      "engine_validated_tour_curriculum": {
+        "decisions": 12.0,
+        "accuracy": 1.0,
+        "policy_loss": 2.9802317650743742e-08,
+        "value_decisions": 0.0
+      },
+      "physical_response_pass_search": {
+        "decisions": 4.0,
+        "accuracy": 1.0,
+        "policy_loss": 0.001616485882550478,
+        "value_decisions": 0.0
+      },
+      "random_legal_teacher_labeled": {
+        "decisions": 655.0,
+        "accuracy": 0.9480916030534351,
+        "policy_loss": 0.1594616913825759,
+        "value_decisions": 0.0
+      },
+      "teacher_self_play": {
+        "decisions": 521.0,
+        "accuracy": 0.946257197696737,
+        "policy_loss": 0.1849359004904514,
+        "value_decisions": 521.0,
+        "value_mae_scaled": 0.38415954165668326,
+        "value_rmse_scaled": 0.5209350671307574
+      }
+    }
+  }
+}

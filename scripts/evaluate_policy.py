@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -15,6 +16,21 @@ if str(ROOT) not in sys.path:
 
 from xiamen_mahjong.evaluation import evaluate_against_teacher, paired_score_comparison
 from xiamen_mahjong.training import NeuralRulePolicyModel, RulePolicyModel
+
+
+def checkpoint_sha256(path: Path) -> str:
+    """Return a content identity for a locally evaluated checkpoint.
+
+    Evaluation JSON files are often retained longer than their surrounding
+    shell command.  Recording a digest prevents a later replacement of a
+    same-named checkpoint from making a result ambiguous.
+    """
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def parse_args() -> argparse.Namespace:
@@ -86,6 +102,8 @@ def main() -> None:
         policy, hands=args.hands, profile=args.profile, seed=args.seed
     )
     payload = result.payload(include_scores=args.include_scores)
+    payload["checkpoint"] = str(args.checkpoint)
+    payload["checkpoint_sha256"] = checkpoint_sha256(args.checkpoint)
     payload["inference_device"] = args.device if args.checkpoint.suffix in {".pt", ".pth"} else None
     payload["action_selection"] = (
         getattr(policy, "action_selection", None)
@@ -102,6 +120,7 @@ def main() -> None:
             reference, hands=args.hands, profile=args.profile, seed=args.seed
         )
         payload["reference_checkpoint"] = str(args.reference)
+        payload["reference_checkpoint_sha256"] = checkpoint_sha256(args.reference)
         payload["reference_action_selection"] = (
             getattr(reference, "action_selection", None)
             if args.reference.suffix in {".pt", ".pth"}
