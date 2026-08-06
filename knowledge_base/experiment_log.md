@@ -444,7 +444,9 @@ collector/Q 数据门槛；其作用是将下一步明确限定为“可计算�
 “胜过人类”不能由 Teacher 配对分数替代。网页现在支持显式 `--human-log local_human_data/*.jsonl`：只在
 玩家完成一局且至少行动一次后，追加玩家可见状态、合法动作、实际人类选择、公开 action 历史和本局分差。
 牌墙顺序、AI 暗手、随机种子、账号、网络标识和时间戳都不写入；本地目录被 Git 忽略。记录来源固定为
-`local_human_opt_in`，默认不进入 Teacher/DAgger 训练，须单独质量审查与按完整牌局留出评测。
+`local_human_opt_in`，默认不进入 Teacher/DAgger 训练，须单独质量审查与按完整牌局留出评测。显式 checkpoint
+对手只以文件 SHA-256 记录，不保存本地路径；`audit_human_trajectories.py` 会在人工评审前拒绝混合规则/对手、
+重复手牌、重放种子、私有字段和非本局分差记录。
 
 为进行受控试玩，`serve_web_game.py --ai-checkpoint <policy-value.pt>` 会将三名 AI 显式替换为该 checkpoint，
 网页标识为 `EXPLICIT EXPERIMENTAL CHECKPOINT`；没有参数时仍是 Teacher。run4 checkpoint 已通过“加载、响应、

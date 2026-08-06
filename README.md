@@ -43,6 +43,17 @@ python3 scripts/serve_web_game.py \
 
 这只是受控试玩和数据采集路径，不构成该 checkpoint 胜过人类的证据。
 
+记录达到一定数量后，先运行只读质量审计，而不是直接训练：
+
+```bash
+python3 scripts/audit_human_trajectories.py \
+  --input local_human_data/run4-vs-human.jsonl \
+  --minimum-hands 100
+```
+
+审计会拒绝混合规则档位/对手版本、重复牌局、带重放种子或隐私字段的记录。即使结构审计通过，也只表示可以
+进行人工质量评审；要声称对人类变强，仍须使用从未用于训练或调参的真人对局留出集。
+
 牌桌默认展开三位 AI 的调试手牌，右上角的 **隐藏 AI 手牌（调试）** 可切回
 正常暗牌视图。点击 **规则与胡牌教学** 可进入 `/guide.html`，查看牌局流程、
 五组一对、金牌限制、游金体系、特殊胡法、响应优先级和结算说明。

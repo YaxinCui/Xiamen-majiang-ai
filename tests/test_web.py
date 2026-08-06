@@ -6,6 +6,7 @@ import unittest
 from urllib.request import Request, urlopen
 
 from xiamen_mahjong.agents import HeuristicTeacherAgent
+from xiamen_mahjong.human_data import audit_local_human_trajectories
 from xiamen_mahjong.web import GameStore, make_handler
 from http.server import ThreadingHTTPServer
 
@@ -92,7 +93,9 @@ class WebTests(unittest.TestCase):
     def test_explicit_ai_profile_is_reported_without_changing_default(self):
         default_state = GameStore().state()
         checkpoint_state = GameStore(
-            ai_agent=HeuristicTeacherAgent(), ai_profile="explicit_test_checkpoint"
+            ai_agent=HeuristicTeacherAgent(),
+            ai_profile="explicit_test_checkpoint",
+            ai_identity="sha256:test",
         ).state()
         self.assertEqual(default_state["ai_profile"], "heuristic_teacher")
         self.assertEqual(checkpoint_state["ai_profile"], "explicit_test_checkpoint")
@@ -101,6 +104,7 @@ class WebTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "human.jsonl"
             store = GameStore(human_log=output)
+            store.new_game(seed=1, rules_profile="classic", reset_match=True)
             action = next(
                 candidate
                 for candidate in store.game.human_actions()
@@ -130,11 +134,24 @@ class WebTests(unittest.TestCase):
                 record["source_metadata"]["training_default"],
                 "excluded_until_separate_quality_review",
             )
+            self.assertEqual(
+                record["source_metadata"]["opponent_policy"],
+                "heuristic_teacher",
+            )
             decision = record["decisions"][0]
             self.assertEqual(decision["chosen_index"], decision["executed_index"])
             self.assertNotIn("wall", decision["state"])
             self.assertNotIn("opponent_hands", decision["state"])
             self.assertTrue(store._public_state()["local_human_recording"]["enabled"])
+            audit = audit_local_human_trajectories([output], minimum_hands=1)
+            self.assertTrue(audit["ready_for_manual_review"])
+            self.assertEqual(audit["valid_hands"], 1)
+            self.assertEqual(audit["opponent_policies"], {"heuristic_teacher": 1})
+            duplicate_audit = audit_local_human_trajectories(
+                [output, output], minimum_hands=1
+            )
+            self.assertFalse(duplicate_audit["ready_for_manual_review"])
+            self.assertEqual(duplicate_audit["duplicate_hands"], 1)
 
 
 if __name__ == "__main__":

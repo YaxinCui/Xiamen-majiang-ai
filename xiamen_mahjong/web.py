@@ -39,11 +39,13 @@ class GameStore:
         human_log: str | Path | None = None,
         ai_agent: Any | None = None,
         ai_profile: str = "heuristic_teacher",
+        ai_identity: str | None = None,
     ) -> None:
         self.lock = threading.Lock()
         self.rules_profile = "classic"
         self._ai_agent = ai_agent
         self._ai_profile = ai_profile
+        self._ai_identity = ai_identity or ai_profile
         self._human_log = Path(human_log) if human_log is not None else None
         self._human_decisions: list[TeacherDecision] = []
         self._human_hand_written = False
@@ -134,6 +136,7 @@ class GameStore:
                 "recording_scope": "actor_visible_state_and_public_outcome_only",
                 "behavior_label": "executed_human_action",
                 "training_default": "excluded_until_separate_quality_review",
+                "opponent_policy": self._ai_identity,
             },
         )
         payload = trajectory.payload()
@@ -323,11 +326,13 @@ def serve(
     human_log: str | Path | None = None,
     ai_agent: Any | None = None,
     ai_profile: str = "heuristic_teacher",
+    ai_identity: str | None = None,
 ) -> None:
     store = GameStore(
         human_log=human_log,
         ai_agent=ai_agent,
         ai_profile=ai_profile,
+        ai_identity=ai_identity,
     )
     server = ThreadingHTTPServer((host, port), make_handler(store))
     print(f"厦门麻将已启动：http://{host}:{port}")

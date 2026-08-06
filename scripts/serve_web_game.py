@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 import sys
 
@@ -43,6 +44,7 @@ def main() -> None:
     args = parser.parse_args()
     ai_agent = None
     ai_profile = "heuristic_teacher"
+    ai_identity = "heuristic_teacher"
     if args.ai_checkpoint is not None:
         if args.ai_checkpoint.suffix not in {".pt", ".pth"}:
             raise ValueError("网页候选 AI 目前只支持 policy-value .pt/.pth checkpoint")
@@ -50,12 +52,18 @@ def main() -> None:
 
         ai_agent = TorchPolicyValueAgent.load(args.ai_checkpoint, device=args.ai_device)
         ai_profile = "explicit_policy_value_checkpoint"
+        digest = hashlib.sha256()
+        with args.ai_checkpoint.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1_048_576), b""):
+                digest.update(chunk)
+        ai_identity = f"sha256:{digest.hexdigest()}"
     serve(
         args.host,
         args.port,
         human_log=args.human_log,
         ai_agent=ai_agent,
         ai_profile=ai_profile,
+        ai_identity=ai_identity,
     )
 
 
