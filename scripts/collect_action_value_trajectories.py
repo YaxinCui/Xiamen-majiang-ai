@@ -87,6 +87,27 @@ def parse_args() -> argparse.Namespace:
         help="每个 rollout 从本家可见信息重采样未知牌墙、暗手、花与对手暗杠牌面",
     )
     parser.add_argument(
+        "--belief-latest-discard-particles",
+        type=int,
+        default=0,
+        help=(
+            "启用最新 normal draw→discard 的局部 SIR 条件化所用粒子数；"
+            "需同时设置 --belief-resample，0 表示关闭"
+        ),
+    )
+    parser.add_argument(
+        "--belief-latest-discard-likelihood-power",
+        type=float,
+        default=0.25,
+        help="局部弃牌行为似然幂次；小于 1 时保守地向公开先验回缩",
+    )
+    parser.add_argument(
+        "--belief-latest-discard-min-ess-fraction",
+        type=float,
+        default=0.5,
+        help="局部 SIR 的最低预重采样 ESS 比例；未达标的局面会被跳过",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path("artifacts/counterfactual-action-value-classic-v1"),
@@ -109,6 +130,10 @@ def main() -> None:
         raise ValueError("teacher-opponent-probability 必须在 0 和 1 之间")
     if args.teacher_opponent_probability < 1.0 and not args.opponent_checkpoint:
         raise ValueError("混入非 Teacher 对手时必须提供 --opponent-checkpoint")
+    if args.belief_latest_discard_particles < 0:
+        raise ValueError("belief-latest-discard-particles 不能为负数")
+    if args.belief_latest_discard_particles and not args.belief_resample:
+        raise ValueError("latest-discard 条件化需要 --belief-resample")
     policy = TorchPolicyValueAgent.load(args.checkpoint, device=args.device)
     opponents = [
         (
@@ -128,6 +153,9 @@ def main() -> None:
         opponents=opponents,
         teacher_opponent_probability=args.teacher_opponent_probability,
         belief_resample=args.belief_resample,
+        belief_latest_discard_particles=args.belief_latest_discard_particles,
+        belief_latest_discard_likelihood_power=args.belief_latest_discard_likelihood_power,
+        belief_latest_discard_min_ess_fraction=args.belief_latest_discard_min_ess_fraction,
         rollout_batch_size=args.rollout_batch_size,
     )
     partitions = split_trajectories_by_hand(
@@ -172,6 +200,12 @@ def main() -> None:
             "private_simulator_state_exported": False,
             "continuation": "candidate_checkpoint_and_frozen_opponent_mixture",
             "belief_resample": args.belief_resample,
+            "belief_latest_discard": {
+                "particles": args.belief_latest_discard_particles,
+                "likelihood_power": args.belief_latest_discard_likelihood_power,
+                "minimum_ess_fraction": args.belief_latest_discard_min_ess_fraction,
+                "scope": "latest opponent normal draw then discard; not full history posterior",
+            },
         },
         "summary": summary.payload(),
         "dataset": trajectory_manifest(trajectories),

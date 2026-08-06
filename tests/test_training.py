@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 import random
 
-from xiamen_mahjong.agents import HeuristicTeacherAgent
+from xiamen_mahjong.agents import GameAction, HeuristicTeacherAgent
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.rules import XiamenRules
 from xiamen_mahjong.training import (
@@ -13,6 +13,7 @@ from xiamen_mahjong.training import (
     StateValueBaseline,
     _audit_resampled_history_prefix,
     _frozen_behavior_action_likelihood,
+    _sample_latest_discard_conditioned_world,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
     _turn_actions,
@@ -96,6 +97,131 @@ class TrainingTests(unittest.TestCase):
         # holds if replay uses the exposed logits as its behavior model.
         self.assertEqual(action, legal[-1])
         self.assertGreater(likelihood, 0.9)
+        self.assertIsNone(
+            _frozen_behavior_action_likelihood(
+                _ScoreAwareFallbackPolicy(),
+                game,
+                player_id=player_id,
+                legal=legal,
+                compatible=(GameAction("discard", 999),),
+                is_response=False,
+                temperature=1.0,
+                uniform_mixture=0.02,
+            )
+        )
+
+    def test_latest_discard_sir_is_publicly_reconstructible_and_safe(self):
+        teacher = HeuristicTeacherAgent()
+        candidate_seat = 0
+        opponents = {
+            seat: ("heuristic_teacher", teacher)
+            for seat in range(4)
+            if seat != candidate_seat
+        }
+        game = XiamenMahjongGame(
+            seed=930,
+            rules=XiamenRules.from_profile("core"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        snapshots = _run_candidate_base_hand(
+            game,
+            candidate_seat=candidate_seat,
+            candidate_policy=teacher,
+            opponents=opponents,
+        )
+        snapshot = next(
+            item
+            for item in snapshots
+            if item.game.phase == "response"
+            and len(item.game.public_actions) >= 2
+            and item.game.public_actions[-1]["kind"] == "discard"
+            and item.game.public_actions[-2]["kind"] == "draw"
+            and item.game.public_actions[-1].get("seat")
+            == item.game.public_actions[-2].get("seat")
+        )
+        world, diagnostics = _sample_latest_discard_conditioned_world(
+            snapshot.game,
+            actor_seat=candidate_seat,
+            expected_legal_actions=snapshot.legal_actions,
+            opponents=opponents,
+            particle_count=32,
+            rng=random.Random(932),
+        )
+        self.assertIsNotNone(world)
+        self.assertEqual(diagnostics.proposed_particles, 32)
+        self.assertEqual(diagnostics.consistent_particles, 32)
+        self.assertGreater(diagnostics.effective_sample_size, 0.0)
+        self.assertLessEqual(
+            diagnostics.effective_sample_size, diagnostics.consistent_particles
+        )
+        self.assertEqual(
+            tuple(world.response_options[candidate_seat]), snapshot.legal_actions
+        )
+        payload = diagnostics.payload()
+        self.assertNotIn("wall", payload)
+        self.assertNotIn("opponent_hands", payload)
+
+    def test_classic_latest_discard_sir_rejects_special_prefixes_but_keeps_safe_one(self):
+        teacher = HeuristicTeacherAgent()
+        candidate_seat = 0
+        opponents = {
+            seat: ("heuristic_teacher", teacher)
+            for seat in range(4)
+            if seat != candidate_seat
+        }
+        game = XiamenMahjongGame(
+            seed=930,
+            rules=XiamenRules.from_profile("classic"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        snapshots = _run_candidate_base_hand(
+            game,
+            candidate_seat=candidate_seat,
+            candidate_policy=teacher,
+            opponents=opponents,
+        )
+        snapshot = next(
+            item
+            for item in snapshots
+            if item.game.phase == "response"
+            and item.game.turn_count > item.game.rules.player_count
+            and not item.game.tour_state
+            and not item.game.opening_wait_seats
+            and len(item.game.public_actions) >= 2
+            and item.game.public_actions[-1]["kind"] == "discard"
+            and item.game.public_actions[-2]["kind"] == "draw"
+            and item.game.public_actions[-1].get("seat")
+            == item.game.public_actions[-2].get("seat")
+        )
+        world, diagnostics = _sample_latest_discard_conditioned_world(
+            snapshot.game,
+            actor_seat=candidate_seat,
+            expected_legal_actions=snapshot.legal_actions,
+            opponents=opponents,
+            particle_count=32,
+            rng=random.Random(937),
+            likelihood_power=0.1,
+        )
+        self.assertIsNotNone(world)
+        # A reallocated opponent hand can acquire a publicly forced-honor
+        # follow tile, making the observed ordinary discard illegal.  Those
+        # particles must be rejected rather than treating the source-world
+        # legality as an oracle.  The remaining consistent particles are the
+        # only ones eligible for the SIR target.
+        self.assertGreater(diagnostics.consistent_particles, 0)
+        self.assertLessEqual(diagnostics.consistent_particles, 32)
+        self.assertIn(
+            "observed_discard_illegal", diagnostics.rejection_counts
+        )
+        self.assertGreaterEqual(
+            diagnostics.effective_sample_size / diagnostics.consistent_particles,
+            0.2,
+        )
+        self.assertEqual(
+            tuple(world.response_options[candidate_seat]), snapshot.legal_actions
+        )
 
     def test_teacher_collection_exports_only_legal_actions(self):
         decisions, summary = collect_teacher_decisions(hands=3, profile="classic", seed=101)
@@ -366,6 +492,73 @@ class TrainingTests(unittest.TestCase):
                 trajectory.source_metadata["belief_resample"]
                 and "wall" not in trajectory.decisions[0].state
                 and "opponent_hands" not in trajectory.decisions[0].state
+                for trajectory in trajectories
+            )
+        )
+
+    def test_latest_discard_sir_rollouts_are_gated_and_safe_to_export(self):
+        policy = NeuralRulePolicyModel(hidden_size=4, seed=933)
+        trajectories, summary = collect_counterfactual_action_value_trajectories(
+            policy,
+            seed_count=1,
+            profile="core",
+            seed=930,
+            rollouts_per_action=1,
+            belief_resample=True,
+            belief_latest_discard_particles=32,
+            belief_latest_discard_likelihood_power=0.25,
+            belief_latest_discard_min_ess_fraction=0.5,
+        )
+        self.assertTrue(trajectories)
+        self.assertGreater(summary.belief_conditioned_worlds, 0)
+        self.assertGreater(
+            summary.mean_belief_conditioning_consistency_rate or 0.0, 0.0
+        )
+        self.assertGreaterEqual(
+            summary.mean_belief_conditioning_ess_fraction or 0.0, 0.5
+        )
+        self.assertTrue(
+            all(
+                trajectory.source_metadata["belief_conditioning"]
+                == "latest_normal_draw_discard_sir_v1"
+                and trajectory.source_metadata["belief_latest_discard"]["particles"]
+                == 32
+                and "wall" not in trajectory.decisions[0].state
+                and "opponent_hands" not in trajectory.decisions[0].state
+                for trajectory in trajectories
+            )
+        )
+
+    def test_classic_latest_discard_sir_rollouts_use_the_explicit_gate(self):
+        policy = NeuralRulePolicyModel(hidden_size=4, seed=933)
+        trajectories, summary = collect_counterfactual_action_value_trajectories(
+            policy,
+            seed_count=1,
+            profile="classic",
+            seed=930,
+            rollouts_per_action=1,
+            belief_resample=True,
+            belief_latest_discard_particles=32,
+            belief_latest_discard_likelihood_power=0.1,
+            belief_latest_discard_min_ess_fraction=0.2,
+        )
+        self.assertTrue(trajectories)
+        self.assertGreater(summary.belief_conditioned_worlds, 0)
+        self.assertGreater(
+            summary.mean_belief_conditioning_consistency_rate or 0.0, 0.0
+        )
+        self.assertGreaterEqual(
+            summary.mean_belief_conditioning_ess_fraction or 0.0, 0.2
+        )
+        self.assertTrue(
+            all(
+                trajectory.profile == "classic"
+                and trajectory.source_metadata["belief_latest_discard"]["likelihood_power"]
+                == 0.1
+                and trajectory.source_metadata["belief_latest_discard"][
+                    "minimum_ess_fraction"
+                ]
+                == 0.2
                 for trajectory in trajectories
             )
         )

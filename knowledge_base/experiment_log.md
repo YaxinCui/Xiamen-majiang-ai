@@ -158,3 +158,52 @@ collector 新增 `rollout_batch_size`。批量模式只把多个独立的“合�
 6/200 个，13 个事件前缀为 0/200。该高拒绝率说明它不是可用的历史 posterior proposal，故没有
 修改 `--belief-resample`、没有生成数据、没有训练模型。后续必须采用事件约束的序列 proposal，并先
 报告接受率和 ESS，才可进入 collector 实验。
+
+### 最新弃牌局部 SIR：受门槛保护的中间数据构造
+
+先实现最小的可重建事件：response 状态的末尾公开历史必须为同一对手的
+`normal draw → discard`。从本家/公开先验 world 逆转该弃牌并按冻结策略行为概率 SIR；神经策略使用
+可用 action scores 的温度 softmax，Teacher 使用平滑确定性 fallback。该局部条件化默认关闭，绝不称为
+完整历史 posterior。
+
+| 校准（seed 930–939，32 个合格 response 状态，每状态 32 粒子） | 结构一致率 | 平均 ESS 比例 | 最低 ESS 比例 | 结论 |
+| --- | ---: | ---: | ---: | --- |
+| 原始行为似然，power=1 | 1.000 | 0.156 | 0.035 | 权重退化，不可直接采集。 |
+| 保守 tempered likelihood，power=0.25 | 1.000 | 0.669 | 0.560 | 可作为 gated 小范围实验的起点。 |
+
+collector 现提供显式 opt-in：32 粒子、power=0.25、最低 ESS 比例 0.5。状态不在受限事件范围、候选
+合法动作不一致或 ESS 低于门槛时会跳过；source metadata/summary 只写入配置和聚合 ESS，没有墙、暗手、
+粒子或随机种子。端到端 core 导出回归测试已通过；尚未用该数据训练或做强度结论。
+
+经典档增加了显式安全边界：游金、天听和早局 response 不尝试逆转；gold lock 与上一张未被吃碰的弃牌
+只从公开 action 序列恢复。seed 930–939 的 34 个合格 classic response 状态中，power=0.25 的平均/最低
+ESS 比例为 0.425/0.094；power=0.10 为 0.583/0.094。因此 classic 的初始 gated 实验使用 32 粒子、
+power=0.10、最低 ESS 0.20；仍未开始训练或实战评测。
+
+## 2026-08-07：局部行为条件化的独立反证
+
+| 检查点 | 构造或训练 | 独立评测 | 结论 |
+| --- | --- | --- | --- |
+| `policy-value-action-value-classic-local-belief-v1-run1` | run4 起点；40 墙四座轮换，局部 latest draw→discard SIR（32 粒子、power 0.10、ESS ≥ 0.20）、75% Teacher / 25% 冻结 run3、每合法动作 3 个 belief world。采得 124 个 response 决策、822 分支、372 条条件化 world，平均 ESS 比例 0.960；温度 24，价值跨度和标准误降权。 | 22,800,000 起的 200 墙筛选：**+1.04 ± 0.76**，95% CI **[−0.46, +2.53]**；独立 22,810,000 起的 400 墙：**−0.14 ± 0.59**，95% CI **[−1.29, +1.01]**。 | 没有通过 400 墙正向下界门槛；不晋升。局部后验比公开先验更精确的假设尚未获得实战支持。 |
+
+这批数据的平均每动作标准误为 18.55 分，平均价值跨度为 28.47 分，124 个状态也不足以稳定选择
+checkpoint。训练器新增逐动作下置信界软标签 `Q - z × stderr`（`--action-value-confidence-z`）：它和既有
+整体标准误降权互补，只在明确开启时对高方差动作保守回缩。下一轮先用固定数据进行 z 的小范围筛选，
+再决定是否值得扩大数据；任何离线损失改善都不能替代新的同牌墙实战验收。
+
+| 检查点 | 固定数据消融 | 新牌墙筛选 | 结论 |
+| --- | --- | --- | --- |
+| `policy-value-action-value-classic-local-belief-lcb-v1-run1` | 上表相同 124 状态、run4 起点，只有 soft preference 改为 `Q - 1.0 × stderr`；验证集按同一反事实来源选择 epoch 20。 | 22,820,000 起 200 墙：**+1.04 ± 0.75**，95% CI **[−0.44, +2.51]**。 | 与均值目标筛选几乎相同、仍不显著；不做 400 墙终检。小数据下标签风险厌恶不是主瓶颈。 |
+
+## 2026-08-07：训练期特权 critic 基础设施（尚无强度结论）
+
+参考 Suphx 的 oracle-guiding / global-reward-prediction 方向，PPO 新增默认关闭的
+`--privileged-critic`。它在采样时读取完整模拟状态，**仅作为终局净分 advantage baseline**；actor 仍为
+本家/公开特征加规则合法动作掩码。critic 特征只保存在 `PpoStep` 的进程内存：不进入 `TeacherDecision`、
+轨迹、JSONL、网页、报告或保存的 actor checkpoint，进程退出即丢弃。单测覆盖 batch rollout、PPO 更新、
+合法动作以及 actor observation 不含 `wall`/`opponent_hands`。尚未进行 PPO 训练或实战评测，不能据此
+声称增益；下一个对照须固定 actor 起点、对手池和 rollout 预算，比较 advantage 方差后再上新牌墙。
+
+16 局 core CLI 冒烟（run4 actor、8 路 rollout batch、32 隐层 critic、1 PPO epoch）产生 143 个候选
+决策，actor checkpoint 中没有 critic 参数，报告没有 `wall`、`opponent_hands` 或 `privileged_features`。
+该过程仅验证可执行性和隔离边界，不产生可比较强度数字。

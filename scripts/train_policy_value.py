@@ -145,6 +145,15 @@ def parse_args() -> argparse.Namespace:
         help="大于 0 时按 1/(1+(平均标准误/scale)^2) 下调高方差动作价值样本；0 关闭",
     )
     parser.add_argument(
+        "--action-value-confidence-z",
+        type=float,
+        default=0.0,
+        help=(
+            "反事实软偏好使用 Q-z×stderr 的逐动作下置信界；"
+            "0 保持原始平均 Q 标签"
+        ),
+    )
+    parser.add_argument(
         "--action-value-margin-scale",
         type=float,
         default=16.0,
@@ -366,13 +375,28 @@ def policy_preference_loss(
     action_value_mask: torch.Tensor,
     action_mask: torch.Tensor,
     temperature: float,
+    action_value_stderrs: torch.Tensor | None = None,
+    confidence_z: float = 0.0,
 ) -> torch.Tensor:
-    """Return per-decision cross entropy against hard or rollout-soft labels."""
+    """Return cross entropy against hard labels or conservative rollout targets.
+
+    Counterfactual branches have different Monte-Carlo errors per legal
+    action.  When ``confidence_z`` is positive, their soft policy target is
+    the lower-confidence score ``Q - z * stderr`` instead of the raw sample
+    mean.  This is deliberately a *target-only* correction: it cannot
+    fabricate a high-value action, affects no non-rollout example, and leaves
+    the default (``z=0``) byte-for-byte equivalent to the old objective.
+    """
 
     if temperature <= 0:
         raise ValueError("action-value-temperature 必须为正数")
+    if confidence_z < 0:
+        raise ValueError("action-value-confidence-z 不能为负数")
     hard_targets = F.one_hot(chosen, num_classes=logits.shape[1]).to(logits.dtype)
-    value_logits = (action_values / temperature).masked_fill(
+    target_values = action_values
+    if confidence_z > 0 and action_value_stderrs is not None:
+        target_values = target_values - confidence_z * action_value_stderrs
+    value_logits = (target_values / temperature).masked_fill(
         ~action_mask, torch.finfo(logits.dtype).min
     )
     soft_targets = F.softmax(value_logits, dim=1)
@@ -457,6 +481,7 @@ def evaluate(
     action_value_temperature: float,
     action_value_target_scale: float,
     action_value_stderr_scale: float,
+    action_value_confidence_z: float,
 ) -> dict[str, Any]:
     network.eval()
     totals: dict[str, dict[str, float]] = defaultdict(
@@ -503,6 +528,8 @@ def evaluate(
                 action_value_mask=action_value_mask,
                 action_mask=mask,
                 temperature=action_value_temperature,
+                action_value_stderrs=action_value_stderrs,
+                confidence_z=action_value_confidence_z,
             ).detach().cpu().tolist()
             predicted = logits.argmax(dim=1).detach().cpu().tolist()
             values_cpu = predicted_values.detach().cpu().tolist()
@@ -714,6 +741,7 @@ def main() -> None:
         or args.action_value_target_scale <= 0
         or args.action_value_temperature <= 0
         or args.action_value_stderr_scale < 0
+        or args.action_value_confidence_z < 0
         or args.action_value_margin_scale < 0
         or args.minimum_selection_decisions <= 0
     ):
@@ -871,6 +899,8 @@ def main() -> None:
                 action_value_mask=action_value_mask,
                 action_mask=mask,
                 temperature=args.action_value_temperature,
+                action_value_stderrs=action_value_stderrs,
+                confidence_z=args.action_value_confidence_z,
             )
             policy_loss = (policy_loss_values * policy_weights).sum() / policy_weights.sum().clamp_min(1.0)
             value_loss = (
@@ -923,6 +953,7 @@ def main() -> None:
             action_value_temperature=args.action_value_temperature,
             action_value_target_scale=args.action_value_target_scale,
             action_value_stderr_scale=args.action_value_stderr_scale,
+            action_value_confidence_z=args.action_value_confidence_z,
         )
         history.append(
             {
@@ -960,6 +991,7 @@ def main() -> None:
         action_value_temperature=args.action_value_temperature,
         action_value_target_scale=args.action_value_target_scale,
         action_value_stderr_scale=args.action_value_stderr_scale,
+        action_value_confidence_z=args.action_value_confidence_z,
     )
     test_metrics = evaluate(
         network,
@@ -971,6 +1003,7 @@ def main() -> None:
         action_value_temperature=args.action_value_temperature,
         action_value_target_scale=args.action_value_target_scale,
         action_value_stderr_scale=args.action_value_stderr_scale,
+        action_value_confidence_z=args.action_value_confidence_z,
     )
     report = {
         "model": "candidate_policy_value",
@@ -987,6 +1020,7 @@ def main() -> None:
         "action_value_target_scale": args.action_value_target_scale,
         "action_value_temperature": args.action_value_temperature,
         "action_value_stderr_scale": args.action_value_stderr_scale,
+        "action_value_confidence_z": args.action_value_confidence_z,
         "action_value_margin_scale": args.action_value_margin_scale,
         "base_learning_rate_scale": args.base_learning_rate_scale,
         "inputs": {
@@ -1010,7 +1044,9 @@ def main() -> None:
         },
         "policy_targets": {
             "teacher_and_curriculum": "hard_teacher_action",
-            "counterfactual_action_value_rollout": "softmax_terminal_score_q_pi",
+            "counterfactual_action_value_rollout": (
+                "softmax((terminal_score_q_pi - confidence_z * action_stderr) / temperature)"
+            ),
         },
         "checkpoint_selection": {
             "split": "validation",

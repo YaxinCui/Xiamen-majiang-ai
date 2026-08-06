@@ -50,6 +50,67 @@ class CheckpointSelectionTests(unittest.TestCase):
         self.assertTrue(torch.isfinite(reversed_loss).all())
         self.assertLess(float(preferred.mean()), float(reversed_loss.mean()))
 
+    def test_rollout_soft_preference_can_use_per_action_lower_confidence_scores(self):
+        from scripts.train_policy_value import policy_preference_loss
+
+        chosen = torch.tensor([0])
+        action_values = torch.tensor([[10.0, 0.0, 0.0]])
+        action_value_stderrs = torch.tensor([[30.0, 0.0, 999.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True, False]])
+        raw_preferred = torch.tensor([[4.0, -4.0, -1e30]])
+        conservative_preferred = torch.tensor([[-4.0, 4.0, -1e30]])
+        raw_loss = policy_preference_loss(
+            raw_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+        )
+        raw_reversed_loss = policy_preference_loss(
+            conservative_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+        )
+        conservative_loss = policy_preference_loss(
+            conservative_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+            confidence_z=0.5,
+        )
+        conservative_reversed_loss = policy_preference_loss(
+            raw_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+            confidence_z=0.5,
+        )
+        self.assertLess(float(raw_loss[0]), float(raw_reversed_loss[0]))
+        self.assertLess(float(conservative_loss[0]), float(conservative_reversed_loss[0]))
+        with self.assertRaises(ValueError):
+            policy_preference_loss(
+                raw_preferred,
+                chosen=chosen,
+                action_values=action_values,
+                action_value_mask=action_value_mask,
+                action_mask=legal,
+                temperature=2.0,
+                confidence_z=-0.1,
+            )
+
     def test_direct_action_value_loss_keeps_terminal_score_magnitude(self):
         from scripts.train_policy_value import action_value_regression_loss
 

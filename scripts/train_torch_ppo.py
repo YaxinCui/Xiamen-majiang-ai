@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 from collections import Counter
 from dataclasses import dataclass
+from itertools import chain
 import json
 import math
 from pathlib import Path
@@ -26,6 +27,7 @@ if str(ROOT) not in sys.path:
 
 try:
     import torch
+    from torch import nn
     from torch.nn import functional as F
 except ModuleNotFoundError as error:
     raise SystemExit("请使用 .venv/bin/python 运行；该脚本需要 PyTorch") from error
@@ -33,6 +35,7 @@ except ModuleNotFoundError as error:
 from xiamen_mahjong.agents import GameAction, HeuristicTeacherAgent
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.rules import XiamenRules
+from xiamen_mahjong.tiles import BASE_TILE_COUNT
 from xiamen_mahjong.torch_policy import (
     ARCHITECTURE_CANDIDATE_MLP,
     CandidatePolicyValueNetwork,
@@ -53,6 +56,72 @@ class PpoStep:
     old_log_probability: float
     old_value: float
     reward: float
+    # Training-process-only oracle input.  It is never attached to a
+    # TeacherDecision, trajectory, agent checkpoint or report payload.
+    privileged_features: tuple[float, ...] | None = None
+
+
+# Relative player order makes the critic insensitive to the arbitrary absolute
+# seat assigned by the simulator.  The vector intentionally contains hidden
+# hands and wall composition, so its scope is strictly in-memory PPO training.
+PRIVILEGED_CRITIC_FEATURE_DIM = BASE_TILE_COUNT * 5 + 4 + 4 + 4 + 2 + (BASE_TILE_COUNT + 1) * 2
+
+
+class PrivilegedCritic(nn.Module):
+    """Training-only centralized critic; never included in a policy checkpoint."""
+
+    def __init__(self, hidden_size: int = 128):
+        super().__init__()
+        if hidden_size <= 0:
+            raise ValueError("privileged critic hidden-size 必须为正数")
+        self.network = nn.Sequential(
+            nn.Linear(PRIVILEGED_CRITIC_FEATURE_DIM, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, 1),
+        )
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.network(features).squeeze(-1)
+
+
+def privileged_critic_features(
+    game: XiamenMahjongGame, candidate_seat: int
+) -> tuple[float, ...]:
+    """Encode complete simulator state for a PPO baseline only.
+
+    The actor never calls this function.  Keeping it in this training script,
+    rather than the deployable policy module, makes the security boundary
+    explicit: returned vectors may contain opponent hands and wall counts but
+    exist only until the current PPO process finishes.
+    """
+
+    if game.rules.player_count != 4:
+        raise ValueError("privileged critic 当前仅支持四人厦门麻将")
+    if not 0 <= candidate_seat < game.rules.player_count:
+        raise ValueError("candidate_seat 超出范围")
+    features: list[float] = []
+    for offset in range(game.rules.player_count):
+        player = game.players[(candidate_seat + offset) % game.rules.player_count]
+        counts = Counter(player.hand)
+        features.extend(counts[tile] / 4.0 for tile in range(BASE_TILE_COUNT))
+    wall_counts = Counter(game.wall)
+    features.extend(wall_counts[tile] / 4.0 for tile in range(BASE_TILE_COUNT))
+    features.extend(len(player.flowers) / 8.0 for player in game.players)
+    features.extend(player.score / 80.0 for player in game.players)
+    features.extend(
+        1.0 if game.current_player == (candidate_seat + offset) % game.rules.player_count else 0.0
+        for offset in range(game.rules.player_count)
+    )
+    features.extend((1.0 if game.phase == "discard" else 0.0, 1.0 if game.phase == "response" else 0.0))
+    for tile in (game.last_discard, game.gold_tile):
+        features.extend(
+            1.0 if tile == index else 0.0 for index in range(BASE_TILE_COUNT + 1)
+        )
+    if len(features) != PRIVILEGED_CRITIC_FEATURE_DIM:
+        raise RuntimeError("privileged critic 特征维度不匹配")
+    return tuple(features)
 
 
 @dataclass(frozen=True)
@@ -83,7 +152,7 @@ class RolloutSummary:
 class _ActiveRollout:
     game: XiamenMahjongGame
     candidate_seat: int
-    steps: list[tuple[TeacherDecision, int, float, float]]
+    steps: list[tuple[TeacherDecision, int, float, float, tuple[float, ...] | None]]
     opponents: dict[int, tuple[str, Any]]
 
 
@@ -106,6 +175,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--value-weight", type=float, default=0.25)
     parser.add_argument("--entropy-weight", type=float, default=0.002)
     parser.add_argument("--reward-scale", type=float, default=80.0)
+    parser.add_argument(
+        "--privileged-critic",
+        action="store_true",
+        help=(
+            "仅训练期启用可见完整模拟状态的 centralized critic；"
+            "actor、网页和保存的 policy checkpoint 仍只用公开信息"
+        ),
+    )
+    parser.add_argument(
+        "--privileged-critic-hidden-size", type=int, default=128
+    )
+    parser.add_argument(
+        "--privileged-critic-weight",
+        type=float,
+        default=0.25,
+        help="训练期 privileged critic 的回归损失权重",
+    )
     parser.add_argument("--seed", type=int, default=20266004)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument(
@@ -154,8 +240,14 @@ def collect_rollouts(
     reward_scale: float,
     opponents: Sequence[tuple[str, Any]] = (),
     teacher_opponent_probability: float = 1.0,
+    privileged_critic: PrivilegedCritic | None = None,
 ) -> tuple[list[PpoStep], RolloutSummary]:
-    """Sample candidate actions against frozen Teachers and attach final reward."""
+    """Sample candidate actions and attach final reward and old baseline.
+
+    When supplied, ``privileged_critic`` is evaluated only here, before an
+    action is applied. Its private vector never enters ``decision`` or a
+    returned summary; only the scalar old baseline is retained for PPO.
+    """
 
     if episodes <= 0:
         raise ValueError("episodes 必须为正数")
@@ -187,7 +279,9 @@ def collect_rollouts(
             else:
                 opponent_by_seat[seat] = opponents[rng.randrange(len(opponents))]
             opponent_profile_counts[opponent_by_seat[seat][0]] += 1
-        episode_steps: list[tuple[TeacherDecision, int, float, float]] = []
+        episode_steps: list[
+            tuple[TeacherDecision, int, float, float, tuple[float, ...] | None]
+        ] = []
         safety = 0
         while game.phase != "over":
             safety += 1
@@ -199,10 +293,35 @@ def collect_rollouts(
                 if player_id == candidate_seat:
                     decision = _decision(game, hand_seed, player_id, legal, legal[0])
                     logits, value = policy.policy_value(decision)
+                    oracle_features = (
+                        privileged_critic_features(game, candidate_seat)
+                        if privileged_critic is not None
+                        else None
+                    )
+                    if oracle_features is not None:
+                        privileged_critic.eval()
+                        with torch.no_grad():
+                            old_baseline = float(
+                                privileged_critic(
+                                    torch.tensor(
+                                        [oracle_features],
+                                        dtype=torch.float32,
+                                        device=policy.device,
+                                    )
+                                ).item()
+                            )
+                    else:
+                        old_baseline = value
                     action_index, old_log_probability = _sample_index(logits, rng)
                     action = legal[action_index]
                     episode_steps.append(
-                        (decision, action_index, old_log_probability, value)
+                        (
+                            decision,
+                            action_index,
+                            old_log_probability,
+                            old_baseline,
+                            oracle_features,
+                        )
                     )
                     action_counts[action.kind] += 1
                 else:
@@ -219,10 +338,35 @@ def collect_rollouts(
                     if player_id == candidate_seat:
                         decision = _decision(game, hand_seed, player_id, legal, legal[0])
                         logits, value = policy.policy_value(decision)
+                        oracle_features = (
+                            privileged_critic_features(game, candidate_seat)
+                            if privileged_critic is not None
+                            else None
+                        )
+                        if oracle_features is not None:
+                            privileged_critic.eval()
+                            with torch.no_grad():
+                                old_baseline = float(
+                                    privileged_critic(
+                                        torch.tensor(
+                                            [oracle_features],
+                                            dtype=torch.float32,
+                                            device=policy.device,
+                                        )
+                                    ).item()
+                                )
+                        else:
+                            old_baseline = value
                         action_index, old_log_probability = _sample_index(logits, rng)
                         action = legal[action_index]
                         episode_steps.append(
-                            (decision, action_index, old_log_probability, value)
+                            (
+                                decision,
+                                action_index,
+                                old_log_probability,
+                                old_baseline,
+                                oracle_features,
+                            )
                         )
                         action_counts[action.kind] += 1
                     else:
@@ -238,8 +382,16 @@ def collect_rollouts(
         reward = game.players[candidate_seat].score / reward_scale
         rewards.append(reward)
         all_steps.extend(
-            PpoStep(decision, action_index, old_log_probability, old_value, reward)
-            for decision, action_index, old_log_probability, old_value in episode_steps
+            PpoStep(
+                decision,
+                action_index,
+                old_log_probability,
+                old_value,
+                reward,
+                oracle_features,
+            )
+            for decision, action_index, old_log_probability, old_value, oracle_features
+            in episode_steps
         )
         if game.win_type == "draw":
             draws += 1
@@ -273,6 +425,7 @@ def collect_rollouts_batched(
     opponents: Sequence[tuple[str, Any]] = (),
     teacher_opponent_probability: float = 1.0,
     rollout_batch_size: int = 1,
+    privileged_critic: PrivilegedCritic | None = None,
 ) -> tuple[list[PpoStep], RolloutSummary]:
     """Collect legal PPO data while batching only independent network calls."""
 
@@ -287,6 +440,7 @@ def collect_rollouts_batched(
             reward_scale=reward_scale,
             opponents=opponents,
             teacher_opponent_probability=teacher_opponent_probability,
+            privileged_critic=privileged_critic,
         )
     if episodes <= 0:
         raise ValueError("episodes 必须为正数")
@@ -326,8 +480,16 @@ def collect_rollouts_batched(
         reward = active.game.players[active.candidate_seat].score / reward_scale
         rewards.append(reward)
         all_steps.extend(
-            PpoStep(decision, action_index, old_log_probability, old_value, reward)
-            for decision, action_index, old_log_probability, old_value in active.steps
+            PpoStep(
+                decision,
+                action_index,
+                old_log_probability,
+                old_value,
+                reward,
+                oracle_features,
+            )
+            for decision, action_index, old_log_probability, old_value, oracle_features
+            in active.steps
         )
         if active.game.win_type == "draw":
             draws += 1
@@ -428,15 +590,54 @@ def collect_rollouts_batched(
                 (episode, decision, legal, player_id)
                 for episode, player_id, decision, legal in response_jobs
             ]
-            predictions = policy.policy_values_batch(
-                [decision for _episode, decision, _legal, _player in candidate_jobs]
+            predictions = (
+                policy.policy_values_batch(
+                    [decision for _episode, decision, _legal, _player in candidate_jobs]
+                )
+                if candidate_jobs
+                else []
             )
-            for (episode, decision, legal, response_player), (logits, value) in zip(
-                candidate_jobs, predictions
-            ):
+            oracle_feature_batch: list[tuple[float, ...] | None] = [
+                (
+                    privileged_critic_features(episode.game, episode.candidate_seat)
+                    if privileged_critic is not None
+                    else None
+                )
+                for episode, _decision_snapshot, _legal, _response_player in candidate_jobs
+            ]
+            if privileged_critic is not None and oracle_feature_batch:
+                privileged_critic.eval()
+                with torch.no_grad():
+                    old_baselines = privileged_critic(
+                        torch.tensor(
+                            [
+                                features
+                                for features in oracle_feature_batch
+                                if features is not None
+                            ],
+                            dtype=torch.float32,
+                            device=policy.device,
+                        )
+                    ).detach().cpu().tolist()
+            else:
+                old_baselines = [value for _logits, value in predictions]
+            for (
+                (episode, decision, legal, response_player),
+                (logits, _public_value),
+                oracle_features,
+                old_baseline,
+            ) in zip(candidate_jobs, predictions, oracle_feature_batch, old_baselines):
                 action_index, old_log_probability = _sample_index(logits, rng)
                 action = legal[action_index]
-                episode.steps.append((decision, action_index, old_log_probability, value))
+                episode.steps.append(
+                    (
+                        decision,
+                        action_index,
+                        old_log_probability,
+                        float(old_baseline),
+                        oracle_features,
+                    )
+                )
                 action_counts[action.kind] += 1
                 if response_player is None:
                     episode.game._apply_turn_action(
@@ -534,21 +735,47 @@ def ppo_update(
     value_weight: float,
     entropy_weight: float,
     seed: int,
+    privileged_critic: PrivilegedCritic | None = None,
+    privileged_critic_weight: float = 0.25,
 ) -> dict[str, float]:
     if not steps:
         raise ValueError("PPO rollout 没有候选策略决策")
     candidates, action_mask, actions, old_log_probabilities, old_values, rewards = tensors(
         steps, feature_dim=network.feature_dim, device=device
     )
+    if privileged_critic_weight < 0:
+        raise ValueError("privileged critic weight 不能为负数")
+    privileged_inputs: torch.Tensor | None = None
+    if privileged_critic is not None:
+        if any(step.privileged_features is None for step in steps):
+            raise ValueError("启用 privileged critic 的 PPO step 缺少内存特征")
+        privileged_inputs = torch.tensor(
+            [step.privileged_features for step in steps],
+            dtype=torch.float32,
+            device=device,
+        )
+        if privileged_inputs.shape != (len(steps), PRIVILEGED_CRITIC_FEATURE_DIM):
+            raise ValueError("privileged critic PPO 特征维度不匹配")
     advantages = rewards - old_values
     advantages = (advantages - advantages.mean()) / advantages.std(unbiased=False).clamp_min(1e-6)
-    optimizer = torch.optim.AdamW(network.parameters(), lr=learning_rate, weight_decay=0.0001)
+    optimizer = torch.optim.AdamW(
+        (
+            chain(network.parameters(), privileged_critic.parameters())
+            if privileged_critic is not None
+            else network.parameters()
+        ),
+        lr=learning_rate,
+        weight_decay=0.0001,
+    )
     indices = list(range(len(steps)))
     total_policy_loss = 0.0
     total_value_loss = 0.0
+    total_privileged_critic_loss = 0.0
     total_entropy = 0.0
     updates = 0
     network.train()
+    if privileged_critic is not None:
+        privileged_critic.train()
     for epoch in range(epochs):
         random.Random(seed + epoch).shuffle(indices)
         for start in range(0, len(indices), batch_size):
@@ -565,25 +792,47 @@ def ppo_update(
             ) * advantages[row_indices]
             policy_loss = -torch.minimum(surrogate_one, surrogate_two).mean()
             value_loss = F.smooth_l1_loss(values, rewards[row_indices])
+            privileged_critic_loss = (
+                F.smooth_l1_loss(
+                    privileged_critic(privileged_inputs[row_indices]),
+                    rewards[row_indices],
+                )
+                if privileged_critic is not None and privileged_inputs is not None
+                else torch.zeros((), device=device)
+            )
             probabilities = torch.softmax(logits, dim=1)
             entropy = -(probabilities * log_probabilities).sum(dim=1).mean()
-            loss = policy_loss + value_weight * value_loss - entropy_weight * entropy
+            loss = (
+                policy_loss
+                + value_weight * value_loss
+                + privileged_critic_weight * privileged_critic_loss
+                - entropy_weight * entropy
+            )
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(network.parameters(), max_norm=5.0)
             optimizer.step()
             total_policy_loss += float(policy_loss.detach().cpu())
             total_value_loss += float(value_loss.detach().cpu())
+            total_privileged_critic_loss += float(privileged_critic_loss.detach().cpu())
             total_entropy += float(entropy.detach().cpu())
             updates += 1
     network.eval()
-    return {
+    if privileged_critic is not None:
+        privileged_critic.eval()
+    metrics = {
         "updates": float(updates),
         "policy_loss": total_policy_loss / updates,
         "value_loss": total_value_loss / updates,
         "entropy": total_entropy / updates,
         "advantage_mean_before_normalization": float((rewards - old_values).mean().cpu()),
+        "advantage_std_before_normalization": float(
+            (rewards - old_values).std(unbiased=False).cpu()
+        ),
     }
+    if privileged_critic is not None:
+        metrics["privileged_critic_loss"] = total_privileged_critic_loss / updates
+    return metrics
 
 
 def main() -> None:
@@ -599,6 +848,8 @@ def main() -> None:
         or args.value_weight <= 0
         or args.entropy_weight < 0
         or args.reward_scale <= 0
+        or args.privileged_critic_hidden_size <= 0
+        or args.privileged_critic_weight < 0
         or not 0.0 <= args.teacher_opponent_probability <= 1.0
     ):
         raise ValueError("PPO 超参数不合法")
@@ -608,6 +859,16 @@ def main() -> None:
     if agent.architecture != ARCHITECTURE_CANDIDATE_MLP:
         raise ValueError("首版 PPO 仅支持 candidate_mlp checkpoint")
     assert isinstance(agent.network, CandidatePolicyValueNetwork)
+    privileged_critic = None
+    if args.privileged_critic:
+        # This object intentionally has no save path.  It survives only for
+        # this trainer process and supplies rollout baselines, never actions.
+        torch.manual_seed(args.seed)
+        if agent.device.type == "cuda":
+            torch.cuda.manual_seed_all(args.seed)
+        privileged_critic = PrivilegedCritic(
+            args.privileged_critic_hidden_size
+        ).to(agent.device)
     frozen_opponents: list[tuple[str, TorchPolicyValueAgent]] = []
     for checkpoint in args.opponent_checkpoint:
         opponent = TorchPolicyValueAgent.load(checkpoint, device=args.device)
@@ -625,6 +886,18 @@ def main() -> None:
         "device": args.device,
         "reward_scale": args.reward_scale,
         "rollout_batch_size": args.rollout_batch_size,
+        "privileged_critic": {
+            "enabled": args.privileged_critic,
+            "training_only": True,
+            "feature_scope": "complete_simulator_state_in_memory_only",
+            "hidden_size": (
+                args.privileged_critic_hidden_size if args.privileged_critic else None
+            ),
+            "loss_weight": (
+                args.privileged_critic_weight if args.privileged_critic else None
+            ),
+            "serialized_with_actor_checkpoint": False,
+        },
         "opponent_pool": {
             "teacher_probability": args.teacher_opponent_probability,
             "frozen_checkpoints": [str(path) for path in args.opponent_checkpoint],
@@ -641,6 +914,7 @@ def main() -> None:
             opponents=frozen_opponents,
             teacher_opponent_probability=args.teacher_opponent_probability,
             rollout_batch_size=args.rollout_batch_size,
+            privileged_critic=privileged_critic,
         )
         update = ppo_update(
             agent.network,
@@ -653,6 +927,8 @@ def main() -> None:
             value_weight=args.value_weight,
             entropy_weight=args.entropy_weight,
             seed=args.seed + iteration,
+            privileged_critic=privileged_critic,
+            privileged_critic_weight=args.privileged_critic_weight,
         )
         iteration_report = {
             "iteration": iteration,

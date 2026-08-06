@@ -202,6 +202,10 @@ class ActionValueDatasetSummary:
     branch_rollouts: int
     belief_resampled_worlds: int
     belief_resample_skipped: int
+    belief_conditioned_worlds: int
+    belief_conditioning_skipped: int
+    mean_belief_conditioning_consistency_rate: float | None
+    mean_belief_conditioning_ess_fraction: float | None
     response_decisions: int
     repeated_decisions: int
     action_counts: dict[str, int]
@@ -1193,6 +1197,42 @@ class _HistoryReplayAudit:
         }
 
 
+@dataclass(frozen=True)
+class _LatestDiscardBeliefDiagnostics:
+    """Safe diagnostics for a one-event, latest-discard SIR proposal.
+
+    This is explicitly not a complete public-history posterior.  It reports
+    the Monte-Carlo health of one locally reconstructed opponent decision so
+    callers can reject the proposal before it affects an action-value target.
+    """
+
+    proposed_particles: int
+    consistent_particles: int
+    effective_sample_size: float
+    likelihood_power: float
+    rejection_counts: dict[str, int]
+
+    @property
+    def consistency_rate(self) -> float:
+        return self.consistent_particles / self.proposed_particles
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposal": "latest_normal_draw_discard_sir_v1",
+            "proposed_particles": self.proposed_particles,
+            "consistent_particles": self.consistent_particles,
+            "consistency_rate": self.consistency_rate,
+            "effective_sample_size": self.effective_sample_size,
+            "effective_sample_fraction": (
+                self.effective_sample_size / self.consistent_particles
+                if self.consistent_particles
+                else 0.0
+            ),
+            "likelihood_power": self.likelihood_power,
+            "rejection_counts": dict(self.rejection_counts),
+        }
+
+
 def _public_events_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
     """Compare one public event without treating dict insertion order as state."""
 
@@ -1251,6 +1291,11 @@ def _frozen_behavior_action_likelihood(
     matching_indices = [
         index for index, action in enumerate(legal) if action in compatible
     ]
+    if not matching_indices:
+        # Callers may reconstruct a public action that is structurally named
+        # but not legal in this particular sampled hidden world.  It is a
+        # rejected particle, never an index error or a fabricated action.
+        return None
     scores = getattr(agent, "scores", None)
     if callable(scores):
         try:
@@ -1733,6 +1778,220 @@ def _audit_resampled_history_prefix(
     )
 
 
+def _latest_normal_draw_discard_pre_state(
+    game: XiamenMahjongGame,
+) -> tuple[XiamenMahjongGame, int, GameAction] | None:
+    """Reverse the latest public normal-draw discard without hidden lookup.
+
+    The restriction to ``draw -> discard`` is intentional.  A discard after a
+    claim or an unrecorded replacement draw would need a separate, exact
+    private-draw transition.  For classic it also rejects 天听/游金/early-hand
+    states. This bounded helper therefore creates only a policy-observation
+    state reconstructible from public events and a sampled current hidden
+    hand.
+    """
+
+    if game.rules.profile not in {"core", "classic"} or game.phase != "response":
+        return None
+    if game.rules.profile == "classic" and (
+        game.tour_state is not None
+        or game.opening_wait_seats
+        or game.turn_count <= game.rules.player_count
+    ):
+        # Reversing a discard that could have toggled 天听/游金/early-hand
+        # predicates would require additional private-history facts.  Reject
+        # it rather than approximate a classic special-rule transition.
+        return None
+    if game.discarder is None or game.last_discard is None:
+        return None
+    if len(game.public_actions) < 2:
+        return None
+    discard_event = game.public_actions[-1]
+    draw_event = game.public_actions[-2]
+    discarder = game.discarder
+    tile = game.last_discard
+    if (
+        discard_event.get("kind") != "discard"
+        or discard_event.get("seat") != discarder
+        or discard_event.get("tile") != tile
+        or draw_event.get("kind") != "draw"
+        or draw_event.get("seat") != discarder
+    ):
+        return None
+    player = game.players[discarder]
+    if not player.discards or player.discards[-1] != tile:
+        return None
+    pre_state = copy.deepcopy(game)
+    pre_player = pre_state.players[discarder]
+    pre_player.discards.pop()
+    pre_player.hand.append(tile)
+    pre_player.hand.sort()
+    pre_state.public_actions.pop()
+    pre_state.phase = "discard"
+    pre_state.current_player = discarder
+    pre_state.last_discard = None
+    pre_state.discarder = None
+    # ``latest_discard`` is a public feature retained across a normal draw
+    # until somebody claims it.  Recover the prior value from public events
+    # instead of carrying the just-observed discard back into its own policy
+    # input.
+    prior_latest: tuple[int, int] | None = None
+    for event in reversed(pre_state.public_actions):
+        kind = event.get("kind")
+        if kind == "discard" and isinstance(event.get("tile"), int) and isinstance(
+            event.get("seat"), int
+        ):
+            prior_latest = (int(event["tile"]), int(event["seat"]))
+            break
+        if kind in {"chi", "pong", "ming_kan"}:
+            break
+    if prior_latest is None:
+        pre_state.latest_discard = None
+        pre_state.latest_discard_seat = None
+    else:
+        pre_state.latest_discard, pre_state.latest_discard_seat = prior_latest
+    pre_state.response_options = {}
+    pre_state.response_choices = {}
+    # This draw is public, so restoring the just-drawn tile does not inject a
+    # source-world secret into the opponent's policy observation.
+    pre_state.last_drawn_tiles[discarder] = tile
+    if pre_state.rules.profile == "classic":
+        # The gold-lock flag is also a deterministic public-history predicate:
+        # a seat is locked exactly when its previous ordinary discard was gold.
+        prior_own_discard = next(
+            (
+                event
+                for event in reversed(pre_state.public_actions)
+                if event.get("kind") == "discard" and event.get("seat") == discarder
+            ),
+            None,
+        )
+        pre_state.gold_discard_lock_seat = (
+            discarder
+            if prior_own_discard is not None
+            and prior_own_discard.get("tile") == pre_state.gold_tile
+            else None
+        )
+    return pre_state, discarder, GameAction("discard", tile)
+
+
+def _sample_latest_discard_conditioned_world(
+    snapshot: XiamenMahjongGame,
+    *,
+    actor_seat: int,
+    expected_legal_actions: Sequence[GameAction],
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+    likelihood_power: float = 1.0,
+) -> tuple[XiamenMahjongGame | None, _LatestDiscardBeliefDiagnostics]:
+    """Sample a safe one-step behavior-conditioned current world.
+
+    First draw current hidden worlds from the existing actor/public prior. For
+    a response state reached by a publicly visible opponent ``draw`` then
+    ``discard``, reverse that last discard in each particle and weight it by
+    the frozen opponent policy's probability of the observed discard. The
+    weighted resample is local sequential importance resampling (SIR). The
+    optional ``likelihood_power`` tempers an uncertain frozen behavior model:
+    ``1`` is the raw local posterior approximation and smaller positive values
+    move conservatively toward the actor/public prior.  It is recorded by the
+    future collector and is never silently applied.
+
+    It is deliberately limited to one normal-draw discard and **must not be
+    labelled a full-history posterior**.  Its diagnostics let the collector
+    enforce a consistency/ESS gate before any future integration.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    if not math.isfinite(behavior_temperature) or behavior_temperature <= 0.0:
+        raise ValueError("behavior_temperature 必须为正且有限")
+    if not 0.0 <= uniform_mixture < 1.0:
+        raise ValueError("uniform_mixture 必须在 0（含）到 1（不含）之间")
+    if not math.isfinite(likelihood_power) or not 0.0 < likelihood_power <= 1.0:
+        raise ValueError("likelihood_power 必须在 0（不含）到 1（含）之间")
+
+    candidates: list[XiamenMahjongGame] = []
+    weights: list[float] = []
+    rejection_counts: Counter[str] = Counter()
+    expected = tuple(expected_legal_actions)
+    for _ in range(particle_count):
+        world = _resample_private_world_for_actor(
+            snapshot, actor_seat=actor_seat, rng=rng
+        )
+        if world is None:
+            rejection_counts["public_prior"] += 1
+            continue
+        if world.phase != "response" or tuple(
+            world.response_options.get(actor_seat, [])
+        ) != expected:
+            rejection_counts["actor_legal_actions"] += 1
+            continue
+        reversed_state = _latest_normal_draw_discard_pre_state(world)
+        if reversed_state is None:
+            rejection_counts["unsupported_public_prefix"] += 1
+            continue
+        pre_state, discarder, observed = reversed_state
+        opponent = opponents.get(discarder)
+        if opponent is None:
+            rejection_counts["opponent_missing"] += 1
+            continue
+        legal = tuple(_turn_actions(pre_state, discarder))
+        proposal = _frozen_behavior_action_likelihood(
+            opponent[1],
+            pre_state,
+            player_id=discarder,
+            legal=legal,
+            compatible=(observed,),
+            is_response=False,
+            temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+        )
+        if proposal is None:
+            rejection_counts["observed_discard_illegal"] += 1
+            continue
+        _action, likelihood = proposal
+        candidates.append(world)
+        weights.append(likelihood**likelihood_power)
+    if not candidates:
+        return None, _LatestDiscardBeliefDiagnostics(
+            proposed_particles=particle_count,
+            consistent_particles=0,
+            effective_sample_size=0.0,
+            likelihood_power=likelihood_power,
+            rejection_counts=dict(sorted(rejection_counts.items())),
+        )
+    total_weight = sum(weights)
+    if not math.isfinite(total_weight) or total_weight <= 0.0:
+        rejection_counts["zero_weight"] += len(candidates)
+        return None, _LatestDiscardBeliefDiagnostics(
+            proposed_particles=particle_count,
+            consistent_particles=len(candidates),
+            effective_sample_size=0.0,
+            likelihood_power=likelihood_power,
+            rejection_counts=dict(sorted(rejection_counts.items())),
+        )
+    normalized = [weight / total_weight for weight in weights]
+    ess = 1.0 / sum(weight * weight for weight in normalized)
+    threshold = rng.random() * total_weight
+    cumulative = 0.0
+    selected_index = len(candidates) - 1
+    for index, weight in enumerate(weights):
+        cumulative += weight
+        if threshold < cumulative:
+            selected_index = index
+            break
+    return candidates[selected_index], _LatestDiscardBeliefDiagnostics(
+        proposed_particles=particle_count,
+        consistent_particles=len(candidates),
+        effective_sample_size=ess,
+        likelihood_power=likelihood_power,
+        rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
 @dataclass(frozen=True)
 class _CounterfactualActionRequest:
     """A legal policy choice waiting for a possibly batched inference call."""
@@ -2137,6 +2396,9 @@ def collect_counterfactual_action_value_trajectories(
     opponents: Sequence[tuple[str, Any]] = (),
     teacher_opponent_probability: float = 1.0,
     belief_resample: bool = False,
+    belief_latest_discard_particles: int = 0,
+    belief_latest_discard_likelihood_power: float = 0.25,
+    belief_latest_discard_min_ess_fraction: float = 0.5,
     rollout_batch_size: int = 1,
 ) -> tuple[list[TrainingTrajectory], ActionValueDatasetSummary]:
     """Build safe public observations with rollout-ranked legal actions.
@@ -2154,6 +2416,15 @@ def collect_counterfactual_action_value_trajectories(
     its own rule state and RNG, so changing this setting never relaxes legal
     action validation or exposes hidden state.
 
+    ``belief_latest_discard_particles`` is an opt-in, deliberately narrow
+    refinement of ``belief_resample``.  It applies only to candidate response
+    states whose latest public transition is an opponent normal ``draw`` then
+    ``discard``: candidate worlds are locally reweighted by that observed
+    discard's frozen-policy likelihood.  The likelihood is tempered by the
+    supplied power and must meet the ESS fraction gate.  This is *not* a full
+    public-history posterior; unsupported states are skipped rather than
+    silently falling back to a different target distribution.
+
     The target is ``Q^pi(s, a)`` under the current candidate and frozen
     opponent mixture.  With ``belief_resample=True``, each rollout first
     redraws the unknown wall, opponent hands, flowers and concealed-kong faces
@@ -2168,6 +2439,17 @@ def collect_counterfactual_action_value_trajectories(
         raise ValueError("每局样本数和每动作 rollout 数必须为正数")
     if rollout_batch_size <= 0:
         raise ValueError("rollout_batch_size 必须为正数")
+    if belief_latest_discard_particles < 0:
+        raise ValueError("belief_latest_discard_particles 不能为负数")
+    if belief_latest_discard_particles and not belief_resample:
+        raise ValueError("latest-discard 条件化需要同时启用 belief_resample")
+    if (
+        not math.isfinite(belief_latest_discard_likelihood_power)
+        or not 0.0 < belief_latest_discard_likelihood_power <= 1.0
+    ):
+        raise ValueError("belief_latest_discard_likelihood_power 必须在 0（不含）到 1（含）之间")
+    if not 0.0 <= belief_latest_discard_min_ess_fraction <= 1.0:
+        raise ValueError("belief_latest_discard_min_ess_fraction 必须在 0 到 1 之间")
     if not 0.0 <= response_sample_probability <= 1.0:
         raise ValueError("response_sample_probability 必须在 0 和 1 之间")
     if not 0.0 <= teacher_opponent_probability <= 1.0:
@@ -2184,6 +2466,10 @@ def collect_counterfactual_action_value_trajectories(
     branch_rollouts = 0
     belief_resampled_worlds = 0
     belief_resample_skipped = 0
+    belief_conditioned_worlds = 0
+    belief_conditioning_skipped = 0
+    belief_conditioning_consistency_rates: list[float] = []
+    belief_conditioning_ess_fractions: list[float] = []
     response_decisions = 0
     repeated_decisions = 0
     action_value_spans: list[float] = []
@@ -2215,11 +2501,18 @@ def collect_counterfactual_action_value_trajectories(
             response_snapshots = [
                 snapshot for snapshot in snapshots if snapshot.game.phase == "response"
             ]
-            selected_pool = (
-                response_snapshots
-                if response_snapshots and rng.random() < response_sample_probability
-                else snapshots
-            )
+            if belief_latest_discard_particles:
+                selected_pool = [
+                    snapshot
+                    for snapshot in response_snapshots
+                    if _latest_normal_draw_discard_pre_state(snapshot.game) is not None
+                ]
+            else:
+                selected_pool = (
+                    response_snapshots
+                    if response_snapshots and rng.random() < response_sample_probability
+                    else snapshots
+                )
             if not selected_pool:
                 continue
             selected_count = min(samples_per_hand, len(selected_pool))
@@ -2234,9 +2527,41 @@ def collect_counterfactual_action_value_trajectories(
                 for _ in range(rollouts_per_action):
                     rollout_snapshot = snapshot
                     if belief_resample:
-                        rollout_snapshot = _resample_private_world_for_actor(
-                            snapshot, actor_seat=candidate_seat, rng=rng
-                        )
+                        if belief_latest_discard_particles:
+                            rollout_snapshot, conditioning = (
+                                _sample_latest_discard_conditioned_world(
+                                    snapshot,
+                                    actor_seat=candidate_seat,
+                                    expected_legal_actions=legal,
+                                    opponents=base_opponents,
+                                    particle_count=belief_latest_discard_particles,
+                                    rng=rng,
+                                    likelihood_power=belief_latest_discard_likelihood_power,
+                                )
+                            )
+                            ess_fraction = (
+                                conditioning.effective_sample_size
+                                / conditioning.consistent_particles
+                                if conditioning.consistent_particles
+                                else 0.0
+                            )
+                            belief_conditioning_consistency_rates.append(
+                                conditioning.consistency_rate
+                            )
+                            if (
+                                rollout_snapshot is None
+                                or ess_fraction < belief_latest_discard_min_ess_fraction
+                            ):
+                                usable_snapshot = False
+                                belief_resample_skipped += 1
+                                belief_conditioning_skipped += 1
+                                break
+                            belief_conditioned_worlds += 1
+                            belief_conditioning_ess_fractions.append(ess_fraction)
+                        else:
+                            rollout_snapshot = _resample_private_world_for_actor(
+                                snapshot, actor_seat=candidate_seat, rng=rng
+                            )
                         if rollout_snapshot is None:
                             usable_snapshot = False
                             belief_resample_skipped += 1
@@ -2358,6 +2683,18 @@ def collect_counterfactual_action_value_trajectories(
                             "return_semantics": "candidate_terminal_net_score_q_pi",
                             "continuation": "frozen_candidate_and_opponents",
                             "belief_resample": belief_resample,
+                            "belief_conditioning": (
+                                "latest_normal_draw_discard_sir_v1"
+                                if belief_latest_discard_particles
+                                else "public_prior"
+                            ),
+                            "belief_latest_discard": {
+                                "particles": belief_latest_discard_particles,
+                                "likelihood_power": belief_latest_discard_likelihood_power,
+                                "minimum_ess_fraction": belief_latest_discard_min_ess_fraction,
+                                "frozen_behavior_temperature": 1.0,
+                                "frozen_behavior_uniform_mixture": 0.02,
+                            },
                         },
                         decisions=(decision,),
                         outcome={
@@ -2381,6 +2718,20 @@ def collect_counterfactual_action_value_trajectories(
         branch_rollouts=branch_rollouts,
         belief_resampled_worlds=belief_resampled_worlds,
         belief_resample_skipped=belief_resample_skipped,
+        belief_conditioned_worlds=belief_conditioned_worlds,
+        belief_conditioning_skipped=belief_conditioning_skipped,
+        mean_belief_conditioning_consistency_rate=(
+            sum(belief_conditioning_consistency_rates)
+            / len(belief_conditioning_consistency_rates)
+            if belief_conditioning_consistency_rates
+            else None
+        ),
+        mean_belief_conditioning_ess_fraction=(
+            sum(belief_conditioning_ess_fractions)
+            / len(belief_conditioning_ess_fractions)
+            if belief_conditioning_ess_fractions
+            else None
+        ),
         response_decisions=response_decisions,
         repeated_decisions=repeated_decisions,
         action_counts=dict(sorted(action_counts.items())),

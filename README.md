@@ -179,6 +179,13 @@ Teacher / DAgger 的标签只有“Teacher 会选哪一个动作”，因此上�
 建议打开 `--belief-resample`：它会固定本家手牌和全部公开信息，而对未知牌墙、他家暗手、
 非本家花牌和对手暗杠牌面重新采样；这避免把某一副真实暗牌分配直接当成玩家可知的价值。
 它目前是公开信息先验采样，并不对历史对手动作作完整后验加权，实验报告必须标记该限制。
+对于 `core`，或已排除游金/天听/早局特殊状态的 `classic` 档，且本家正响应“对手公开摸牌后立即弃牌”的局面，可额外启用
+`--belief-latest-discard-particles 32`：它在当前公开先验粒子上重建该弃牌前状态，按冻结对手
+策略选择该弃牌的**保守温和**似然重采样。默认使用似然幂次 `0.25` 与预重采样 ESS 比例门槛
+`0.5`；不满足公开前缀、候选合法动作或 ESS 门槛的局面会被跳过。它只是单事件局部条件化，
+**不是完整历史 posterior**，默认关闭，不能据此直接晋升网页模型。
+采集摘要还会分别报告结构一致粒子率与 ESS：例如经典档的公开“强制跟打”规则会使一部分
+重分配后的对手手牌与观察弃牌不相容，这些粒子必须拒绝，不能从源局借用暗手使其通过。
 `--rollout-batch-size` 只将独立分支的神经网络推理合并；每条分支仍有独立规则状态与随机数，
 并逐步执行原有合法性检查。开发或回归验证时可固定为 `1`，再与批量输出逐项比较。
 
@@ -207,6 +214,18 @@ Teacher / DAgger 的标签只有“Teacher 会选哪一个动作”，因此上�
   --output-dir artifacts/policy-value-action-value-classic-v1
 ```
 
+局部条件化必须单独收集、单独报告。经典档的冻结 Teacher 行为更尖锐，使用更保守的幂次与门槛：
+
+```bash
+.venv/bin/python scripts/collect_action_value_trajectories.py \
+  --checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --seed-count 200 --rollouts-per-action 4 --belief-resample \
+  --belief-latest-discard-particles 32 \
+  --belief-latest-discard-likelihood-power 0.10 \
+  --belief-latest-discard-min-ess-fraction 0.20 \
+  --output-dir artifacts/counterfactual-action-value-classic-local-belief-v1
+```
+
 该训练同时做两件事：将 `action_values / temperature` softmax 为软动作偏好，并让独立 Q 头
 直接回归每个合法动作的归一化终局净分（`action_values / --action-value-target-scale`）。前者
 学习相对偏好，后者保留“好多少”的幅度；二者不能互相替代。Q 头目前只在 `candidate_mlp`
@@ -214,7 +233,9 @@ Teacher / DAgger 的标签只有“Teacher 会选哪一个动作”，因此上�
 
 无论模拟结果多大，所有动作同分的样本没有排序信号，默认以
 `--action-value-margin-scale 16` 将其权重压到零；若采集时有多次 rollout，还可用
-`--action-value-stderr-scale` 下调高方差目标。`--checkpoint-selection-source` 防止大量 Teacher
+`--action-value-stderr-scale` 下调高方差目标。若不同合法动作的标准误差异很大，
+`--action-value-confidence-z 1.0` 可将软偏好目标改为 `Q - z × stderr` 的逐动作下置信界；默认 `0`
+不改变原始均值目标。`--checkpoint-selection-source` 防止大量 Teacher
 样本掩盖在线动作价值留出集；当训练 Q 头时，`--checkpoint-selection-metric action_value_huber_loss`
 应和该来源配套，避免按另一个策略目标选择 epoch。最终是否保留
 checkpoint，仍由全新牌墙上的四座轮换配对评测决定。
@@ -238,6 +259,19 @@ checkpoint，仍由全新牌墙上的四座轮换配对评测决定。
   --checkpoint artifacts/torch-ppo-classic/policy-value-ppo-iteration-3.pt \
   --reference artifacts/policy-value-classic-v1-dagger/policy-value.pt \
   --profile classic --hands 200 --seed 22000000 --device cuda
+```
+
+如需降低训练期终局净分的高方差，可加 `--privileged-critic`。它的 critic 仅在该次 PPO 进程内读取
+完整模拟状态作为 advantage baseline；`TeacherDecision`、网页 actor、JSONL、报告和保存的
+`policy-value-ppo-iteration-*.pt` 都不会携带其特征或权重。该路径默认关闭，且仍必须通过未见牌墙评测：
+
+```bash
+.venv/bin/python scripts/train_torch_ppo.py \
+  --checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --iterations 3 --episodes-per-iteration 1024 \
+  --rollout-batch-size 32 --privileged-critic \
+  --privileged-critic-hidden-size 128 --privileged-critic-weight 0.25 \
+  --device cuda --output-dir artifacts/torch-ppo-classic-privileged-critic-v1
 ```
 
 针对 `.pt` checkpoint，采集和评测命令会记录推理设备；同一轮比较必须固定同一设备，避免
