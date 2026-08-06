@@ -448,6 +448,11 @@ collector/Q 数据门槛；其作用是将下一步明确限定为“可计算�
 对手只以文件 SHA-256 记录，不保存本地路径；`audit_human_trajectories.py` 会在人工评审前拒绝混合规则/对手、
 重复手牌、重放种子、私有字段和非本局分差记录。
 
+审计报告另对**结构合格**的完整局计算人类 seat 的本局平均分差、样本标准误、正态近似 95% 区间、胡率和
+流局率。候选对手的 `agent_profiles` 也明确记为 `explicit_policy_value_checkpoint`，不会伪装成 Teacher；对手
+的可比身份仍以 SHA-256 为准。这只是未来真人 A/B 的描述性汇总，既不检验记录者水平，也不构成“模型胜过
+人类”的结论。
+
 为进行受控试玩，`serve_web_game.py --ai-checkpoint <policy-value.pt>` 会将三名 AI 显式替换为该 checkpoint，
 网页标识为 `EXPLICIT EXPERIMENTAL CHECKPOINT`；没有参数时仍是 Teacher。run4 checkpoint 已通过“加载、响应、
 人类一手、AI 自动推进”的规则引擎冒烟检查。该路径仅提供未来人类 A/B 与数据采集能力，**不构成** run4

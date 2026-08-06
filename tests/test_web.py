@@ -103,7 +103,12 @@ class WebTests(unittest.TestCase):
     def test_opt_in_human_recording_writes_only_safe_completed_trajectory(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "human.jsonl"
-            store = GameStore(human_log=output)
+            store = GameStore(
+                human_log=output,
+                ai_agent=HeuristicTeacherAgent(),
+                ai_profile="explicit_test_checkpoint",
+                ai_identity="sha256:test",
+            )
             store.new_game(seed=1, rules_profile="classic", reset_match=True)
             action = next(
                 candidate
@@ -136,7 +141,16 @@ class WebTests(unittest.TestCase):
             )
             self.assertEqual(
                 record["source_metadata"]["opponent_policy"],
-                "heuristic_teacher",
+                "sha256:test",
+            )
+            self.assertEqual(
+                record["agent_profiles"],
+                [
+                    "local_human_opt_in",
+                    "explicit_test_checkpoint",
+                    "explicit_test_checkpoint",
+                    "explicit_test_checkpoint",
+                ],
             )
             decision = record["decisions"][0]
             self.assertEqual(decision["chosen_index"], decision["executed_index"])
@@ -146,7 +160,14 @@ class WebTests(unittest.TestCase):
             audit = audit_local_human_trajectories([output], minimum_hands=1)
             self.assertTrue(audit["ready_for_manual_review"])
             self.assertEqual(audit["valid_hands"], 1)
-            self.assertEqual(audit["opponent_policies"], {"heuristic_teacher": 1})
+            self.assertEqual(audit["opponent_policies"], {"sha256:test": 1})
+            summary = audit["human_match_summary"]
+            self.assertEqual(summary["scope"], "structurally_valid_completed_hands_only")
+            self.assertEqual(summary["hands"], 1)
+            self.assertEqual(summary["human_score_delta_mean"], 16.0)
+            self.assertIsNone(summary["human_score_delta_stderr"])
+            self.assertEqual(summary["human_win_rate"], 0.0)
+            self.assertEqual(summary["draw_rate"], 1.0)
             duplicate_audit = audit_local_human_trajectories(
                 [output, output], minimum_hands=1
             )

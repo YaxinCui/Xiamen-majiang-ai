@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections import Counter
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -64,6 +65,13 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
         issues.append("outcome_is_not_single_hand_delta")
     if bool(trajectory.outcome.get("synthetic")):
         issues.append("synthetic_outcome")
+    scores = trajectory.outcome.get("scores")
+    if not (
+        isinstance(scores, list)
+        and len(scores) == 4
+        and all(isinstance(score, (int, float)) and not isinstance(score, bool) for score in scores)
+    ):
+        issues.append("non_numeric_score_delta")
     if not trajectory.decisions:
         issues.append("no_human_decisions")
     for decision in trajectory.decisions:
@@ -111,6 +119,9 @@ def audit_local_human_trajectories(
     rules_versions: Counter[str] = Counter()
     opponent_policies: Counter[str] = Counter()
     action_counts: Counter[str] = Counter()
+    human_scores: list[float] = []
+    human_wins = 0
+    draws = 0
     for trajectory in trajectories:
         fingerprint = _trajectory_fingerprint(trajectory)
         fingerprints[fingerprint] += 1
@@ -123,6 +134,10 @@ def audit_local_human_trajectories(
         rules_versions[trajectory.rules_version] += 1
         opponent_policies[str(trajectory.source_metadata["opponent_policy"])] += 1
         action_counts.update(decision.chosen_action.kind for decision in trajectory.decisions)
+        scores = trajectory.outcome["scores"]
+        human_scores.append(float(scores[0]))
+        human_wins += trajectory.outcome.get("winner") == 0
+        draws += trajectory.outcome.get("win_type") == "draw"
     duplicate_hands = sum(count - 1 for count in fingerprints.values() if count > 1)
     gate_reasons: list[str] = []
     if issue_counts:
@@ -135,6 +150,15 @@ def audit_local_human_trajectories(
         gate_reasons.append("mixed_rule_profiles")
     if len(opponent_policies) != 1:
         gate_reasons.append("mixed_opponent_policies")
+    human_score_mean = sum(human_scores) / len(human_scores) if human_scores else None
+    human_score_stderr = (
+        math.sqrt(
+            sum((score - human_score_mean) ** 2 for score in human_scores)
+            / (len(human_scores) * (len(human_scores) - 1))
+        )
+        if len(human_scores) > 1 and human_score_mean is not None
+        else None
+    )
     return {
         "source": "local_human_opt_in",
         "files": len(files),
@@ -147,12 +171,31 @@ def audit_local_human_trajectories(
         "rules_versions": dict(sorted(rules_versions.items())),
         "opponent_policies": dict(sorted(opponent_policies.items())),
         "human_action_counts": dict(sorted(action_counts.items())),
+        "human_match_summary": {
+            "scope": "structurally_valid_completed_hands_only",
+            "hands": len(human_scores),
+            "human_score_delta_mean": human_score_mean,
+            "human_score_delta_stderr": human_score_stderr,
+            "human_score_delta_95pct_low": (
+                human_score_mean - 1.96 * human_score_stderr
+                if human_score_mean is not None and human_score_stderr is not None
+                else None
+            ),
+            "human_score_delta_95pct_high": (
+                human_score_mean + 1.96 * human_score_stderr
+                if human_score_mean is not None and human_score_stderr is not None
+                else None
+            ),
+            "human_win_rate": human_wins / len(human_scores) if human_scores else None,
+            "draw_rate": draws / len(human_scores) if human_scores else None,
+        },
         "issues": dict(sorted(issue_counts.items())),
         "ready_for_manual_review": not gate_reasons,
         "gate_reasons": gate_reasons,
         "warning": (
-            "Passing this structural gate does not establish human skill or "
-            "authorize training/promotion; use independent held-out human "
-            "matches before any strength claim."
+            "The match summary is a descriptive, normal-approximation aggregate "
+            "over structurally valid records only. Passing this structural gate "
+            "does not establish human skill or authorize training/promotion; use "
+            "independent held-out human matches before any strength claim."
         ),
     }

@@ -129,7 +129,7 @@ class GameStore:
             self._human_decisions,
             agent_profiles=(
                 "local_human_opt_in",
-                *("heuristic_teacher" for _ in range(self.game.rules.player_count - 1)),
+                *(self._ai_profile for _ in range(self.game.rules.player_count - 1)),
             ),
             source_metadata={
                 "collector": "local_human_opt_in",
