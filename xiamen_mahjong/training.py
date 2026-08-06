@@ -1440,6 +1440,62 @@ class _InitialClaimDensityAudit:
 
 
 @dataclass(frozen=True)
+class _InitialNormalDrawDensityAudit:
+    """Aggregate-only audit for the first ordinary opponent draw transition.
+
+    It conditions the structured *post-setup reference allocation* on the
+    public flower faces of exactly one normal draw.  It does not yet condition
+    the engine's dice-indexed gold-indicator removal, so it is not a full
+    rules-deal posterior. The following discard is conditioned only for
+    structural feasibility; behavior remains a frozen-policy likelihood.
+    """
+
+    proposed_particles: int
+    initialized_particles: int
+    accepted_particles: int
+    condition_probability: float | None
+    effective_sample_size: float
+    mean_accepted_log_likelihood: float | None
+    rejection_counts: dict[str, int]
+
+    @property
+    def acceptance_rate(self) -> float:
+        return self.accepted_particles / self.proposed_particles
+
+    @property
+    def effective_sample_fraction(self) -> float:
+        return (
+            self.effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposal": "core_initial_normal_draw_post_setup_density_v0",
+            "proposal_density": (
+                "structured_setup_prior_conditioned_on_public_normal_draw_flowers"
+            ),
+            "proposal_density_ratio": "prior_over_proposal_equals_condition_probability",
+            "proposed_particles": self.proposed_particles,
+            "initialized_particles": self.initialized_particles,
+            "accepted_particles": self.accepted_particles,
+            "acceptance_rate": self.acceptance_rate,
+            "condition_probability": self.condition_probability,
+            "effective_sample_size": self.effective_sample_size,
+            "effective_sample_fraction": self.effective_sample_fraction,
+            "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
+            "rejection_counts": dict(self.rejection_counts),
+            "warning": (
+                "Post-setup reference-measure audit only; it does not yet "
+                "condition the dice-indexed gold-indicator removal, later "
+                "actor-private draws, or full public history, and is not "
+                "authorized for collection."
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class _SequentialHistoryBeliefAudit:
     """Safe aggregate diagnostics for an exact-base-proposal SMC audit.
 
@@ -1696,6 +1752,20 @@ class _SetupReplayProposal:
     condition_probability: float
 
 
+@dataclass(frozen=True)
+class _StructuredSetupDrawProposal:
+    """A private exact setup allocation conditioned on one normal draw.
+
+    The values are runtime-only.  In particular, opponent hands and the wall
+    must not be attached to a training example, report, or web response.
+    """
+
+    opponent_hands: tuple[tuple[int, ...], ...]
+    opponent_flowers: tuple[tuple[int, ...], ...]
+    wall: tuple[int, ...]
+    condition_probability: float
+
+
 def _sample_multivariate_hand_given_required_tiles(
     pool: Counter[int],
     *,
@@ -1773,6 +1843,213 @@ def _sample_multivariate_hand_given_required_tiles(
     if remaining != 0:  # pragma: no cover - protected by constrained_ways
         raise RuntimeError("条件手牌采样没有填满目标槽位")
     return selected, valid_ways / all_ways
+
+
+def _sample_structured_setup_given_normal_draw_flowers(
+    pool: Counter[int],
+    *,
+    opponent_hand_sizes: Sequence[int],
+    opponent_flower_sizes: Sequence[int],
+    wall_size: int,
+    observed_flowers: Sequence[int],
+    drawer_index: int | None = None,
+    required_drawer_tile: int | None = None,
+    rng: random.Random,
+) -> _StructuredSetupDrawProposal | None:
+    """Sample a structured setup exactly conditional on one normal draw.
+
+    Unknown opponent base-hand slots and flower slots are distinct from wall
+    slots: a base cannot enter a flower slot, and a flower cannot enter a
+    concealed hand slot.  This samples their joint allocation together with
+    the wall, conditional on a future normal draw revealing the ordered
+    ``observed_flowers`` and then an unobserved base tile.
+
+    If ``B`` and ``F`` are the counts of base and flower cards left for the
+    unknown setup, ``H`` and ``G`` are the respective opponent setup slots,
+    and the wall has ``W`` slots, then it contains ``B-H`` bases and ``F-G``
+    flowers.  The probability returned here is the exact structured-prior
+    probability of the observed draw, including both its category sequence
+    and the identities of its public flowers.  When ``required_drawer_tile``
+    is supplied, the base slots consisting of that opponent's setup hand plus
+    the hidden draw are additionally conditioned to contain that tile.  This
+    is an exact structural feasibility condition for a following public
+    discard, not a model of the discard choice.  Thus its importance
+    correction is the returned ``p / q``.  Behavior likelihoods and later
+    history remain separate factors.
+    """
+
+    if (
+        len(opponent_hand_sizes) != len(opponent_flower_sizes)
+        or wall_size <= 0
+        or any(size < 0 for size in opponent_hand_sizes)
+        or any(size < 0 for size in opponent_flower_sizes)
+        or any(
+            not isinstance(tile, int) or is_base_tile(tile)
+            for tile in observed_flowers
+        )
+        or (required_drawer_tile is None) != (drawer_index is None)
+        or (
+            required_drawer_tile is not None
+            and (not is_base_tile(required_drawer_tile) or drawer_index is None)
+        )
+        or (drawer_index is not None and not 0 <= drawer_index < len(opponent_hand_sizes))
+    ):
+        return None
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    base_total = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile)
+    )
+    flower_total = sum(
+        count for tile, count in remaining.items() if not is_base_tile(tile)
+    )
+    base_hand_slots = sum(opponent_hand_sizes)
+    flower_hand_slots = sum(opponent_flower_sizes)
+    base_wall_slots = base_total - base_hand_slots
+    flower_wall_slots = flower_total - flower_hand_slots
+    if (
+        base_wall_slots < 0
+        or flower_wall_slots < 0
+        or base_wall_slots + flower_wall_slots != wall_size
+        or sum(remaining.values())
+        != base_hand_slots + flower_hand_slots + wall_size
+    ):
+        return None
+
+    draw_probability = 1.0
+    positions_remaining = wall_size
+    flower_wall_remaining = flower_wall_slots
+    flower_total_remaining = flower_total
+    for flower in observed_flowers:
+        count = remaining[flower]
+        if (
+            flower_wall_remaining <= 0
+            or flower_total_remaining <= 0
+            or positions_remaining <= 0
+            or count <= 0
+        ):
+            return None
+        # First choose that this wall position is one of the remaining flower
+        # positions, then choose its public face from all remaining flowers;
+        # some of those flowers will ultimately fill opponent flower slots.
+        draw_probability *= flower_wall_remaining / positions_remaining
+        draw_probability *= count / flower_total_remaining
+        remaining[flower] -= 1
+        flower_wall_remaining -= 1
+        flower_total_remaining -= 1
+        positions_remaining -= 1
+    if base_wall_slots <= 0 or positions_remaining <= 0:
+        return None
+    draw_probability *= base_wall_slots / positions_remaining
+    conditioned_drawer_hand: tuple[int, ...] | None = None
+    if required_drawer_tile is None:
+        base_tile = _weighted_choice(
+            [
+                (tile, count)
+                for tile, count in remaining.items()
+                if is_base_tile(tile) and count > 0
+            ],
+            rng,
+        )
+        remaining[base_tile] -= 1
+    else:
+        assert drawer_index is not None
+        conditioned_group = _sample_multivariate_hand_given_required_tiles(
+            Counter(
+                {
+                    tile: count
+                    for tile, count in remaining.items()
+                    if is_base_tile(tile) and count > 0
+                }
+            ),
+            hand_size=opponent_hand_sizes[drawer_index] + 1,
+            required_tiles=(required_drawer_tile,),
+            rng=rng,
+        )
+        if conditioned_group is None:
+            return None
+        group, group_probability = conditioned_group
+        draw_probability *= group_probability
+        rng.shuffle(group)
+        base_tile = group.pop()
+        conditioned_drawer_hand = tuple(sorted(group))
+        remaining.subtract(Counter([*conditioned_drawer_hand, base_tile]))
+        if any(count < 0 for count in remaining.values()):
+            return None  # pragma: no cover - protected by conditioned_group
+
+    base_values = [
+        tile
+        for tile, count in remaining.items()
+        if is_base_tile(tile)
+        for _ in range(count)
+    ]
+    flower_values = [
+        tile
+        for tile, count in remaining.items()
+        if not is_base_tile(tile)
+        for _ in range(count)
+    ]
+    rng.shuffle(base_values)
+    rng.shuffle(flower_values)
+    conditioned_hand_slots = (
+        opponent_hand_sizes[drawer_index] if drawer_index is not None else 0
+    )
+    expected_base_values = (
+        base_hand_slots - conditioned_hand_slots + base_wall_slots - 1
+    )
+    expected_flower_values = flower_hand_slots + flower_wall_remaining
+    if len(base_values) != expected_base_values or len(flower_values) != expected_flower_values:
+        return None
+
+    base_offset = 0
+    flower_offset = 0
+    opponent_hands: list[tuple[int, ...]] = []
+    opponent_flowers: list[tuple[int, ...]] = []
+    for index, (hand_size, flower_size) in enumerate(
+        zip(opponent_hand_sizes, opponent_flower_sizes)
+    ):
+        if drawer_index == index:
+            if conditioned_drawer_hand is None or len(conditioned_drawer_hand) != hand_size:
+                return None  # pragma: no cover - protected by conditioned_group
+            opponent_hands.append(conditioned_drawer_hand)
+        else:
+            opponent_hands.append(
+                tuple(sorted(base_values[base_offset : base_offset + hand_size]))
+            )
+            base_offset += hand_size
+        opponent_flowers.append(
+            tuple(sorted(flower_values[flower_offset : flower_offset + flower_size]))
+        )
+        flower_offset += flower_size
+    if (
+        base_offset != base_hand_slots - conditioned_hand_slots
+        or flower_offset != flower_hand_slots
+    ):
+        return None  # pragma: no cover - protected by slot sums above
+
+    wall_tail_kinds = ["base"] * (base_wall_slots - 1) + [
+        "flower"
+    ] * flower_wall_remaining
+    rng.shuffle(wall_tail_kinds)
+    wall = [*observed_flowers, base_tile]
+    for kind in wall_tail_kinds:
+        if kind == "base":
+            wall.append(base_values[base_offset])
+            base_offset += 1
+        else:
+            wall.append(flower_values[flower_offset])
+            flower_offset += 1
+    if (
+        len(wall) != wall_size
+        or base_offset != len(base_values)
+        or flower_offset != len(flower_values)
+    ):
+        return None  # pragma: no cover - protected by exact conservation checks
+    return _StructuredSetupDrawProposal(
+        opponent_hands=tuple(opponent_hands),
+        opponent_flowers=tuple(opponent_flowers),
+        wall=tuple(wall),
+        condition_probability=draw_probability,
+    )
 
 
 def _sample_wall_given_normal_draw_flowers(
@@ -2007,6 +2284,92 @@ def _sample_replay_setup_for_actor_with_initial_hand_constraint(
     )
 
 
+def _sample_replay_setup_given_initial_normal_draw_flowers(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    observed_flowers: Sequence[int],
+    drawer_seat: int,
+    required_drawer_tile: int,
+    rng: random.Random,
+) -> _SetupReplayProposal | None:
+    """Jointly sample setup allocation and the first later normal draw.
+
+    This is the bridge from the structured post-setup reference measure to a
+    rules replay. It applies only while the actor has no private draw after
+    the setup state: otherwise the actor's later known cards require
+    additional positional wall constraints and must not be approximated by
+    this density. The dice-indexed gold-indicator removal is also outside this
+    reference measure and remains a separate prerequisite.
+    """
+
+    trace = snapshot.actor_trace
+    source = snapshot.initial_game
+    if (
+        source.rules.profile != "core"
+        or any(seat != trace.actor_seat for seat in source.opening_wait_seats)
+        or any(
+            draw.after_public_action_count > len(source.public_actions)
+            for draw in trace.draws
+        )
+        or drawer_seat == trace.actor_seat
+        or not 0 <= drawer_seat < source.rules.player_count
+        or not is_base_tile(required_drawer_tile)
+    ):
+        return None
+    sampled = copy.deepcopy(source)
+    pool = Counter(base_wall())
+
+    def consume(tiles: Iterable[int]) -> bool:
+        counts = Counter(tiles)
+        if any(pool[tile] < count for tile, count in counts.items()):
+            return False
+        pool.subtract(counts)
+        return True
+
+    actor = sampled.players[trace.actor_seat]
+    if not consume(actor.hand) or not consume(actor.flowers):
+        return None
+    if sampled.gold_indicator is not None and not consume([sampled.gold_indicator]):
+        return None
+    opponent_seats = tuple(
+        player.seat for player in sampled.players if player.seat != trace.actor_seat
+    )
+    try:
+        drawer_index = opponent_seats.index(drawer_seat)
+    except ValueError:
+        return None  # pragma: no cover - guarded by drawer_seat above
+    allocation = _sample_structured_setup_given_normal_draw_flowers(
+        pool,
+        opponent_hand_sizes=tuple(
+            len(sampled.players[seat].hand) for seat in opponent_seats
+        ),
+        opponent_flower_sizes=tuple(
+            len(sampled.players[seat].flowers) for seat in opponent_seats
+        ),
+        wall_size=len(sampled.wall),
+        observed_flowers=observed_flowers,
+        drawer_index=drawer_index,
+        required_drawer_tile=required_drawer_tile,
+        rng=rng,
+    )
+    if allocation is None:
+        return None
+    for seat, hand, flowers in zip(
+        opponent_seats, allocation.opponent_hands, allocation.opponent_flowers
+    ):
+        sampled.players[seat].hand = list(hand)
+        sampled.players[seat].flowers = list(flowers)
+        sampled.last_drawn_tiles[seat] = None
+        sampled.last_drawn_flowers[seat] = ()
+    sampled.wall = list(allocation.wall)
+    sampled.random = random.Random(rng.randrange(2**63))
+    return _SetupReplayProposal(
+        sampled,
+        prior_over_proposal=allocation.condition_probability,
+        condition_probability=allocation.condition_probability,
+    )
+
+
 def _transfer_unknown_tile_to_opponent_hand(
     game: XiamenMahjongGame,
     *,
@@ -2216,6 +2579,7 @@ def _replay_snapshot_public_history(
     condition_actor_draws: bool = False,
     allow_constraint_repairs: bool = False,
     target_public_action_count: int | None = None,
+    conditioned_opponent_flower_draw_indices: frozenset[int] = frozenset(),
 ) -> _HistoryReplayResult:
     """Strictly replay one snapshot's public prefix in its original world.
 
@@ -2230,7 +2594,9 @@ def _replay_snapshot_public_history(
     modifies the actor's private state and must not be enabled by collection.
     ``target_public_action_count`` can stop at a validated prefix for the
     sequential SMC audit; normal callers leave it unset and replay the whole
-    retained history.
+    retained history. ``conditioned_opponent_flower_draw_indices`` is an
+    audit-only capability for a named draw event whose exact proposal density
+    has already been constructed; no collector passes it.
 
     It deliberately supports the core event vocabulary only.  A new profile
     feature must gain a precise replay transition before the collector is
@@ -2265,7 +2631,7 @@ def _replay_snapshot_public_history(
         return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "profile")
     if condition_actor_draws:
         observed_opponent_flowers = Counter()
-        for event in all_target_events:
+        for event in target_events:
             if event.get("kind") != "draw" or event.get("seat") == trace.actor_seat:
                 continue
             flowers = event.get("tiles", ())
@@ -2280,7 +2646,15 @@ def _replay_snapshot_public_history(
                     "malformed_public_draw_flowers",
                 )
             observed_opponent_flowers[int(event["seat"])] += len(flowers)
-        if any(
+            if flowers and int(event.get("index", -1)) not in conditioned_opponent_flower_draw_indices:
+                return _HistoryReplayResult(
+                    False,
+                    0.0,
+                    float("-inf"),
+                    cursor,
+                    "opponent_flower_transition_unsupported",
+                )
+        if target_public_action_count == len(all_target_events) and any(
             len(snapshot.game.players[seat].flowers)
             != len(snapshot.initial_game.players[seat].flowers)
             + observed_opponent_flowers[seat]
@@ -2297,18 +2671,6 @@ def _replay_snapshot_public_history(
                 float("-inf"),
                 cursor,
                 "opponent_flower_history_unsupported",
-            )
-        if any(observed_opponent_flowers.values()):
-            # The public fact is now represented, but an exact conditional
-            # wall transition for flower replacements has not yet been
-            # derived. Keep this branch explicit rather than let an
-            # unconditioned wall sampler manufacture a posterior.
-            return _HistoryReplayResult(
-                False,
-                0.0,
-                float("-inf"),
-                cursor,
-                "opponent_flower_transition_unsupported",
             )
 
     # The opening dealer draw already exists in ``initial_game``.  Later
@@ -2958,6 +3320,79 @@ def _initial_setup_response_claim_constraint(
     return setup_count + 2, claimant, tuple(int(tile) for tile in tiles)
 
 
+def _initial_normal_draw_discard_constraint(
+    snapshot: _CounterfactualDecisionSnapshot,
+) -> tuple[int, int, tuple[int, ...], int, int] | None:
+    """Recognize the first normal opponent draw after the actor's discard.
+
+    The actor must be the setup dealer and must not receive a later private
+    draw in the retained snapshot.  This makes the exact setup-to-draw density
+    self-contained: no future actor reservation is silently inserted into the
+    wall.  The following opponent discard is replayed only as a behavior
+    likelihood, not as a hand-repair or structural condition.
+    """
+
+    source = snapshot.initial_game
+    trace = snapshot.actor_trace
+    setup_count = len(source.public_actions)
+    events = snapshot.game.public_actions
+    if (
+        source.rules.profile != "core"
+        or source.phase != "discard"
+        or source.current_player != trace.actor_seat
+        or len(events) < setup_count + 3
+        or any(
+            draw.after_public_action_count > setup_count for draw in trace.draws
+        )
+    ):
+        return None
+    discard, draw, next_discard = events[setup_count : setup_count + 3]
+    drawer = source._next_player(trace.actor_seat)
+    flowers = draw.get("tiles", ())
+    if (
+        discard.get("kind") != "discard"
+        or discard.get("seat") != trace.actor_seat
+        or draw.get("kind") != "draw"
+        or draw.get("seat") != drawer
+        or not isinstance(flowers, (list, tuple))
+        or not all(isinstance(tile, int) and not is_base_tile(tile) for tile in flowers)
+        or next_discard.get("kind") != "discard"
+        or next_discard.get("seat") != drawer
+        or not isinstance(next_discard.get("tile"), int)
+        or not is_base_tile(next_discard["tile"])
+        or not isinstance(draw.get("index"), int)
+    ):
+        return None
+    if not any(
+        action.phase == "discard"
+        and action.before_public_action_count == setup_count
+        and action.action.kind == "discard"
+        and action.action.tile == discard.get("tile")
+        for action in trace.actions
+    ):
+        return None
+    # Stopping immediately after the observed discard is only a valid replay
+    # boundary when the actor itself has at least one response option.  If no
+    # seat can respond, the engine automatically emits the following draw as
+    # part of the same transition; truncating before it would manufacture a
+    # public-event mismatch.  This predicate uses only the actor's known hand,
+    # public discard and public remaining-wall count.
+    probe = copy.deepcopy(source)
+    probe.players[trace.actor_seat].hand.remove(int(discard["tile"]))
+    probe.wall = [0] * (len(source.wall) - len(flowers) - 1)
+    probe.last_discard = int(next_discard["tile"])
+    probe.discarder = drawer
+    if not probe._response_actions(trace.actor_seat):
+        return None
+    return (
+        setup_count + 3,
+        drawer,
+        tuple(int(tile) for tile in flowers),
+        int(draw["index"]),
+        int(next_discard["tile"]),
+    )
+
+
 def _audit_initial_setup_response_claim_density(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
@@ -3030,6 +3465,97 @@ def _audit_initial_setup_response_claim_density(
     )
     unique_probabilities = {round(value, 15) for value in condition_probabilities}
     return _InitialClaimDensityAudit(
+        proposed_particles=particle_count,
+        initialized_particles=initialized,
+        accepted_particles=len(accepted_log_likelihoods),
+        condition_probability=(
+            condition_probabilities[0] if len(unique_probabilities) == 1 else None
+        ),
+        effective_sample_size=effective_sample_size,
+        mean_accepted_log_likelihood=(
+            sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
+            if accepted_log_likelihoods
+            else None
+        ),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
+def _audit_initial_normal_draw_density(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+) -> _InitialNormalDrawDensityAudit:
+    """Audit a post-setup setup-to-first-opponent-normal-draw proposal.
+
+    Only the actor's first discard, every response pass, the next player's
+    normal draw, and that player's public discard are replayed.  A sampled
+    world is already conditional on the draw's public flowers, while the
+    discard stays an independently likelihood-weighted observation.  This is
+    deliberately narrower than even a two-turn posterior. It also omits the
+    opening gold-indicator selection density and is never called by a training
+    collector.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    constraint = _initial_normal_draw_discard_constraint(snapshot)
+    if constraint is None:
+        return _InitialNormalDrawDensityAudit(
+            proposed_particles=particle_count,
+            initialized_particles=0,
+            accepted_particles=0,
+            condition_probability=None,
+            effective_sample_size=0.0,
+            mean_accepted_log_likelihood=None,
+            rejection_counts={"unsupported_initial_normal_draw_prefix": particle_count},
+        )
+    target_public_action_count, drawer, flowers, draw_index, discard_tile = constraint
+    accepted_log_likelihoods: list[float] = []
+    importance_weights: list[float] = []
+    condition_probabilities: list[float] = []
+    rejection_counts: Counter[str] = Counter()
+    initialized = 0
+    for _ in range(particle_count):
+        proposal = _sample_replay_setup_given_initial_normal_draw_flowers(
+            snapshot,
+            observed_flowers=flowers,
+            drawer_seat=drawer,
+            required_drawer_tile=discard_tile,
+            rng=rng,
+        )
+        if proposal is None:
+            rejection_counts["setup_proposal"] += 1
+            continue
+        initialized += 1
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=proposal.game,
+            condition_actor_draws=True,
+            target_public_action_count=target_public_action_count,
+            conditioned_opponent_flower_draw_indices=frozenset({draw_index}),
+        )
+        if not result.accepted:
+            rejection_counts[result.rejection_reason or "unknown"] += 1
+            continue
+        accepted_log_likelihoods.append(result.log_likelihood)
+        condition_probabilities.append(proposal.condition_probability)
+        importance_weights.append(proposal.prior_over_proposal * result.likelihood)
+    normalizer = sum(importance_weights)
+    effective_sample_size = (
+        normalizer * normalizer / sum(weight * weight for weight in importance_weights)
+        if normalizer > 0.0
+        else 0.0
+    )
+    unique_probabilities = {round(value, 15) for value in condition_probabilities}
+    return _InitialNormalDrawDensityAudit(
         proposed_particles=particle_count,
         initialized_particles=initialized,
         accepted_particles=len(accepted_log_likelihoods),

@@ -13,15 +13,18 @@ from xiamen_mahjong.training import (
     RulePolicyModel,
     StateValueBaseline,
     _audit_constraint_repaired_history_prefix,
+    _audit_initial_normal_draw_density,
     _audit_initial_setup_response_claim_density,
     _audit_resampled_history_prefix,
     _audit_sequential_history_prefix,
     _frozen_behavior_action_likelihood,
     _history_replay_transition_targets,
+    _initial_normal_draw_discard_constraint,
     _initial_setup_response_claim_constraint,
     _sample_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
     _sample_replay_setup_for_actor,
+    _sample_structured_setup_given_normal_draw_flowers,
     _sample_wall_given_normal_draw_flowers,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
@@ -136,6 +139,94 @@ class TrainingTests(unittest.TestCase):
                 rng=random.Random(1),
             )
         )
+
+    def test_joint_setup_and_normal_draw_flower_proposal_has_exact_density(self):
+        # There is one hidden base-hand slot, one hidden flower slot and a
+        # three-tile wall.  Among [0, 0, 1, 34, 35], the wall has two bases
+        # and one flower.  Observing [34] then a base has exact probability
+        # (1/3 wall flower) * (1/2 flower identity) * (2/2 next base) = 1/6.
+        samples = 3_000
+        base_counts: Counter[int] = Counter()
+        for index in range(samples):
+            sampled = _sample_structured_setup_given_normal_draw_flowers(
+                Counter({0: 2, 1: 1, 34: 1, 35: 1}),
+                opponent_hand_sizes=(1,),
+                opponent_flower_sizes=(1,),
+                wall_size=3,
+                observed_flowers=(34,),
+                rng=random.Random(12_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            proposal = sampled
+            assert proposal is not None
+            self.assertEqual(proposal.wall[0], 34)
+            self.assertIn(proposal.wall[1], {0, 1})
+            self.assertEqual(proposal.opponent_flowers, ((35,),))
+            self.assertAlmostEqual(proposal.condition_probability, 1.0 / 6.0)
+            base_counts[proposal.wall[1]] += 1
+        self.assertAlmostEqual(base_counts[0] / samples, 2.0 / 3.0, delta=0.035)
+        self.assertAlmostEqual(base_counts[1] / samples, 1.0 / 3.0, delta=0.035)
+
+    def test_joint_draw_discard_feasibility_has_exact_density(self):
+        # Reuse the preceding micro-deck but require the drawer's one-card
+        # hand plus its hidden base draw to contain tile 1.  That base group
+        # contains 1 with probability 2/3, so the complete condition has
+        # probability (1/6) * (2/3) = 1/9.  Every proposal must consequently
+        # make the public discard face legal after the hidden draw.
+        for index in range(1_000):
+            sampled = _sample_structured_setup_given_normal_draw_flowers(
+                Counter({0: 2, 1: 1, 34: 1, 35: 1}),
+                opponent_hand_sizes=(1,),
+                opponent_flower_sizes=(1,),
+                wall_size=3,
+                observed_flowers=(34,),
+                drawer_index=0,
+                required_drawer_tile=1,
+                rng=random.Random(16_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            proposal = sampled
+            assert proposal is not None
+            self.assertAlmostEqual(proposal.condition_probability, 1.0 / 9.0)
+            self.assertIn(1, [*proposal.opponent_hands[0], proposal.wall[1]])
+
+    def test_initial_normal_draw_density_audit_replays_public_flowers(self):
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=271,
+            rules=XiamenRules.from_profile("core"),
+            dealer=0,
+            auto_advance=False,
+            human_seat=-1,
+        )
+        snapshots = _run_candidate_base_hand(
+            game,
+            candidate_seat=0,
+            candidate_policy=teacher,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+        )
+        snapshot = next(
+            item
+            for item in snapshots
+            if (_initial_normal_draw_discard_constraint(item) or (None, None, (), None, None))[2]
+        )
+        audit = _audit_initial_normal_draw_density(
+            snapshot,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            particle_count=64,
+            rng=random.Random(1_917),
+        )
+        self.assertEqual(audit.initialized_particles, 64)
+        self.assertGreater(audit.accepted_particles, 0)
+        self.assertGreater(audit.condition_probability or 0.0, 0.0)
+        self.assertLess(audit.condition_probability or 1.0, 1.0)
+        self.assertGreater(audit.effective_sample_size, 0.0)
+        payload = audit.payload()
+        self.assertEqual(
+            payload["proposal"], "core_initial_normal_draw_post_setup_density_v0"
+        )
+        self.assertIn("prior_over_proposal", payload["proposal_density_ratio"])
+        self.assertIn("not authorized", payload["warning"])
 
     def test_exact_density_audit_covers_only_initial_response_claims(self):
         teacher = HeuristicTeacherAgent()

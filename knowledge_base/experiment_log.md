@@ -453,10 +453,16 @@ collector/Q 数据门槛；其作用是将下一步明确限定为“可计算�
 
 为扩展 draw→discard，普通摸牌的 `public_actions` 已新增 `draw.tiles`：它按顺序记录该次摸牌公开补到的花牌，
 不记录随后拿到的可打牌。重放先校验对手最终花数能由这些事件解释；旧记录或补杠／明杠后的未定位 replacement draw
-仍拒绝为 `opponent_flower_history_unsupported`。小牌墙已验证 wall-only 条件 proposal：固定公开花序列、依剩余物理
-张数抽取隐藏底牌，`p/q` 等于该观察的解析先验概率；其底牌条件分布也有独立回归测试。它尚未与未知对手 setup
-allocation 形成联合 density，因此 resampled replay 仍以 `opponent_flower_transition_unsupported` 安全拒绝；回归测试
-同时验证公开牌面和该门禁。下一步不是直接重抽墙，而是推导这两部分的联合 density，再接入 draw→discard proposal。
+仍拒绝为 `opponent_flower_history_unsupported`。小牌墙先验证 wall-only 条件 proposal：固定公开花序列、依剩余物理
+张数抽取隐藏底牌，`p/q` 等于该观察的解析先验概率；其底牌条件分布也有独立回归测试。随后已将未知对手 setup
+hand／flower-slot、花序列与公开弃牌的结构可行性联立；微型枚举验证联合概率。固定 core、dealer 0、seed 271、首弃
+后下家补 `(40,)` 并弃牌的 256 粒子审计达到 **256/256** 结构接受，reference `p/q=0.0012275911710061692`，但
+冻结 Teacher 行为权重 ESS 仅 **17.76/256（6.9%）**，不通过数据门槛。
+
+更重要的是，该密度只对项目现有的 post-setup uniform allocation reference measure 精确；它尚未条件化真实引擎的
+骰位翻金过程（按环形位置扫描并跳过花牌）。因此不使用 `exact-density` 命名、不接入 collector/Q/网页，普通重放仍以
+`opponent_flower_transition_unsupported` 安全拒绝；回归测试同时验证公开牌面、联合微型概率和该门禁。下一步先建立并
+校准 opening gold-indicator transition，再重测 draw→discard proposal。
 
 ## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
 

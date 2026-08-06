@@ -108,11 +108,17 @@ exact-density 原则下加入一个“对手摸牌后弃牌”的 transition，�
 为 draw→discard transition 补齐了一项公开观测：普通摸牌的 `public_actions` 现在以 `draw.tiles` 按顺序记录
 该次摸牌先补到的花牌牌面；真正摸到的可打牌仍不公开。重放会校验最终对手花数与这些事件的累加一致，旧记录或
 补杠／明杠 replacement draw 等未定位补花仍返回 `opponent_flower_history_unsupported`。对已定位的普通补花，
-已在小牌墙验证 wall-only 的条件采样与解析 `p/q`：对给定公开花序列，proposal 固定该序列，并按剩余底牌的物理
-张数抽取暗摸牌，重要性修正是“该序列后紧接任意底牌”的精确先验概率。它尚未联立未知对手初始手牌／花牌分配，
-因此仍不能称为完整 setup-to-draw density；resampled replay 继续返回
-`opponent_flower_transition_unsupported`，不会把未条件化墙采样伪装成 posterior；源局 replay oracle 不受影响。
-下一步是推导该 wall 条件与结构化 setup allocation 的联合密度，再将其并入 draw→discard proposal。
+已在小牌墙验证 wall-only 条件采样与解析 `p/q`：对给定公开花序列，proposal 固定该序列，并按剩余底牌物理张数
+抽取暗摸牌。进一步的微型枚举将未知对手 base-hand／flower-slot 分配、公开花序列和“该对手手牌加暗摸牌含公开弃牌”
+联立；组合概率和条件后底牌分布均通过测试。
+
+但这只是在项目当前的 **post-setup uniform allocation reference measure** 下精确：现有 setup sampler 把翻金指示牌
+从牌池移除后重排余牌，尚未对引擎按骰位环形扫描、遇花继续跳过直到选到 base 指示牌的 opening transition 条件化。
+故它不是实际规则发牌 posterior，不能以 `exact-density` 名义升级。固定 core、dealer 0、seed 271 的首弃→下家补花
+→弃牌前缀（公开花为 `(40,)`）中，reference proposal 256/256 均结构重放成功，`p/q=0.0012275911710061692`；但
+冻结 Teacher 的行为似然 ESS 只有 **17.76/256 = 6.9%**。因此该 audit 被拒绝进入 collector/Q/网页，普通重放仍以
+`opponent_flower_transition_unsupported` 拒绝未授权花 transition；源局 replay oracle 不受影响。下一步先建模并在小牌墙
+校准 opening gold-indicator transition，再重测这个前缀的联合 proposal。
 
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 
