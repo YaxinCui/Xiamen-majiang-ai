@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from .agents import GameAction, HeuristicTeacherAgent
+from .belief import smoothed_deterministic_likelihood, smoothed_policy_likelihood
 from .game import XiamenMahjongGame
 from .hand import hand_quality, wait_tiles
 from .rules import XiamenRules
@@ -1084,6 +1085,655 @@ class _CounterfactualRolloutJob:
 
 
 @dataclass(frozen=True)
+class _ActorPrivateDrawObservation:
+    """One actor-known draw positioned relative to public event history.
+
+    This is private collector memory, not a dataset record.  ``flowers`` are
+    the zero or more flower replacements the actor saw before receiving the
+    final playable tile.  A replacement draw after a kong has no public
+    ``draw`` event, so ``public_draw_event_index`` is intentionally optional.
+    """
+
+    after_public_action_count: int
+    public_draw_event_index: int | None
+    turn_count: int
+    tile: int
+    flowers: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _ActorPrivateActionObservation:
+    """One actor action, including facts intentionally absent from public log."""
+
+    phase: str
+    action: GameAction
+    before_public_action_count: int
+    after_public_action_count: int
+
+
+@dataclass(frozen=True)
+class _ActorPrivateReplayTrace:
+    """Runtime-only facts needed to replay a candidate's information set.
+
+    The trace stores only the candidate's own initial hand/flowers, draws,
+    and actions.  The action trace is necessary because a concealed kong face
+    is intentionally absent from the public log but known to its owner.  This
+    class deliberately has no payload method and must never be copied into a
+    ``TrainingTrajectory`` or ``TeacherDecision``.
+    """
+
+    actor_seat: int
+    dealer: int
+    gold_indicator: int | None
+    gold_tile: int | None
+    initial_hand: tuple[int, ...]
+    initial_flowers: tuple[int, ...]
+    draws: tuple[_ActorPrivateDrawObservation, ...]
+    actions: tuple[_ActorPrivateActionObservation, ...]
+    public_action_count: int
+
+
+@dataclass(frozen=True)
+class _CounterfactualDecisionSnapshot:
+    """A private simulation snapshot plus runtime-only replay prerequisites.
+
+    ``initial_game`` is the table immediately after setup (and its opening
+    dealer draw).  It is retained solely to validate/reconstruct a particle's
+    public-history replay.  Like ``actor_trace``, it is deliberately absent
+    from every exportable dataset type.
+    """
+
+    game: XiamenMahjongGame
+    legal_actions: tuple[GameAction, ...]
+    actor_trace: _ActorPrivateReplayTrace
+    initial_game: XiamenMahjongGame
+
+
+@dataclass(frozen=True)
+class _HistoryReplayResult:
+    """Private runtime result of replaying one public-history particle.
+
+    The result reports only a scalar likelihood and a rejection label.  It
+    intentionally does not expose a particle game, wall, or any concealed
+    opponent tile to collector metadata or training JSONL.
+    """
+
+    accepted: bool
+    likelihood: float
+    log_likelihood: float
+    public_action_count: int
+    rejection_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class _HistoryReplayAudit:
+    """Non-sensitive health report for a proposed history-conditioned belief.
+
+    Only aggregate acceptance and likelihood diagnostics are retained.  In
+    particular, proposed worlds, their hidden hands, wall orders and RNG
+    states stay local to the audit loop.
+    """
+
+    proposed_particles: int
+    accepted_particles: int
+    mean_accepted_log_likelihood: float | None
+    rejection_counts: dict[str, int]
+
+    @property
+    def acceptance_rate(self) -> float:
+        return self.accepted_particles / self.proposed_particles
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposed_particles": self.proposed_particles,
+            "accepted_particles": self.accepted_particles,
+            "acceptance_rate": self.acceptance_rate,
+            "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
+            "rejection_counts": dict(self.rejection_counts),
+        }
+
+
+def _public_events_match(actual: Mapping[str, Any], expected: Mapping[str, Any]) -> bool:
+    """Compare one public event without treating dict insertion order as state."""
+
+    fields = ("index", "turn", "kind", "seat", "tile", "tiles", "result")
+    return all(actual.get(field) == expected.get(field) for field in fields)
+
+
+def _event_compatible_actions(
+    legal: Sequence[GameAction], event: Mapping[str, Any]
+) -> tuple[GameAction, ...]:
+    """Return detailed legal actions compatible with one public event.
+
+    A concealed kong is deliberately a coarse public event: the owner knows
+    its face, while every other seat observes only that an ``an_kan``
+    occurred.  The returned set consequently marginalizes its legal faces.
+    All other currently supported action events retain their public tile(s).
+    """
+
+    kind = event.get("kind")
+    if not isinstance(kind, str):
+        return ()
+    matches = [action for action in legal if action.kind == kind]
+    if kind == "an_kan":
+        return tuple(matches)
+    if "tile" in event:
+        matches = [action for action in matches if action.tile == event["tile"]]
+    if "tiles" in event:
+        expected_tiles = tuple(event["tiles"])
+        matches = [action for action in matches if action.tiles == expected_tiles]
+    return tuple(matches)
+
+
+def _frozen_behavior_action_likelihood(
+    agent: Any,
+    game: XiamenMahjongGame,
+    *,
+    player_id: int,
+    legal: Sequence[GameAction],
+    compatible: Sequence[GameAction],
+    is_response: bool,
+    temperature: float,
+    uniform_mixture: float,
+) -> tuple[GameAction, float] | None:
+    """Select a compatible detailed action and score its public observation.
+
+    When an agent exposes legal-action ``scores``, their smoothed softmax is
+    used as the behavior likelihood; otherwise its deterministic chosen action
+    is a conservative fallback. ``uniform_mixture`` gives every legal detailed
+    action positive mass, so an imperfect behavior model does not destroy the
+    whole particle set. For an opponent concealed kong the likelihood is the
+    sum over all matching faces because that face is not a public observation.
+    """
+
+    if not compatible:
+        return None
+    matching_indices = [
+        index for index, action in enumerate(legal) if action in compatible
+    ]
+    scores = getattr(agent, "scores", None)
+    if callable(scores):
+        try:
+            decision = _policy_decision(
+                game, game.seed or 0, player_id, legal
+            )
+            score_values = tuple(float(value) for value in scores(decision))
+        except (TypeError, ValueError, RuntimeError):
+            score_values = ()
+        if len(score_values) == len(legal) and all(
+            math.isfinite(value) for value in score_values
+        ):
+            likelihood = sum(
+                smoothed_policy_likelihood(
+                    score_values,
+                    observed_index=index,
+                    temperature=temperature,
+                    uniform_mixture=uniform_mixture,
+                )
+                for index in matching_indices
+            )
+            action = legal[
+                max(matching_indices, key=lambda index: (score_values[index], -index))
+            ]
+            return action, likelihood
+    selected = (
+        agent.choose_response(game, player_id, list(legal))
+        if is_response
+        else agent.choose_turn_action(game, player_id)
+    )
+    if selected not in legal:
+        return None
+    selected_index = legal.index(selected)
+    likelihood = sum(
+        smoothed_deterministic_likelihood(
+            selected_index=selected_index,
+            observed_index=index,
+            action_count=len(legal),
+            uniform_mixture=uniform_mixture,
+        )
+        for index in matching_indices
+    )
+    # Where the public event hides a detailed action (currently only an_kan),
+    # use the frozen policy's matching face when available.  If it chose a
+    # different public event, any compatible face is a valid uniform-noise
+    # proposal; the likelihood above still accounts for that mismatch.
+    action = selected if selected in compatible else compatible[0]
+    return action, likelihood
+
+
+_ACTOR_DRAW_RESERVATION = -1
+
+
+def _sample_replay_setup_for_actor(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    rng: random.Random,
+) -> XiamenMahjongGame | None:
+    """Propose a setup-world conditional on the actor's private draw trace.
+
+    The proposal samples unknown opponent initial hands/flowers and the
+    unknown portion of the wall without using their source-world identities.
+    Every later actor-known draw is removed from that unknown pool and
+    represented by an in-memory reservation.  During replay the reservation
+    supplies the recorded private tile (and any flower replacements); all
+    other draws remain a uniform permutation of the remaining physical tiles.
+
+    This helper deliberately supports the ``core`` profile only.  It is not a
+    public serializer and the returned game must stay inside particle/replay
+    code.  A caller must still replay and legality-check the entire public
+    prefix before treating this as an accepted belief particle.
+    """
+
+    trace = snapshot.actor_trace
+    source = snapshot.initial_game
+    if source.rules.profile != "core":
+        return None
+    if any(seat != trace.actor_seat for seat in source.opening_wait_seats):
+        return None
+    sampled = copy.deepcopy(source)
+    pool = Counter(base_wall())
+
+    def consume(tiles: Iterable[int]) -> bool:
+        counts = Counter(tiles)
+        if any(pool[tile] < count for tile, count in counts.items()):
+            return False
+        pool.subtract(counts)
+        return True
+
+    actor = sampled.players[trace.actor_seat]
+    if not consume(actor.hand) or not consume(actor.flowers):
+        return None
+    if sampled.gold_indicator is not None and not consume([sampled.gold_indicator]):
+        return None
+
+    setup_public_count = len(sampled.public_actions)
+    later_actor_draws = [
+        draw
+        for draw in trace.draws
+        if draw.after_public_action_count > setup_public_count
+    ]
+    reserved_count = 0
+    for draw in later_actor_draws:
+        if not consume([*draw.flowers, draw.tile]):
+            return None
+        reserved_count += len(draw.flowers) + 1
+
+    # At setup the actor's concealed hand is known, while each opposing hand
+    # and flower *count* is public.  Allocate their physical identities from
+    # the remaining pool without retaining any identity from the source game.
+    base_tiles = [
+        tile
+        for tile, count in pool.items()
+        if is_base_tile(tile)
+        for _ in range(count)
+    ]
+    flower_tiles = [
+        tile
+        for tile, count in pool.items()
+        if not is_base_tile(tile)
+        for _ in range(count)
+    ]
+    rng.shuffle(base_tiles)
+    rng.shuffle(flower_tiles)
+    base_offset = 0
+    flower_offset = 0
+    for player in sampled.players:
+        if player.seat == trace.actor_seat:
+            continue
+        hand_count = len(player.hand)
+        flower_count = len(player.flowers)
+        if (
+            base_offset + hand_count > len(base_tiles)
+            or flower_offset + flower_count > len(flower_tiles)
+        ):
+            return None
+        player.hand = sorted(base_tiles[base_offset : base_offset + hand_count])
+        player.flowers = sorted(flower_tiles[flower_offset : flower_offset + flower_count])
+        base_offset += hand_count
+        flower_offset += flower_count
+    unknown_wall = [
+        *base_tiles[base_offset:],
+        *flower_tiles[flower_offset:],
+    ]
+    if len(unknown_wall) + reserved_count != len(sampled.wall):
+        return None
+    sampled.wall = [*unknown_wall, *([_ACTOR_DRAW_RESERVATION] * reserved_count)]
+    rng.shuffle(sampled.wall)
+    # A non-actor's opening drawn tile is not privately visible to the actor;
+    # core rules do not use it after setup.  Keeping the source value would be
+    # a needless hidden-state dependency.
+    for seat in range(sampled.rules.player_count):
+        if seat != trace.actor_seat:
+            sampled.last_drawn_tiles[seat] = None
+    sampled.random = random.Random(rng.randrange(2**63))
+    return sampled
+
+
+def _replay_snapshot_public_history(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+    initial_game: XiamenMahjongGame | None = None,
+    condition_actor_draws: bool = False,
+) -> _HistoryReplayResult:
+    """Strictly replay one snapshot's public prefix in its original world.
+
+    This is the safety oracle for the forthcoming particle proposal: it starts
+    from the private setup state, forces only the candidate's recorded private
+    actions, and makes frozen opponents reproduce the observed public actions.
+    Every generated public event must match the source prefix exactly.  The
+    routine is runtime-only; it never returns the replay game or its hidden
+    state.
+
+    It deliberately supports the core event vocabulary only.  A new profile
+    feature must gain a precise replay transition before the collector is
+    allowed to condition particles on it.
+    """
+
+    if not math.isfinite(behavior_temperature) or behavior_temperature <= 0.0:
+        raise ValueError("behavior_temperature 必须为正且有限")
+    if not 0.0 <= uniform_mixture < 1.0:
+        raise ValueError("uniform_mixture 必须在 0（含）到 1（不含）之间")
+    trace = snapshot.actor_trace
+    game = copy.deepcopy(initial_game or snapshot.initial_game)
+    target_events = tuple(dict(event) for event in snapshot.game.public_actions)
+    cursor = len(game.public_actions)
+    if cursor > len(target_events) or any(
+        not _public_events_match(game.public_actions[index], target_events[index])
+        for index in range(cursor)
+    ):
+        return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "setup_prefix")
+    if game.rules.profile != "core":
+        return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "profile")
+
+    # The opening dealer draw already exists in ``initial_game``.  Later
+    # candidate draws must agree with the private trace even when no public
+    # event reveals their face (replacement draws after kongs).
+    remaining_draws = iter(
+        draw
+        for draw in trace.draws
+        if draw.after_public_action_count > len(game.public_actions)
+    )
+    next_draw: _ActorPrivateDrawObservation | None = None
+    known_actor_flowers = len(game.players[trace.actor_seat].flowers)
+    original_draw = game._draw_for_player
+
+    def draw_with_trace(player):
+        nonlocal next_draw, known_actor_flowers
+        before_public_count = len(game.public_actions)
+        if player.seat != trace.actor_seat:
+            if not condition_actor_draws:
+                return original_draw(player)
+            # Draw the next unknown physical tile; reservations represent
+            # later actor-known cards and must never be handed to an opponent.
+            while game.wall:
+                try:
+                    index = next(
+                        index
+                        for index, candidate in enumerate(game.wall)
+                        if candidate != _ACTOR_DRAW_RESERVATION
+                    )
+                except StopIteration:
+                    return None
+                tile = game.wall.pop(index)
+                if tile >= BASE_TILE_COUNT:
+                    player.flowers.append(tile)
+                    game._event("补花", f"{game._seat_name(player.seat)}补到花牌")
+                    continue
+                player.hand.append(tile)
+                player.hand.sort()
+                return tile
+            return None
+        if next_draw is None:
+            next_draw = next(remaining_draws, None)
+        if next_draw is None:
+            raise RuntimeError("actor_draw_trace_exhausted")
+        if condition_actor_draws:
+            for flower in next_draw.flowers:
+                try:
+                    game.wall.pop(game.wall.index(_ACTOR_DRAW_RESERVATION))
+                except ValueError as error:
+                    raise RuntimeError("actor_draw_reservation_exhausted") from error
+                player.flowers.append(flower)
+                game._event("补花", f"{game._seat_name(player.seat)}补到花牌")
+            try:
+                game.wall.pop(game.wall.index(_ACTOR_DRAW_RESERVATION))
+            except ValueError as error:
+                raise RuntimeError("actor_draw_reservation_exhausted") from error
+            tile = next_draw.tile
+            player.hand.append(tile)
+            player.hand.sort()
+        else:
+            tile = original_draw(player)
+        observed_flowers = tuple(player.flowers[known_actor_flowers:])
+        expected_public_count = before_public_count + (
+            1 if next_draw.public_draw_event_index is not None else 0
+        )
+        if (
+            tile != next_draw.tile
+            or observed_flowers != next_draw.flowers
+            or next_draw.after_public_action_count != expected_public_count
+            or (
+                next_draw.public_draw_event_index is not None
+                and next_draw.public_draw_event_index != before_public_count
+            )
+        ):
+            raise RuntimeError("actor_private_draw_mismatch")
+        known_actor_flowers = len(player.flowers)
+        next_draw = None
+        return tile
+
+    # Bound onto this private clone only.  The source snapshot and any
+    # exported TrainingTrajectory retain no callback or hidden game object.
+    game._draw_for_player = draw_with_trace  # type: ignore[method-assign]
+
+    def actor_action(phase: str) -> GameAction | None:
+        before = len(game.public_actions)
+        matches = [
+            item.action
+            for item in trace.actions
+            if item.phase == phase and item.before_public_action_count == before
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    def consume_generated_events() -> str | None:
+        nonlocal cursor
+        while cursor < len(game.public_actions):
+            if cursor >= len(target_events) or not _public_events_match(
+                game.public_actions[cursor], target_events[cursor]
+            ):
+                return "public_event_mismatch"
+            cursor += 1
+        return None
+
+    log_likelihood = 0.0
+    try:
+        while cursor < len(target_events):
+            if game.phase == "over":
+                return _HistoryReplayResult(
+                    False, 0.0, float("-inf"), cursor, "ended_before_prefix"
+                )
+            if game.phase == "discard":
+                player_id = game.current_player
+                legal = tuple(_turn_actions(game, player_id))
+                expected = target_events[cursor]
+                compatible = _event_compatible_actions(legal, expected)
+                if player_id == trace.actor_seat:
+                    action = actor_action("discard")
+                    if action not in compatible:
+                        return _HistoryReplayResult(
+                            False, 0.0, float("-inf"), cursor, "actor_turn_action"
+                        )
+                else:
+                    opponent = opponents.get(player_id)
+                    if opponent is None:
+                        return _HistoryReplayResult(
+                            False, 0.0, float("-inf"), cursor, "opponent_missing"
+                        )
+                    proposal = _frozen_behavior_action_likelihood(
+                        opponent[1],
+                        game,
+                        player_id=player_id,
+                        legal=legal,
+                        compatible=compatible,
+                        is_response=False,
+                        temperature=behavior_temperature,
+                        uniform_mixture=uniform_mixture,
+                    )
+                    if proposal is None:
+                        return _HistoryReplayResult(
+                            False, 0.0, float("-inf"), cursor, "opponent_turn_action"
+                        )
+                    action, likelihood = proposal
+                    log_likelihood += math.log(likelihood)
+                _check_rollout_action(action, legal)
+                game._apply_turn_action(player_id, action)
+            elif game.phase == "response":
+                expected = target_events[cursor]
+                expected_kind = expected.get("kind")
+                response_actions: dict[int, GameAction] = {}
+                if expected_kind in {"pong", "chi", "ming_kan"}:
+                    claimant = expected.get("seat")
+                    if not isinstance(claimant, int):
+                        return _HistoryReplayResult(
+                            False, 0.0, float("-inf"), cursor, "claimant_missing"
+                        )
+                elif expected_kind == "result" and expected.get("result") == "discard":
+                    claimant = expected.get("seat")
+                    if not isinstance(claimant, int):
+                        return _HistoryReplayResult(
+                            False, 0.0, float("-inf"), cursor, "winner_missing"
+                        )
+                    expected_kind = "hu"
+                elif expected_kind in {"draw", "result"}:
+                    # A draw result can be created by all players passing when
+                    # the next normal draw reaches the dead wall.
+                    claimant = None
+                    expected_kind = "pass"
+                else:
+                    return _HistoryReplayResult(
+                        False, 0.0, float("-inf"), cursor, "response_event"
+                    )
+                for player_id, options in sorted(game.response_options.items()):
+                    legal = tuple(options)
+                    if player_id == trace.actor_seat:
+                        action = actor_action("response")
+                        if action is None:
+                            return _HistoryReplayResult(
+                                False, 0.0, float("-inf"), cursor, "actor_response"
+                            )
+                    else:
+                        if player_id == claimant:
+                            event = dict(expected)
+                            event["kind"] = expected_kind
+                            compatible = _event_compatible_actions(legal, event)
+                        else:
+                            compatible = tuple(
+                                action for action in legal if action.kind == "pass"
+                            )
+                        opponent = opponents.get(player_id)
+                        if opponent is None:
+                            return _HistoryReplayResult(
+                                False, 0.0, float("-inf"), cursor, "opponent_missing"
+                            )
+                        proposal = _frozen_behavior_action_likelihood(
+                            opponent[1],
+                            game,
+                            player_id=player_id,
+                            legal=legal,
+                            compatible=compatible,
+                            is_response=True,
+                            temperature=behavior_temperature,
+                            uniform_mixture=uniform_mixture,
+                        )
+                        if proposal is None:
+                            return _HistoryReplayResult(
+                                False,
+                                0.0,
+                                float("-inf"),
+                                cursor,
+                                "opponent_response",
+                            )
+                        action, likelihood = proposal
+                        log_likelihood += math.log(likelihood)
+                    if action not in legal:
+                        return _HistoryReplayResult(
+                            False, 0.0, float("-inf"), cursor, "response_illegal"
+                        )
+                    response_actions[player_id] = action
+                game.response_choices = response_actions
+                game._resolve_responses()
+            else:
+                return _HistoryReplayResult(
+                    False, 0.0, float("-inf"), cursor, "unknown_phase"
+                )
+            mismatch = consume_generated_events()
+            if mismatch:
+                return _HistoryReplayResult(
+                    False, 0.0, float("-inf"), cursor, mismatch
+                )
+    except (RuntimeError, ValueError):
+        return _HistoryReplayResult(
+            False, 0.0, float("-inf"), cursor, "private_trace_mismatch"
+        )
+    likelihood = math.exp(log_likelihood) if log_likelihood > -745.0 else 0.0
+    return _HistoryReplayResult(True, likelihood, log_likelihood, cursor)
+
+
+def _audit_resampled_history_prefix(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+) -> _HistoryReplayAudit:
+    """Measure a proposal before it can influence any training rollout.
+
+    This currently audits the intentionally conservative, rejection-sampling
+    setup proposal.  It must demonstrate a healthy acceptance rate and ESS in
+    a separately calibrated successor before it is wired into the collector.
+    The function itself makes no dataset/model mutation and returns no hidden
+    particles.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    accepted_log_likelihoods: list[float] = []
+    rejection_counts: Counter[str] = Counter()
+    for _ in range(particle_count):
+        initial_game = _sample_replay_setup_for_actor(snapshot, rng=rng)
+        if initial_game is None:
+            rejection_counts["setup_proposal"] += 1
+            continue
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=initial_game,
+            condition_actor_draws=True,
+        )
+        if result.accepted:
+            accepted_log_likelihoods.append(result.log_likelihood)
+        else:
+            rejection_counts[result.rejection_reason or "unknown"] += 1
+    return _HistoryReplayAudit(
+        proposed_particles=particle_count,
+        accepted_particles=len(accepted_log_likelihoods),
+        mean_accepted_log_likelihood=(
+            sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
+            if accepted_log_likelihoods
+            else None
+        ),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
+@dataclass(frozen=True)
 class _CounterfactualActionRequest:
     """A legal policy choice waiting for a possibly batched inference call."""
 
@@ -1319,34 +1969,144 @@ def _run_candidate_base_hand(
     candidate_seat: int,
     candidate_policy: Any,
     opponents: Mapping[int, tuple[str, Any]],
-) -> list[tuple[XiamenMahjongGame, tuple[GameAction, ...]]]:
-    """Play one deployment-like hand and retain multi-action public snapshots."""
+) -> list[_CounterfactualDecisionSnapshot]:
+    """Play one deployment-like hand and retain private replay snapshots.
 
-    snapshots: list[tuple[XiamenMahjongGame, tuple[GameAction, ...]]] = []
+    The returned actor trace is retained only while the collector runs.  It is
+    the minimum information needed for a future sequential belief replayer to
+    respect the actor's own initial hand, flower replacements, and later
+    draws; the safe exported trajectory remains actor/public observation only.
+    """
+
+    snapshots: list[_CounterfactualDecisionSnapshot] = []
+    # The same immutable-in-practice setup clone is shared by the hand's
+    # snapshots.  Replay code always deep-copies it before applying an event;
+    # it is never surfaced through a trajectory or collector summary.
+    initial_game = copy.deepcopy(game)
+    initial_actor = game.players[candidate_seat]
+    initial_hand = list(initial_actor.hand)
+    initial_draw = (
+        game.last_drawn_tiles[candidate_seat]
+        if game.phase == "discard" and game.current_player == candidate_seat
+        else None
+    )
+    if initial_draw is not None and initial_draw in initial_hand:
+        initial_hand.remove(initial_draw)
+    initial_flowers = tuple(initial_actor.flowers)
+    private_draws: list[_ActorPrivateDrawObservation] = []
+    private_actions: list[_ActorPrivateActionObservation] = []
+    known_flower_count = len(initial_flowers)
+    last_draw_marker: tuple[int, int, int, int, int] | None = None
+
+    def record_actor_draw_if_needed() -> None:
+        nonlocal known_flower_count, last_draw_marker
+        if game.phase != "discard" or game.current_player != candidate_seat:
+            return
+        player = game.players[candidate_seat]
+        tile = game.last_drawn_tiles[candidate_seat]
+        if tile is None or tile not in player.hand:
+            return
+        marker = (
+            game.turn_count,
+            len(game.public_actions),
+            tile,
+            len(player.hand),
+            len(player.flowers),
+        )
+        if marker == last_draw_marker:
+            return
+        public_draw_event_index = None
+        if game.public_actions:
+            latest = game.public_actions[-1]
+            if latest.get("kind") == "draw" and latest.get("seat") == candidate_seat:
+                public_draw_event_index = int(latest["index"])
+        flowers = tuple(player.flowers[known_flower_count:])
+        private_draws.append(
+            _ActorPrivateDrawObservation(
+                after_public_action_count=len(game.public_actions),
+                public_draw_event_index=public_draw_event_index,
+                turn_count=game.turn_count,
+                tile=tile,
+                flowers=flowers,
+            )
+        )
+        known_flower_count = len(player.flowers)
+        last_draw_marker = marker
+
+    def actor_trace() -> _ActorPrivateReplayTrace:
+        return _ActorPrivateReplayTrace(
+            actor_seat=candidate_seat,
+            dealer=game.dealer,
+            gold_indicator=game.gold_indicator,
+            gold_tile=game.gold_tile,
+            initial_hand=tuple(sorted(initial_hand)),
+            initial_flowers=initial_flowers,
+            draws=tuple(private_draws),
+            actions=tuple(private_actions),
+            public_action_count=len(game.public_actions),
+        )
+
+    def record_actor_action(
+        phase: str, action: GameAction, *, before_public_action_count: int
+    ) -> None:
+        private_actions.append(
+            _ActorPrivateActionObservation(
+                phase=phase,
+                action=action,
+                before_public_action_count=before_public_action_count,
+                after_public_action_count=len(game.public_actions),
+            )
+        )
+
     safety = 0
     while game.phase != "over":
         safety += 1
         if safety > 600:
             raise RuntimeError("动作价值采样对局超过安全步数")
+        record_actor_draw_if_needed()
         if game.phase == "discard":
             player_id = game.current_player
             legal = tuple(_turn_actions(game, player_id))
             if player_id == candidate_seat:
                 if len(legal) > 1:
-                    snapshots.append((copy.deepcopy(game), legal))
+                    snapshots.append(
+                        _CounterfactualDecisionSnapshot(
+                            game=copy.deepcopy(game),
+                            legal_actions=legal,
+                            actor_trace=actor_trace(),
+                            initial_game=initial_game,
+                        )
+                    )
                 action = candidate_policy.choose_turn_action(game, player_id)
+                before_public_action_count = len(game.public_actions)
             else:
                 action = opponents[player_id][1].choose_turn_action(game, player_id)
             _check_rollout_action(action, legal)
             game._apply_turn_action(player_id, action)
+            if player_id == candidate_seat:
+                record_actor_action(
+                    "discard",
+                    action,
+                    before_public_action_count=before_public_action_count,
+                )
             continue
         if game.phase == "response":
+            actor_response: GameAction | None = None
+            response_public_action_count = len(game.public_actions)
             for player_id, options in sorted(game.response_options.items()):
                 legal = tuple(options)
                 if player_id == candidate_seat:
                     if len(legal) > 1:
-                        snapshots.append((copy.deepcopy(game), legal))
+                        snapshots.append(
+                        _CounterfactualDecisionSnapshot(
+                            game=copy.deepcopy(game),
+                            legal_actions=legal,
+                            actor_trace=actor_trace(),
+                            initial_game=initial_game,
+                        )
+                    )
                     action = candidate_policy.choose_response(game, player_id, list(legal))
+                    actor_response = action
                 else:
                     action = opponents[player_id][1].choose_response(
                         game, player_id, list(legal)
@@ -1354,6 +2114,12 @@ def _run_candidate_base_hand(
                 _check_rollout_action(action, legal)
                 game.response_choices[player_id] = action
             game._resolve_responses()
+            if actor_response is not None:
+                record_actor_action(
+                    "response",
+                    actor_response,
+                    before_public_action_count=response_public_action_count,
+                )
             continue
         raise RuntimeError(f"未知动作价值采样阶段：{game.phase}")
     return snapshots
@@ -1447,7 +2213,7 @@ def collect_counterfactual_action_value_trajectories(
                 opponents=base_opponents,
             )
             response_snapshots = [
-                snapshot for snapshot in snapshots if snapshot[0].phase == "response"
+                snapshot for snapshot in snapshots if snapshot.game.phase == "response"
             ]
             selected_pool = (
                 response_snapshots
@@ -1457,7 +2223,9 @@ def collect_counterfactual_action_value_trajectories(
             if not selected_pool:
                 continue
             selected_count = min(samples_per_hand, len(selected_pool))
-            for snapshot, legal in rng.sample(selected_pool, selected_count):
+            for selected_snapshot in rng.sample(selected_pool, selected_count):
+                snapshot = selected_snapshot.game
+                legal = selected_snapshot.legal_actions
                 action_return_samples = [[] for _ in legal]
                 usable_snapshot = True
                 pending_batched_branches: list[

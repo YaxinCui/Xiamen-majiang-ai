@@ -1,12 +1,20 @@
 import tempfile
 import unittest
 from pathlib import Path
+import random
 
+from xiamen_mahjong.agents import HeuristicTeacherAgent
+from xiamen_mahjong.game import XiamenMahjongGame
+from xiamen_mahjong.rules import XiamenRules
 from xiamen_mahjong.training import (
     NeuralRulePolicyModel,
     PUBLIC_ACTION_SEQUENCE_DIM,
     RulePolicyModel,
     StateValueBaseline,
+    _audit_resampled_history_prefix,
+    _frozen_behavior_action_likelihood,
+    _replay_snapshot_public_history,
+    _run_candidate_base_hand,
     _turn_actions,
     collect_candidate_teacher_dagger_trajectories,
     collect_counterfactual_action_value_trajectories,
@@ -49,7 +57,46 @@ class _BatchFirstLegalPolicy:
         ]
 
 
+class _ScoreAwareFallbackPolicy:
+    """Scores disagree with the deterministic fallback to test replay use."""
+
+    def scores(self, decision):
+        return [-5.0] * (len(decision.legal_actions) - 1) + [5.0]
+
+    def choose_turn_action(self, game, player_id):
+        return _turn_actions(game, player_id)[0]
+
+    def choose_response(self, game, player_id, options):
+        return tuple(options)[0]
+
+
 class TrainingTests(unittest.TestCase):
+    def test_history_replay_prefers_available_policy_scores_over_argmax_fallback(self):
+        game = XiamenMahjongGame(
+            seed=929,
+            rules=XiamenRules.from_profile("core"),
+            dealer=0,
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        legal = tuple(_turn_actions(game, player_id))
+        self.assertGreater(len(legal), 1)
+        action, likelihood = _frozen_behavior_action_likelihood(
+            _ScoreAwareFallbackPolicy(),
+            game,
+            player_id=player_id,
+            legal=legal,
+            compatible=(legal[-1],),
+            is_response=False,
+            temperature=1.0,
+            uniform_mixture=0.02,
+        ) or (None, 0.0)
+        # ``choose_turn_action`` returns the first legal action, so this only
+        # holds if replay uses the exposed logits as its behavior model.
+        self.assertEqual(action, legal[-1])
+        self.assertGreater(likelihood, 0.9)
+
     def test_teacher_collection_exports_only_legal_actions(self):
         decisions, summary = collect_teacher_decisions(hands=3, profile="classic", seed=101)
         self.assertGreater(summary.decisions, 20)
@@ -371,6 +418,98 @@ class TrainingTests(unittest.TestCase):
         self.assertGreater(batched_summary.max_batched_inference_decisions, 1)
         self.assertGreater(len(batched_policy.batch_calls), 0)
         self.assertGreater(max(batched_policy.batch_calls), 1)
+
+    def test_private_actor_replay_trace_is_positioned_but_never_exported(self):
+        policy = _BatchFirstLegalPolicy()
+        rules = XiamenRules.from_profile("core")
+        game = XiamenMahjongGame(
+            seed=953,
+            rules=rules,
+            dealer=0,
+            auto_advance=False,
+            human_seat=-1,
+        )
+        teacher = HeuristicTeacherAgent()
+        snapshots = _run_candidate_base_hand(
+            game,
+            candidate_seat=0,
+            candidate_policy=policy,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+        )
+        self.assertTrue(snapshots)
+        trace = snapshots[0].actor_trace
+        self.assertEqual(trace.actor_seat, 0)
+        self.assertEqual(trace.dealer, 0)
+        self.assertEqual(len(trace.initial_hand), rules.initial_hand_size)
+        self.assertTrue(trace.draws)
+        self.assertEqual(trace.draws[0].public_draw_event_index, 0)
+        self.assertEqual(trace.draws[0].after_public_action_count, 1)
+        self.assertEqual(trace.public_action_count, len(snapshots[0].game.public_actions))
+        self.assertTrue(
+            all(
+                draw.after_public_action_count <= trace.public_action_count
+                for draw in trace.draws
+            )
+        )
+        self.assertTrue(
+            all(
+                action.before_public_action_count
+                <= action.after_public_action_count
+                <= trace.public_action_count
+                for action in trace.actions
+            )
+        )
+        self.assertTrue(
+            any(snapshot.actor_trace.actions for snapshot in snapshots[1:])
+        )
+
+        # The source's private world is only a replay oracle, never a target
+        # exported to training.  Every retained public prefix must be exactly
+        # reproducible from setup plus the actor-private trace.
+        replayed = _replay_snapshot_public_history(
+            snapshots[-1],
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+        )
+        self.assertTrue(replayed.accepted, replayed.rejection_reason)
+        self.assertEqual(
+            replayed.public_action_count, snapshots[-1].actor_trace.public_action_count
+        )
+        self.assertGreater(replayed.likelihood, 0.0)
+
+        # A resampled setup removes the actor's later private draw from the
+        # unknown pool and reconstructs it only inside the replay callback.
+        # This early prefix has one opponent claim, so many proposed worlds
+        # are correctly rejected as illegal; at least one fixed-seed particle
+        # must reproduce the actor-known draw without exporting it.
+        particle_rng = random.Random(954)
+        particle_audit = _audit_resampled_history_prefix(
+            snapshots[1],
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            particle_count=200,
+            rng=particle_rng,
+        )
+        self.assertGreater(particle_audit.accepted_particles, 0)
+        self.assertLess(particle_audit.acceptance_rate, 0.1)
+        self.assertNotIn("wall", particle_audit.payload())
+        self.assertNotIn("opponent_hands", particle_audit.payload())
+
+        trajectories, _summary = collect_counterfactual_action_value_trajectories(
+            policy,
+            seed_count=1,
+            profile="core",
+            seed=953,
+            response_sample_probability=0.0,
+        )
+        self.assertTrue(
+            all(
+                "actor_trace" not in trajectory.source_metadata
+                and "private_replay_trace" not in trajectory.source_metadata
+                and "wall" not in decision.state
+                and "opponent_hands" not in decision.state
+                for trajectory in trajectories
+                for decision in trajectory.decisions
+            )
+        )
 
     def test_reinforce_collects_legal_episodes_and_updates(self):
         policy = NeuralRulePolicyModel(hidden_size=4, seed=613)

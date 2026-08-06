@@ -22,3 +22,28 @@
 - 数据：粒子权重的有效样本量（ESS）、拒绝/跳过率、每状态 belief world 数；均不能泄露墙、他家暗手、种子。
 - 离线：按物理牌墙切分后的动作 Q Huber、MAE、argmax；Q 头和 policy 头分别汇报。
 - 实战：候选 policy 选牌、Q 选牌和基准各自使用同一组新牌墙做四座轮换；不得使用训练或调参牌墙。
+
+## 2026-08-06：顺序粒子过滤核心（尚未接入 collector）
+
+已新增 `xiamen_mahjong.belief.SequentialParticleBelief`，它接收不透明的运行时粒子和逐个公开
+观察的 transition/likelihood 回调，维护标准化后验并安全记录 `ESS`、权重熵、log evidence、
+重采样次数、零似然粒子和 proposal failure。粒子、随机种子和任何暗牌均没有序列化接口。
+
+用二类隐藏对手风格的可枚举玩具博弈校准：在观察 `claim`、`pass` 后，粒子后验与精确贝叶斯
+结果 `4/13` 一致；低 ESS 时 systematic resampling 仍保留重采样前退化诊断；零总似然时状态
+原子回滚。这个结果只验证过滤数学与安全边界，**不代表厦门麻将已经有完整历史后验**。
+
+已开始 collector 内存 trace：每个候选决策快照绑定本家初始手牌/花牌、私有摸牌（含补花与
+补杠后的牌）及本家动作；每条记录按公开 action count 定位，暗杠牌面等不会因公开日志脱敏而
+丢失。trace 不含他家暗手或墙顺序，且没有 JSON payload/metadata 路径。
+
+在 `core` 档已加入严格 replay oracle：它从开局后的私有状态重新推进，候选只使用自己的 trace，
+对手以冻结策略的平滑行为似然加权（有可用 neural/action 分数时用温度 softmax，否则使用确定性
+fallback），并逐条比对生成的公开 event。固定 `seed=953` 的 13 个候选快照均精确复现；对手暗杠
+作为“发生暗杠”的公开粗粒度事件，对可能牌面求和，绝不把牌面写回公开记录。replay audit 只返回
+提议数、接受数、接受率、平均 log-likelihood 与拒绝类别；不会返回粒子本身。
+
+同时验证了一个不可忽略的反例：仅在开局随机重分配未知手牌/牌墙、再拒绝不合法历史的朴素 proposal，
+在该局 5 个公开 event 的前缀中只接受 6/200 个粒子，在 13 个 event 的前缀中 0/200。它会迅速
+退化，**不得接入 collector 或替换现有 `--belief-resample`**。下一步改为按事件约束的序列 proposal
+（在目标弃牌/副露发生时先满足所需手牌与私有摸牌），并以 ESS/接受率门槛校准后才允许产出训练数据。
