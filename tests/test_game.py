@@ -1,7 +1,7 @@
 import unittest
 
 from xiamen_mahjong.game import XiamenMahjongGame
-from xiamen_mahjong.agents import GameAction
+from xiamen_mahjong.agents import AvailabilityTeacherAgent, GameAction
 from xiamen_mahjong.rules import XiamenRules
 from xiamen_mahjong.tiles import BASE_TILE_COUNT, WHITE_DRAGON
 
@@ -248,6 +248,25 @@ class GameTests(unittest.TestCase):
         ]
         action = game.teacher.choose_turn_action(game, 0)
         self.assertEqual(action, GameAction("discard", 27))
+
+    def test_availability_teacher_counts_only_public_remaining_waits(self):
+        game = XiamenMahjongGame(seed=73, rules=XiamenRules.classic())
+        game.phase = "discard"
+        game.current_player = 0
+        game.gold_tile = 33
+        game.gold_indicator = 32
+        game.players[0].hand = [
+            0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 13, 13
+        ]
+        game.players[1].discards = [0, 0, 0]
+        ranked = AvailabilityTeacherAgent().explain_discard(game, 0)
+        self.assertTrue(ranked)
+        self.assertTrue(all("wait_availability" in item for item in ranked))
+        self.assertTrue(all(int(item["wait_availability"]) >= 0 for item in ranked))
+
+    def test_availability_teacher_rejects_negative_wait_value(self):
+        with self.assertRaises(ValueError):
+            AvailabilityTeacherAgent(wait_copy_value=-0.1)
 
     def test_public_state_marks_the_current_drawn_tile(self):
         game = XiamenMahjongGame(seed=71, rules=XiamenRules.classic(), dealer=0)

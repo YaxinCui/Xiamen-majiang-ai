@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import random
-from typing import Any
+from typing import Any, Mapping
 
 from .agents import GameAction, HeuristicTeacherAgent
 from .hand import is_travelling_ready, is_winning_hand, wait_tiles, winning_pattern
@@ -50,16 +50,24 @@ class XiamenMahjongGame:
         scores: list[int] | None = None,
         hand_number: int = 1,
         auto_advance: bool = True,
+        agents: Mapping[int, Any] | None = None,
+        human_seat: int = 0,
     ):
         self.rules = rules or XiamenRules()
         self.auto_advance = auto_advance
         self.random = random.Random(seed)
         self.seed = seed
         self.teacher = HeuristicTeacherAgent()
+        self.human_seat = human_seat
         self.players = [
             Player(seat=index, score=(scores[index] if scores else 0))
             for index in range(self.rules.player_count)
         ]
+        self.agents: dict[int, Any] = {
+            player.seat: self.teacher for player in self.players
+        }
+        if agents:
+            self.agents.update(agents)
         self.wall: list[int] = []
         self.gold_indicator: int | None = None
         self.gold_tile: int | None = None
@@ -89,6 +97,10 @@ class XiamenMahjongGame:
         self.tour_state: dict[str, Any] | None = None
         self.turn_count = 0
         self.events: list[dict[str, Any]] = []
+        # Structured public action history is separate from the localized UI
+        # event text.  Training exporters may retain it for sequence models
+        # without ever serializing wall order or concealed hands.
+        self.public_actions: list[dict[str, Any]] = []
         self.message = "准备开始"
         self._setup()
 
@@ -235,6 +247,7 @@ class XiamenMahjongGame:
         self.phase = "discard"
         self.last_drawn_tiles[player_id] = tile
         self.turn_count += 1
+        self._record_public_action("draw", seat=player_id)
         if self._tour_resolution_level(player_id):
             labels = {1: "游金", 2: "双游", 3: "三游"}
             self.message = f"{self._seat_name(player_id)}进入{labels[self.tour_state['level']]}决胜摸牌"
@@ -331,7 +344,9 @@ class XiamenMahjongGame:
                 if self.current_player == self.human_seat:
                     self.message = "轮到你出牌"
                     return
-                action = self.teacher.choose_turn_action(self, self.current_player)
+                action = self._agent_for(self.current_player).choose_turn_action(
+                    self, self.current_player
+                )
                 self._apply_turn_action(self.current_player, action)
                 continue
             if self.phase == "response":
@@ -342,6 +357,17 @@ class XiamenMahjongGame:
                 continue
             raise RuntimeError(f"unknown game phase: {self.phase}")
 
+    def _agent_for(self, player_id: int) -> Any:
+        """Return the configured policy for an automated seat.
+
+        Policies share the Teacher's small interface: ``choose_turn_action``
+        and ``choose_response``.  The rules engine still validates and applies
+        the returned action, so an experimental neural policy cannot bypass
+        legality or settlement.
+        """
+
+        return self.agents.get(player_id, self.teacher)
+
     def _apply_turn_action(self, player_id: int, action: GameAction) -> None:
         if self.phase != "discard" or player_id != self.current_player:
             raise GameError("当前不能执行摸牌后的动作")
@@ -349,6 +375,7 @@ class XiamenMahjongGame:
         if action.kind == "hu":
             if not self._tour_resolution_level(player_id) and not self._can_win(player_id):
                 raise GameError("当前手牌不能自摸胡")
+            self._record_public_action("hu", seat=player_id)
             self._finish_win(player_id, self._self_draw_win_type(player_id))
             return
         if action.kind == "advance_tour":
@@ -363,6 +390,7 @@ class XiamenMahjongGame:
             self.last_drawn_tiles[player_id] = None
             assert self.tour_state is not None
             self.tour_state["level"] += 1
+            self._record_public_action("advance_tour", seat=player_id, tile=self.gold_tile)
             label = "双游" if self.tour_state["level"] == 2 else "三游"
             self._event(label, f"{self._seat_name(player_id)}打出金牌，进入{label}封闭摸牌圈")
             self.first_turn_pending.discard(player_id)
@@ -382,6 +410,7 @@ class XiamenMahjongGame:
             self.discarder = player_id
             self.latest_discard = action.tile
             self.latest_discard_seat = player_id
+            self._record_public_action("discard", seat=player_id, tile=action.tile)
             if (
                 player_id in self.opening_wait_seats
                 and action.tile != self.last_drawn_tiles[player_id]
@@ -430,6 +459,9 @@ class XiamenMahjongGame:
                     "value": self._tile_value(action.tile),
                 }
             )
+            # A concealed kong itself is public, but its face value is not
+            # supplied to opponents' training observations.
+            self._record_public_action("an_kan", seat=player_id)
             self.opening_wait_seats.discard(player_id)
             self.first_turn_pending.discard(player_id)
             self._event("暗杠", f"{self._seat_name(player_id)}暗杠")
@@ -458,6 +490,7 @@ class XiamenMahjongGame:
             target["kind"] = "add_kan"
             target["tiles"] = [action.tile] * 4
             target["value"] = self._tile_value(action.tile)
+            self._record_public_action("add_kan", seat=player_id, tile=action.tile)
             self.opening_wait_seats.discard(player_id)
             self.first_turn_pending.discard(player_id)
             self._event("补杠", f"{self._seat_name(player_id)}补杠{tile_name(action.tile)}")
@@ -670,7 +703,10 @@ class XiamenMahjongGame:
         assert self.discarder is not None
         for player_id, options in self.response_options.items():
             if player_id not in self.response_choices:
-                self.response_choices[player_id] = self.teacher.choose_response(self, player_id, options)
+                action = self._agent_for(player_id).choose_response(self, player_id, options)
+                if not self._is_valid_response_action(action, options):
+                    raise RuntimeError("自动策略选择了规则引擎未提供的响应动作")
+                self.response_choices[player_id] = action
         choices = list(self.response_choices.items())
         hu_claims = [(player_id, action) for player_id, action in choices if action.kind == "hu"]
         if hu_claims:
@@ -699,6 +735,9 @@ class XiamenMahjongGame:
         assert self.last_discard is not None and self.discarder is not None
         player = self.players[player_id]
         tile = self.last_discard
+        self._record_public_action(
+            action.kind, seat=player_id, tile=tile, tiles=action.tiles
+        )
         discard_pile = self.players[self.discarder].discards
         if discard_pile and discard_pile[-1] == tile:
             discard_pile.pop()
@@ -880,6 +919,7 @@ class XiamenMahjongGame:
             f"{self._seat_name(winner)}{win_label}，{self.win_pattern}，"
             f"结算 {self.score_breakdown['unit']} × {self.score_breakdown['multiplier']}",
         )
+        self._record_public_action("result", seat=winner, result=win_type)
         self.phase = "over"
         self.message = f"{self._seat_name(winner)}{win_label}：{self.win_pattern}"
         self.response_options = {}
@@ -895,6 +935,7 @@ class XiamenMahjongGame:
         self.score_breakdown = None
         self.message = "牌墙耗尽，本局流局"
         self._event("流局", self.message)
+        self._record_public_action("result", result="draw")
         self.response_options = {}
         self.response_choices = {}
 
@@ -1004,6 +1045,32 @@ class XiamenMahjongGame:
 
     def _event(self, kind: str, text: str) -> None:
         self.events.append({"turn": self.turn_count, "kind": kind, "text": text})
+
+    def _record_public_action(
+        self,
+        kind: str,
+        *,
+        seat: int | None = None,
+        tile: int | None = None,
+        tiles: tuple[int, ...] = (),
+        result: str | None = None,
+    ) -> None:
+        """Record a machine-readable action containing only public facts."""
+
+        event: dict[str, Any] = {
+            "index": len(self.public_actions),
+            "turn": self.turn_count,
+            "kind": kind,
+        }
+        if seat is not None:
+            event["seat"] = seat
+        if tile is not None:
+            event["tile"] = tile
+        if tiles:
+            event["tiles"] = list(tiles)
+        if result is not None:
+            event["result"] = result
+        self.public_actions.append(event)
 
     def _next_player(self, player_id: int) -> int:
         return (player_id + 1) % self.rules.player_count

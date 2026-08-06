@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 
 from .hand import hand_quality, is_winning_hand, wait_tiles
-from .tiles import BASE_TILE_COUNT, tile_name
+from .tiles import BASE_TILE_COUNT, is_base_tile, tile_name
 
 
 @dataclass(frozen=True)
@@ -172,3 +172,80 @@ class HeuristicTeacherAgent:
         if not ranked:
             raise RuntimeError("Teacher was asked to discard from an empty hand")
         return int(ranked[0]["tile"])
+
+
+class AvailabilityTeacherAgent(HeuristicTeacherAgent):
+    """Teacher that weights waits by remaining publicly possible copies.
+
+    The original Teacher treats a one-tile wait with all four copies already
+    visible as equal to a one-tile wait with four live copies.  This policy
+    preserves the same explainable hand-shape heuristic but replaces that
+    coarse wait count with availability derived only from the actor's hand,
+    rivers, exposed melds and the visible gold indicator.
+    """
+
+    def __init__(self, *, wait_copy_value: float = 4.5):
+        if wait_copy_value < 0:
+            raise ValueError("wait_copy_value 不能为负数")
+        self.wait_copy_value = float(wait_copy_value)
+
+    def explain_discard(self, game, player_id: int) -> list[dict[str, object]]:
+        player = game.players[player_id]
+        visible = Counter()
+        for other in game.players:
+            visible.update(tile for tile in other.discards if is_base_tile(tile))
+            visible.update(
+                tile
+                for meld in other.melds
+                for tile in meld["tiles"]
+                if is_base_tile(tile)
+            )
+        if game.gold_indicator is not None and is_base_tile(game.gold_indicator):
+            visible[game.gold_indicator] += 1
+        visible.update(tile for tile in player.hand if is_base_tile(tile))
+
+        candidates = []
+        allowed = set(game._forced_follow_tiles(player_id))
+        for tile in sorted(set(player.hand)):
+            if allowed and tile not in allowed:
+                continue
+            candidate = list(player.hand)
+            candidate.remove(tile)
+            wait_visible = Counter(visible)
+            if is_base_tile(tile):
+                wait_visible[tile] -= 1
+            waits = wait_tiles(
+                candidate,
+                game.gold_tile,
+                meld_count=len(player.melds),
+                melds_required=game.rules.melds_required,
+                allow_seven_pairs=game.rules.allow_seven_pairs,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
+            availability = sum(max(0, 4 - wait_visible[wait]) for wait in waits)
+            quality = hand_quality(
+                candidate,
+                game.gold_tile,
+                meld_count=len(player.melds),
+                melds_required=game.rules.melds_required,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
+            gold_penalty = 7.0 if tile == game.gold_tile else 0.0
+            # 4.5 preserves the original Teacher's nominal one-wait bonus
+            # (four live copies * 4.5 == 18); evaluation tunes this public
+            # heuristic separately from the final held-out benchmark.
+            score = quality + availability * self.wait_copy_value - gold_penalty
+            candidates.append(
+                {
+                    "tile": tile,
+                    "name": tile_name(tile),
+                    "score": round(score, 3),
+                    "waits": [tile_name(wait) for wait in waits],
+                    "wait_availability": availability,
+                }
+            )
+        return sorted(candidates, key=lambda item: (-float(item["score"]), int(item["tile"])))
