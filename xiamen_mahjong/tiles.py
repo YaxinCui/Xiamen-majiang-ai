@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Sequence
 
 SUIT_NAMES = ("万", "筒", "条")
 WINDS = ("东", "南", "西", "北")
@@ -74,6 +75,23 @@ def next_gold_tile(indicator: int) -> int:
     if 27 <= indicator < 31:
         return 27 + (indicator - 27 + 1) % 4
     return 31 + (indicator - 31 + 1) % 3
+
+
+def gold_indicator_index(
+    wall: Sequence[int], dice: tuple[int, int]
+) -> int | None:
+    """Return the dice-indexed base-tile position used for the gold flip.
+
+    The scan begins ``sum(dice)`` tiles from the back, moves toward the front,
+    then wraps to the back. Flower faces are skipped. Returning an index keeps
+    this deterministic rule reusable by the engine and belief calibration.
+    """
+
+    start = len(wall) - sum(dice)
+    indices = list(range(max(start, 0), -1, -1)) + list(
+        range(len(wall) - 1, max(start, 0), -1)
+    )
+    return next((index for index in indices if is_base_tile(wall[index])), None)
 
 
 def base_wall() -> list[int]:

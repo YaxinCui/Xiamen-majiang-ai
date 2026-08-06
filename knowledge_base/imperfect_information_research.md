@@ -112,13 +112,18 @@ exact-density 原则下加入一个“对手摸牌后弃牌”的 transition，�
 抽取暗摸牌。进一步的微型枚举将未知对手 base-hand／flower-slot 分配、公开花序列和“该对手手牌加暗摸牌含公开弃牌”
 联立；组合概率和条件后底牌分布均通过测试。
 
-但这只是在项目当前的 **post-setup uniform allocation reference measure** 下精确：现有 setup sampler 把翻金指示牌
-从牌池移除后重排余牌，尚未对引擎按骰位环形扫描、遇花继续跳过直到选到 base 指示牌的 opening transition 条件化。
-故它不是实际规则发牌 posterior，不能以 `exact-density` 名义升级。固定 core、dealer 0、seed 271 的首弃→下家补花
-→弃牌前缀（公开花为 `(40,)`）中，reference proposal 256/256 均结构重放成功，`p/q=0.0012275911710061692`；但
-冻结 Teacher 的行为似然 ESS 只有 **17.76/256 = 6.9%**。因此该 audit 被拒绝进入 collector/Q/网页，普通重放仍以
-`opponent_flower_transition_unsupported` 拒绝未授权花 transition；源局 replay oracle 不受影响。下一步先建模并在小牌墙
-校准 opening gold-indicator transition，再重测这个前缀的联合 proposal。
+此前 setup sampler 将金指示牌从牌池移除后直接重排余牌，遗漏了引擎“按骰位环形扫描、遇花跳过直到 base”的 opening
+transition。现已将此规则抽为 `gold_indicator_index`，供引擎与 belief 代码共用；固定墙的条件 sampler 用 rejection
+严格保留跳花与骰位相关性，且小牌墙枚举验证其后验。利用真实 144 牌墙中“扫描起点距前端远大于最多 8 张花”的位置
+界，又构造了“翻金 + 庄家已知首摸（含补花和私有底牌）”的联合 structured proposal；微型枚举得到相同 `p/q`，两个
+core seed（其中 seed 32 首摸补花）重建后均保留本家可见状态、金指示牌、骰子与完整物理牌多重集。
+
+该 opening transition 仍未与下一位对手的 draw→discard／公开副露联合；所以它只是修复了先验起点，尚非完整规则发牌
+posterior，也不能取代旧 post-setup audit。固定 core、dealer 0、seed 271 的首弃→下家补花→弃牌前缀（公开花为
+`(40,)`）中，旧 reference proposal 256/256 均结构重放成功，`p/q=0.0012275911710061692`；但冻结 Teacher 的行为
+似然 ESS 只有 **17.76/256 = 6.9%**。该 audit 继续被拒绝进入 collector/Q/网页，普通重放仍以
+`opponent_flower_transition_unsupported` 拒绝未授权花 transition；源局 replay oracle 不受影响。下一步把 opening
+proposal 与首个对手 draw→discard 的联合组合密度推导出来，再重新测 ESS。
 
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 

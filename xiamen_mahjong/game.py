@@ -14,6 +14,7 @@ from .tiles import (
     BASE_TILE_COUNT,
     WHITE_DRAGON,
     base_wall,
+    gold_indicator_index,
     is_honor,
     is_base_tile,
     is_suited,
@@ -141,21 +142,15 @@ class XiamenMahjongGame:
 
     def _select_gold_indicator(self) -> None:
         self.gold_dice = (self.random.randint(1, 6), self.random.randint(1, 6))
-        start = len(self.wall) - sum(self.gold_dice)
-        indices = list(range(max(start, 0), -1, -1)) + list(
-            range(len(self.wall) - 1, max(start, 0), -1)
+        index = gold_indicator_index(self.wall, self.gold_dice)
+        if index is None:
+            raise RuntimeError("wall has no base tile for the gold indicator")
+        self.gold_indicator = self.wall.pop(index)
+        self.gold_tile = (
+            next_gold_tile(self.gold_indicator)
+            if self.rules.gold_from_indicator_next
+            else self.gold_indicator
         )
-        for index in indices:
-            candidate = self.wall[index]
-            if is_base_tile(candidate):
-                self.gold_indicator = self.wall.pop(index)
-                self.gold_tile = (
-                    next_gold_tile(self.gold_indicator)
-                    if self.rules.gold_from_indicator_next
-                    else self.gold_indicator
-                )
-                return
-        raise RuntimeError("wall has no base tile for the gold indicator")
 
     def _draw_for_player(self, player: Player) -> int | None:
         drawn_flowers: list[int] = []

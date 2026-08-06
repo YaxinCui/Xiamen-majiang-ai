@@ -1,12 +1,14 @@
 import tempfile
 import unittest
 from collections import Counter
+from itertools import permutations
 from pathlib import Path
 import random
 
 from xiamen_mahjong.agents import GameAction, HeuristicTeacherAgent
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.rules import XiamenRules
+from xiamen_mahjong.tiles import base_wall, gold_indicator_index
 from xiamen_mahjong.training import (
     NeuralRulePolicyModel,
     PUBLIC_ACTION_SEQUENCE_DIM,
@@ -24,7 +26,11 @@ from xiamen_mahjong.training import (
     _sample_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
     _sample_replay_setup_for_actor,
+    _sample_replay_setup_given_opening_gold_and_draw,
+    _sample_post_gold_wall_given_indicator,
+    _sample_post_gold_wall_given_indicator_and_opening_draw,
     _sample_structured_setup_given_normal_draw_flowers,
+    _sample_structured_setup_given_gold_indicator_and_opening_draw,
     _sample_wall_given_normal_draw_flowers,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
@@ -139,6 +145,152 @@ class TrainingTests(unittest.TestCase):
                 rng=random.Random(1),
             )
         )
+
+    def test_gold_indicator_wall_proposal_matches_enumerated_posterior(self):
+        # Label the two physical 0s to enumerate the actual shuffle measure.
+        # The selector starts at index 2, scans backward, then wraps.  Given
+        # that it reveals face 0, the sampler must match the resulting
+        # post-flip wall distribution, not merely remove an arbitrary 0.
+        labeled_faces = (0, 0, 1, 34)
+        enumerated_walls: list[tuple[int, ...]] = []
+        for ordering in permutations(range(len(labeled_faces))):
+            wall = [labeled_faces[index] for index in ordering]
+            selected = gold_indicator_index(wall, (1, 1))
+            if selected is not None and wall[selected] == 0:
+                enumerated_walls.append(tuple([*wall[:selected], *wall[selected + 1 :]]))
+        self.assertTrue(enumerated_walls)
+        expected_first_flower = sum(wall[0] == 34 for wall in enumerated_walls) / len(
+            enumerated_walls
+        )
+        samples = 4_000
+        observed_first_flower = 0
+        for index in range(samples):
+            sampled = _sample_post_gold_wall_given_indicator(
+                Counter({0: 2, 1: 1, 34: 1}),
+                indicator=0,
+                dice=(1, 1),
+                rng=random.Random(20_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            wall, condition_probability = sampled or ([], 0.0)
+            self.assertEqual(Counter([*wall, 0]), Counter({0: 2, 1: 1, 34: 1}))
+            self.assertAlmostEqual(condition_probability, 2.0 / 3.0)
+            observed_first_flower += wall[0] == 34
+        self.assertAlmostEqual(
+            observed_first_flower / samples,
+            expected_first_flower,
+            delta=0.03,
+        )
+
+    def test_gold_indicator_and_opening_draw_proposal_has_exact_density(self):
+        # The pre-flip wall begins with the dealer's observed [34, 1] draw.
+        # With dice 1+1, the flip scan is guaranteed to remain after this
+        # prefix. The joint condition is 1/6 * 1/5 * 2/3 = 1/45.
+        pool = Counter({0: 2, 1: 1, 2: 1, 34: 1, 35: 1})
+        for index in range(500):
+            sampled = _sample_post_gold_wall_given_indicator_and_opening_draw(
+                pool,
+                indicator=0,
+                dice=(1, 1),
+                opening_flowers=(34,),
+                opening_tile=1,
+                rng=random.Random(25_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            wall, condition_probability = sampled or ([], 0.0)
+            self.assertEqual(wall[:2], [34, 1])
+            self.assertEqual(Counter([*wall, 0]), pool)
+            self.assertAlmostEqual(condition_probability, 1.0 / 45.0)
+
+    def test_structured_gold_and_opening_draw_proposal_has_exact_density(self):
+        # One concealed base-hand slot and a five-tile pre-flip wall share
+        # [0, 0, 1, 2, 34, 35]. The known opening prefix [34, 1] has
+        # probability 3/80, and face 0 is then the indicator with probability
+        # 2/3, for joint p/q = 1/40. The enumerated labelled deck agrees.
+        pool = Counter({0: 2, 1: 1, 2: 1, 34: 1, 35: 1})
+        accepted = 0
+        valid = 0
+        labeled_faces = (0, 0, 1, 2, 34, 35)
+        for ordering in permutations(range(len(labeled_faces))):
+            hand = labeled_faces[ordering[0]]
+            wall = [labeled_faces[index] for index in ordering[1:]]
+            if hand >= 34:
+                continue
+            valid += 1
+            selected = gold_indicator_index(wall, (1, 1))
+            if (
+                wall[:2] == [34, 1]
+                and selected is not None
+                and wall[selected] == 0
+            ):
+                accepted += 1
+        self.assertEqual(accepted / valid, 1.0 / 40.0)
+        for index in range(500):
+            sampled = _sample_structured_setup_given_gold_indicator_and_opening_draw(
+                pool,
+                opponent_hand_sizes=(1,),
+                opponent_flower_sizes=(0,),
+                pre_flip_wall_size=5,
+                indicator=0,
+                dice=(1, 1),
+                opening_flowers=(34,),
+                opening_tile=1,
+                rng=random.Random(30_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            proposal = sampled
+            assert proposal is not None
+            self.assertEqual(proposal.wall[:2], (34, 1))
+            self.assertEqual(Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool)
+            self.assertAlmostEqual(proposal.condition_probability, 1.0 / 40.0)
+
+    def test_opening_gold_setup_reconstruction_preserves_actor_information(self):
+        teacher = HeuristicTeacherAgent()
+        for seed in (271, 32):
+            game = XiamenMahjongGame(
+                seed=seed,
+                rules=XiamenRules.from_profile("core"),
+                dealer=0,
+                auto_advance=False,
+                human_seat=-1,
+            )
+            snapshots = _run_candidate_base_hand(
+                game,
+                candidate_seat=0,
+                candidate_policy=teacher,
+                opponents={
+                    seat: ("heuristic_teacher", teacher) for seat in range(1, 4)
+                },
+            )
+            snapshot = next(
+                item
+                for item in snapshots
+                if not any(
+                    draw.after_public_action_count > len(item.initial_game.public_actions)
+                    for draw in item.actor_trace.draws
+                )
+            )
+            proposal = _sample_replay_setup_given_opening_gold_and_draw(
+                snapshot,
+                rng=random.Random(31_001 + seed),
+            )
+            self.assertIsNotNone(proposal)
+            assert proposal is not None
+            sampled = proposal.game
+            source = snapshot.initial_game
+            self.assertEqual(sampled.gold_indicator, source.gold_indicator)
+            self.assertEqual(sampled.gold_dice, source.gold_dice)
+            self.assertEqual(sampled.public_actions, source.public_actions)
+            self.assertEqual(sampled.players[0].hand, source.players[0].hand)
+            self.assertEqual(sampled.players[0].flowers, source.players[0].flowers)
+            self.assertEqual(len(sampled.wall), len(source.wall))
+            self.assertGreater(proposal.condition_probability, 0.0)
+            reconstructed = Counter(sampled.wall)
+            reconstructed.update([sampled.gold_indicator])
+            for player in sampled.players:
+                reconstructed.update(player.hand)
+                reconstructed.update(player.flowers)
+            self.assertEqual(reconstructed, Counter(base_wall()))
 
     def test_joint_setup_and_normal_draw_flower_proposal_has_exact_density(self):
         # There is one hidden base-hand slot, one hidden flower slot and a

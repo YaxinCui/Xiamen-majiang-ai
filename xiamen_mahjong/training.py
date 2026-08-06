@@ -27,7 +27,13 @@ from .belief import (
 from .game import XiamenMahjongGame
 from .hand import hand_quality, wait_tiles
 from .rules import XiamenRules
-from .tiles import BASE_TILE_COUNT, WHITE_DRAGON, base_wall, is_base_tile
+from .tiles import (
+    BASE_TILE_COUNT,
+    WHITE_DRAGON,
+    base_wall,
+    gold_indicator_index,
+    is_base_tile,
+)
 
 
 DATASET_VERSION = "xiamen-rule-teacher-v1"
@@ -2052,6 +2058,227 @@ def _sample_structured_setup_given_normal_draw_flowers(
     )
 
 
+def _sample_structured_setup_given_wall_prefix(
+    pool: Counter[int],
+    *,
+    opponent_hand_sizes: Sequence[int],
+    opponent_flower_sizes: Sequence[int],
+    wall_size: int,
+    wall_prefix: Sequence[int],
+    rng: random.Random,
+) -> _StructuredSetupDrawProposal | None:
+    """Sample a structured allocation conditional on exact wall-prefix faces.
+
+    Base-hand slots, flower slots and ordered wall slots are sampled jointly.
+    Unlike a normal-draw observation, every prefix face is known here; this
+    is used for the dealer's own opening draw, whose final base face is
+    private to that dealer. The returned probability is exact for this
+    structured allocation reference measure.
+    """
+
+    if (
+        len(opponent_hand_sizes) != len(opponent_flower_sizes)
+        or wall_size <= 0
+        or len(wall_prefix) > wall_size
+        or any(size < 0 for size in opponent_hand_sizes)
+        or any(size < 0 for size in opponent_flower_sizes)
+        or any(not isinstance(tile, int) or tile < 0 for tile in wall_prefix)
+    ):
+        return None
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    base_total = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile)
+    )
+    flower_total = sum(
+        count for tile, count in remaining.items() if not is_base_tile(tile)
+    )
+    base_hand_slots = sum(opponent_hand_sizes)
+    flower_hand_slots = sum(opponent_flower_sizes)
+    base_wall_slots = base_total - base_hand_slots
+    flower_wall_slots = flower_total - flower_hand_slots
+    if (
+        base_wall_slots < 0
+        or flower_wall_slots < 0
+        or base_wall_slots + flower_wall_slots != wall_size
+        or sum(remaining.values())
+        != base_hand_slots + flower_hand_slots + wall_size
+    ):
+        return None
+
+    probability = 1.0
+    positions_remaining = wall_size
+    base_wall_remaining = base_wall_slots
+    flower_wall_remaining = flower_wall_slots
+    base_total_remaining = base_total
+    flower_total_remaining = flower_total
+    for tile in wall_prefix:
+        if positions_remaining <= 0 or remaining[tile] <= 0:
+            return None
+        if is_base_tile(tile):
+            if base_wall_remaining <= 0 or base_total_remaining <= 0:
+                return None
+            probability *= base_wall_remaining / positions_remaining
+            probability *= remaining[tile] / base_total_remaining
+            base_wall_remaining -= 1
+            base_total_remaining -= 1
+        else:
+            if flower_wall_remaining <= 0 or flower_total_remaining <= 0:
+                return None
+            probability *= flower_wall_remaining / positions_remaining
+            probability *= remaining[tile] / flower_total_remaining
+            flower_wall_remaining -= 1
+            flower_total_remaining -= 1
+        remaining[tile] -= 1
+        positions_remaining -= 1
+
+    base_values = [
+        tile
+        for tile, count in remaining.items()
+        if is_base_tile(tile)
+        for _ in range(count)
+    ]
+    flower_values = [
+        tile
+        for tile, count in remaining.items()
+        if not is_base_tile(tile)
+        for _ in range(count)
+    ]
+    rng.shuffle(base_values)
+    rng.shuffle(flower_values)
+    expected_base_values = base_hand_slots + base_wall_remaining
+    expected_flower_values = flower_hand_slots + flower_wall_remaining
+    if len(base_values) != expected_base_values or len(flower_values) != expected_flower_values:
+        return None
+
+    base_offset = 0
+    flower_offset = 0
+    opponent_hands: list[tuple[int, ...]] = []
+    opponent_flowers: list[tuple[int, ...]] = []
+    for hand_size, flower_size in zip(opponent_hand_sizes, opponent_flower_sizes):
+        opponent_hands.append(
+            tuple(sorted(base_values[base_offset : base_offset + hand_size]))
+        )
+        opponent_flowers.append(
+            tuple(sorted(flower_values[flower_offset : flower_offset + flower_size]))
+        )
+        base_offset += hand_size
+        flower_offset += flower_size
+    wall_tail_kinds = ["base"] * base_wall_remaining + [
+        "flower"
+    ] * flower_wall_remaining
+    rng.shuffle(wall_tail_kinds)
+    wall = list(wall_prefix)
+    for kind in wall_tail_kinds:
+        if kind == "base":
+            wall.append(base_values[base_offset])
+            base_offset += 1
+        else:
+            wall.append(flower_values[flower_offset])
+            flower_offset += 1
+    if (
+        len(wall) != wall_size
+        or base_offset != len(base_values)
+        or flower_offset != len(flower_values)
+    ):
+        return None  # pragma: no cover - protected by conservation checks
+    return _StructuredSetupDrawProposal(
+        opponent_hands=tuple(opponent_hands),
+        opponent_flowers=tuple(opponent_flowers),
+        wall=tuple(wall),
+        condition_probability=probability,
+    )
+
+
+def _sample_structured_setup_given_gold_indicator_and_opening_draw(
+    pool: Counter[int],
+    *,
+    opponent_hand_sizes: Sequence[int],
+    opponent_flower_sizes: Sequence[int],
+    pre_flip_wall_size: int,
+    indicator: int,
+    dice: tuple[int, int],
+    opening_flowers: Sequence[int],
+    opening_tile: int,
+    rng: random.Random,
+) -> _StructuredSetupDrawProposal | None:
+    """Joint structured proposal for a gold flip and dealer's known draw.
+
+    The proposal first fixes the dealer's opening flower/base prefix in the
+    pre-flip wall. It then rejection-samples the remaining structured setup
+    until the engine's actual dice scan selects the observed indicator. This
+    is exact under the structured deal reference measure when the scan cannot
+    reach the fixed prefix; the returned correction multiplies both analytic
+    observation probabilities. It is still not wired into a game snapshot or
+    collector.
+    """
+
+    if not is_base_tile(indicator) or opening_tile == indicator:
+        return None
+    prefix = [*opening_flowers, opening_tile]
+    preliminary = _sample_structured_setup_given_wall_prefix(
+        pool,
+        opponent_hand_sizes=opponent_hand_sizes,
+        opponent_flower_sizes=opponent_flower_sizes,
+        wall_size=pre_flip_wall_size,
+        wall_prefix=prefix,
+        rng=rng,
+    )
+    if preliminary is None:
+        return None
+    # This proof is determined only by the observed prefix, dice and remaining
+    # flower count, so it holds for every subsequent structured allocation.
+    remaining_after_prefix = Counter(pool)
+    for tile in prefix:
+        remaining_after_prefix[tile] -= 1
+    remaining_flower_count = sum(
+        count
+        for tile, count in remaining_after_prefix.items()
+        if count > 0 and not is_base_tile(tile)
+    )
+    prefix_length = len(prefix)
+    start = pre_flip_wall_size - sum(dice)
+    if (
+        start < prefix_length
+        or start - prefix_length + 1 <= remaining_flower_count
+    ):
+        return None
+    remaining_base_count = sum(
+        count
+        for tile, count in remaining_after_prefix.items()
+        if count > 0 and is_base_tile(tile)
+    )
+    if remaining_after_prefix[indicator] <= 0 or remaining_base_count <= 0:
+        return None
+    condition_probability = (
+        preliminary.condition_probability
+        * remaining_after_prefix[indicator]
+        / remaining_base_count
+    )
+    while True:
+        allocation = _sample_structured_setup_given_wall_prefix(
+            pool,
+            opponent_hand_sizes=opponent_hand_sizes,
+            opponent_flower_sizes=opponent_flower_sizes,
+            wall_size=pre_flip_wall_size,
+            wall_prefix=prefix,
+            rng=rng,
+        )
+        if allocation is None:  # pragma: no cover - preliminary already passed
+            return None
+        index = gold_indicator_index(allocation.wall, dice)
+        if (
+            index is not None
+            and index >= prefix_length
+            and allocation.wall[index] == indicator
+        ):
+            return _StructuredSetupDrawProposal(
+                opponent_hands=allocation.opponent_hands,
+                opponent_flowers=allocation.opponent_flowers,
+                wall=tuple([*allocation.wall[:index], *allocation.wall[index + 1 :]]),
+                condition_probability=condition_probability,
+            )
+
+
 def _sample_wall_given_normal_draw_flowers(
     pool: Counter[int],
     *,
@@ -2114,6 +2341,118 @@ def _sample_wall_given_normal_draw_flowers(
     return [*prefix, base_tile, *suffix], probability
 
 
+def _sample_post_gold_wall_given_indicator(
+    pool: Counter[int],
+    *,
+    indicator: int,
+    dice: tuple[int, int],
+    rng: random.Random,
+) -> tuple[list[int], float] | None:
+    """Sample a wall conditional on the engine selecting ``indicator``.
+
+    ``pool`` is the pre-flip wall multiset.  The engine's dice-indexed scan
+    always chooses one of its base-tile physical cards, and base-card identity
+    is exchangeable under a uniform wall permutation.  Therefore
+    ``P(selected face = indicator) = count(indicator) / base_count``.  Simple
+    rejection over full physical permutations consequently samples the exact
+    conditional post-flip wall, including the otherwise easy-to-miss
+    correlation caused by skipping flowers around the dice position.
+
+    This is only a fixed-wall primitive.  It does not yet condition the
+    earlier deal allocation or the dealer's known opening draw.
+    """
+
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    base_count = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile)
+    )
+    if (
+        not is_base_tile(indicator)
+        or remaining[indicator] <= 0
+        or base_count <= 0
+    ):
+        return None
+    pre_flip_wall = [
+        tile for tile, count in remaining.items() for _ in range(count)
+    ]
+    condition_probability = remaining[indicator] / base_count
+    while True:
+        rng.shuffle(pre_flip_wall)
+        index = gold_indicator_index(pre_flip_wall, dice)
+        if index is not None and pre_flip_wall[index] == indicator:
+            return [*pre_flip_wall[:index], *pre_flip_wall[index + 1 :]], condition_probability
+
+
+def _sample_post_gold_wall_given_indicator_and_opening_draw(
+    pool: Counter[int],
+    *,
+    indicator: int,
+    dice: tuple[int, int],
+    opening_flowers: Sequence[int],
+    opening_tile: int,
+    rng: random.Random,
+) -> tuple[list[int], float] | None:
+    """Condition a fixed pre-flip wall on its indicator and dealer draw.
+
+    The gold flip happens before the dealer's first normal draw.  For the
+    actual 144-tile wall, the dice scan starts near the back and can skip at
+    most eight flower faces, while a normal draw has at most eight flowers
+    plus one base tile.  When the supplied pool satisfies the corresponding
+    positional proof below, the selected indicator must lie after the known
+    opening-draw prefix. The two observations then factor exactly into the
+    prefix face probability and the remaining base-card indicator probability.
+
+    This is still a fixed-wall primitive; it deliberately does not claim to
+    model the earlier dealing allocation.
+    """
+
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    if (
+        not is_base_tile(indicator)
+        or not is_base_tile(opening_tile)
+        or opening_tile == indicator
+        or any(
+            not isinstance(tile, int) or is_base_tile(tile)
+            for tile in opening_flowers
+        )
+    ):
+        return None
+    prefix = [*opening_flowers, opening_tile]
+    probability = 1.0
+    total = sum(remaining.values())
+    for tile in prefix:
+        count = remaining[tile]
+        if count <= 0 or total <= 0:
+            return None
+        probability *= count / total
+        remaining[tile] -= 1
+        total -= 1
+
+    prefix_length = len(prefix)
+    start = sum(remaining.values()) + prefix_length - sum(dice)
+    remaining_flower_count = sum(
+        count for tile, count in remaining.items() if not is_base_tile(tile)
+    )
+    # The first scan leg covers [prefix_length, start]. If it has more slots
+    # than all remaining flowers, it must contain a base and the selector can
+    # never touch the already fixed opening-draw prefix.
+    if start < prefix_length or start - prefix_length + 1 <= remaining_flower_count:
+        return None
+    remaining_base_count = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile)
+    )
+    if remaining[indicator] <= 0 or remaining_base_count <= 0:
+        return None
+    probability *= remaining[indicator] / remaining_base_count
+    suffix = [tile for tile, count in remaining.items() for _ in range(count)]
+    while True:
+        rng.shuffle(suffix)
+        pre_flip_wall = [*prefix, *suffix]
+        index = gold_indicator_index(pre_flip_wall, dice)
+        if index is not None and index >= prefix_length and pre_flip_wall[index] == indicator:
+            return [*pre_flip_wall[:index], *pre_flip_wall[index + 1 :]], probability
+
+
 def _sample_replay_setup_for_actor(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
@@ -2139,6 +2478,121 @@ def _sample_replay_setup_for_actor(
         rng=rng,
     )
     return proposal.game if proposal is not None else None
+
+
+def _sample_replay_setup_given_opening_gold_and_draw(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    rng: random.Random,
+) -> _SetupReplayProposal | None:
+    """Reconstruct an actor-known core opening with the real gold transition.
+
+    The source game is immediately after the dealer's opening normal draw.
+    This sampler reverses that known draw in memory, restores the observed
+    gold indicator to the pre-flip pool, and samples a structured deal under
+    the exact dice-indexed gold selection plus the actor's private opening
+    tile/flowers. Later actor draws remain deliberately unsupported.
+
+    The result stays private to an audit. It is a stronger opening-state
+    reference than the legacy post-indicator shuffle, but says nothing about
+    later opponent actions or a complete history posterior.
+    """
+
+    trace = snapshot.actor_trace
+    source = snapshot.initial_game
+    actor_seat = trace.actor_seat
+    if (
+        source.rules.profile != "core"
+        or source.phase != "discard"
+        or source.current_player != actor_seat
+        or source.gold_indicator is None
+        or source.gold_dice is None
+        or any(
+            draw.after_public_action_count > len(source.public_actions)
+            for draw in trace.draws
+        )
+    ):
+        return None
+    actor = source.players[actor_seat]
+    opening_tile = source.last_drawn_tiles[actor_seat]
+    opening_flowers = tuple(source.last_drawn_flowers[actor_seat])
+    if (
+        opening_tile is None
+        or opening_tile not in actor.hand
+        or not is_base_tile(opening_tile)
+        or not all(not is_base_tile(tile) for tile in opening_flowers)
+        or not source.public_actions
+    ):
+        return None
+    opening_event = source.public_actions[-1]
+    if (
+        opening_event.get("kind") != "draw"
+        or opening_event.get("seat") != actor_seat
+        or tuple(opening_event.get("tiles", ())) != opening_flowers
+    ):
+        return None
+    actor_hand_before_draw = list(actor.hand)
+    actor_hand_before_draw.remove(opening_tile)
+    actor_flowers_before_draw = list(actor.flowers)
+    for flower in opening_flowers:
+        try:
+            actor_flowers_before_draw.remove(flower)
+        except ValueError:
+            return None
+
+    pool = Counter(base_wall())
+
+    def consume(tiles: Iterable[int]) -> bool:
+        counts = Counter(tiles)
+        if any(pool[tile] < count for tile, count in counts.items()):
+            return False
+        pool.subtract(counts)
+        return True
+
+    if not consume(actor_hand_before_draw) or not consume(actor_flowers_before_draw):
+        return None
+    opponent_seats = tuple(
+        player.seat for player in source.players if player.seat != actor_seat
+    )
+    prefix_size = len(opening_flowers) + 1
+    allocation = _sample_structured_setup_given_gold_indicator_and_opening_draw(
+        pool,
+        opponent_hand_sizes=tuple(
+            len(source.players[seat].hand) for seat in opponent_seats
+        ),
+        opponent_flower_sizes=tuple(
+            len(source.players[seat].flowers) for seat in opponent_seats
+        ),
+        pre_flip_wall_size=len(source.wall) + 1 + prefix_size,
+        indicator=source.gold_indicator,
+        dice=source.gold_dice,
+        opening_flowers=opening_flowers,
+        opening_tile=opening_tile,
+        rng=rng,
+    )
+    if allocation is None or allocation.wall[:prefix_size] != tuple(
+        [*opening_flowers, opening_tile]
+    ):
+        return None
+    sampled = copy.deepcopy(source)
+    # Keep the source actor's own hand/flower order exactly: the identities
+    # are known to that actor and the clone already carries the same multiset.
+    for seat, hand, flowers in zip(
+        opponent_seats, allocation.opponent_hands, allocation.opponent_flowers
+    ):
+        sampled.players[seat].hand = list(hand)
+        sampled.players[seat].flowers = list(flowers)
+        sampled.last_drawn_tiles[seat] = None
+        sampled.last_drawn_flowers[seat] = ()
+    sampled.wall = list(allocation.wall[prefix_size:])
+    if len(sampled.wall) != len(source.wall):
+        return None  # pragma: no cover - protected by pre_flip_wall_size
+    sampled.random = random.Random(rng.randrange(2**63))
+    return _SetupReplayProposal(
+        sampled,
+        prior_over_proposal=allocation.condition_probability,
+        condition_probability=allocation.condition_probability,
+    )
 
 
 def _sample_replay_setup_for_actor_with_initial_hand_constraint(

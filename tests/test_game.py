@@ -3,10 +3,16 @@ import unittest
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.agents import AvailabilityTeacherAgent, GameAction
 from xiamen_mahjong.rules import XiamenRules
-from xiamen_mahjong.tiles import BASE_TILE_COUNT, WHITE_DRAGON
+from xiamen_mahjong.tiles import BASE_TILE_COUNT, WHITE_DRAGON, gold_indicator_index
 
 
 class GameTests(unittest.TestCase):
+    def test_gold_indicator_scan_wraps_and_skips_flowers(self):
+        # Dice 1+1 starts at index 3 and scans 3, 2, 1, 0, then wraps.
+        self.assertEqual(gold_indicator_index([34, 0, 35, 36, 1], (1, 1)), 1)
+        self.assertEqual(gold_indicator_index([34, 35, 36, 37, 1], (1, 1)), 4)
+        self.assertIsNone(gold_indicator_index([34, 35, 36], (1, 1)))
+
     def test_public_state_never_exposes_ai_hands(self):
         game = XiamenMahjongGame(seed=20260803)
         state = game.public_state()
