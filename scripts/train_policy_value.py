@@ -55,6 +55,7 @@ class Example:
     source: str
     action_values: tuple[float, ...] | None
     action_value_stderrs: tuple[float, ...] | None
+    action_value_gap_stderrs: tuple[float, ...] | None
     value_target: float | None
     sample_weight: float
 
@@ -151,6 +152,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "反事实软偏好使用 Q-z×stderr 的逐动作下置信界；"
             "0 保持原始平均 Q 标签"
+        ),
+    )
+    parser.add_argument(
+        "--action-value-pairwise-confidence-z",
+        type=float,
+        default=0.0,
+        help=(
+            "以配对动作差值 Q(best)-Q(action) 的标准误保守收缩软偏好；"
+            "0 关闭，旧数据无该字段时也保持原目标"
         ),
     )
     parser.add_argument(
@@ -255,6 +265,7 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
                     source=source,
                     action_values=decision.action_values,
                     action_value_stderrs=decision.action_value_stderrs,
+                    action_value_gap_stderrs=decision.action_value_gap_stderrs,
                     value_target=value_target,
                     sample_weight=sample_weight,
                 )
@@ -280,6 +291,7 @@ def tensors(
     device: torch.device,
     weights: dict[str, float],
 ) -> tuple[
+    torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
@@ -317,6 +329,9 @@ def tensors(
     action_value_stderrs = torch.zeros(
         (batch_size, max_actions), dtype=torch.float32, device=device
     )
+    action_value_gap_stderrs = torch.zeros(
+        (batch_size, max_actions), dtype=torch.float32, device=device
+    )
     for row, example in enumerate(examples):
         count = len(example.candidates)
         candidates[row, :count] = torch.tensor(example.candidates, dtype=torch.float32)
@@ -343,6 +358,14 @@ def tensors(
                     dtype=torch.float32,
                     device=device,
                 )
+            if example.action_value_gap_stderrs is not None:
+                if len(example.action_value_gap_stderrs) != count:
+                    raise ValueError("动作价值差值标准误与候选动作数不匹配")
+                action_value_gap_stderrs[row, :count] = torch.tensor(
+                    example.action_value_gap_stderrs,
+                    dtype=torch.float32,
+                    device=device,
+                )
         # A held-out online source may contain a rare action not present in a
         # deliberately small training split.  Evaluation still needs a valid
         # target; use neutral class weight instead of failing on that action.
@@ -364,6 +387,7 @@ def tensors(
         values,
         value_mask,
         action_value_stderrs,
+        action_value_gap_stderrs,
     )
 
 
@@ -377,6 +401,8 @@ def policy_preference_loss(
     temperature: float,
     action_value_stderrs: torch.Tensor | None = None,
     confidence_z: float = 0.0,
+    action_value_gap_stderrs: torch.Tensor | None = None,
+    pairwise_confidence_z: float = 0.0,
 ) -> torch.Tensor:
     """Return cross entropy against hard labels or conservative rollout targets.
 
@@ -392,10 +418,27 @@ def policy_preference_loss(
         raise ValueError("action-value-temperature 必须为正数")
     if confidence_z < 0:
         raise ValueError("action-value-confidence-z 不能为负数")
+    if pairwise_confidence_z < 0:
+        raise ValueError("action-value-pairwise-confidence-z 不能为负数")
     hard_targets = F.one_hot(chosen, num_classes=logits.shape[1]).to(logits.dtype)
     target_values = action_values
     if confidence_z > 0 and action_value_stderrs is not None:
         target_values = target_values - confidence_z * action_value_stderrs
+    if pairwise_confidence_z > 0 and action_value_gap_stderrs is not None:
+        # Every action in a replicate is evaluated from the same sampled
+        # belief world.  Use the paired gap standard error, rather than the
+        # marginal Q errors, to retain only statistically supported ranking
+        # gaps.  Adding a state-wise constant does not affect softmax, so
+        # ``-gap`` exactly recovers the raw Q target when z=0.
+        masked_values = target_values.masked_fill(
+            ~action_mask, torch.finfo(target_values.dtype).min
+        )
+        best_values = masked_values.max(dim=1, keepdim=True).values
+        raw_gaps = (best_values - target_values).clamp_min(0.0)
+        conservative_gaps = (
+            raw_gaps - pairwise_confidence_z * action_value_gap_stderrs
+        ).clamp_min(0.0)
+        target_values = -conservative_gaps
     value_logits = (target_values / temperature).masked_fill(
         ~action_mask, torch.finfo(logits.dtype).min
     )
@@ -482,6 +525,7 @@ def evaluate(
     action_value_target_scale: float,
     action_value_stderr_scale: float,
     action_value_confidence_z: float,
+    action_value_pairwise_confidence_z: float,
 ) -> dict[str, Any]:
     network.eval()
     totals: dict[str, dict[str, float]] = defaultdict(
@@ -515,6 +559,7 @@ def evaluate(
                 values,
                 value_mask,
                 action_value_stderrs,
+                action_value_gap_stderrs,
             ) = tensors(
                 rows, feature_dim=feature_dim, device=device, weights=class_weight_map
             )
@@ -530,6 +575,8 @@ def evaluate(
                 temperature=action_value_temperature,
                 action_value_stderrs=action_value_stderrs,
                 confidence_z=action_value_confidence_z,
+                action_value_gap_stderrs=action_value_gap_stderrs,
+                pairwise_confidence_z=action_value_pairwise_confidence_z,
             ).detach().cpu().tolist()
             predicted = logits.argmax(dim=1).detach().cpu().tolist()
             values_cpu = predicted_values.detach().cpu().tolist()
@@ -742,6 +789,7 @@ def main() -> None:
         or args.action_value_temperature <= 0
         or args.action_value_stderr_scale < 0
         or args.action_value_confidence_z < 0
+        or args.action_value_pairwise_confidence_z < 0
         or args.action_value_margin_scale < 0
         or args.minimum_selection_decisions <= 0
     ):
@@ -886,6 +934,7 @@ def main() -> None:
                 values,
                 value_mask,
                 action_value_stderrs,
+                action_value_gap_stderrs,
             ) = tensors(
                 rows, feature_dim=feature_dim, device=device, weights=weights
             )
@@ -901,6 +950,8 @@ def main() -> None:
                 temperature=args.action_value_temperature,
                 action_value_stderrs=action_value_stderrs,
                 confidence_z=args.action_value_confidence_z,
+                action_value_gap_stderrs=action_value_gap_stderrs,
+                pairwise_confidence_z=args.action_value_pairwise_confidence_z,
             )
             policy_loss = (policy_loss_values * policy_weights).sum() / policy_weights.sum().clamp_min(1.0)
             value_loss = (
@@ -954,6 +1005,7 @@ def main() -> None:
             action_value_target_scale=args.action_value_target_scale,
             action_value_stderr_scale=args.action_value_stderr_scale,
             action_value_confidence_z=args.action_value_confidence_z,
+            action_value_pairwise_confidence_z=args.action_value_pairwise_confidence_z,
         )
         history.append(
             {
@@ -992,6 +1044,7 @@ def main() -> None:
         action_value_target_scale=args.action_value_target_scale,
         action_value_stderr_scale=args.action_value_stderr_scale,
         action_value_confidence_z=args.action_value_confidence_z,
+        action_value_pairwise_confidence_z=args.action_value_pairwise_confidence_z,
     )
     test_metrics = evaluate(
         network,
@@ -1004,6 +1057,7 @@ def main() -> None:
         action_value_target_scale=args.action_value_target_scale,
         action_value_stderr_scale=args.action_value_stderr_scale,
         action_value_confidence_z=args.action_value_confidence_z,
+        action_value_pairwise_confidence_z=args.action_value_pairwise_confidence_z,
     )
     report = {
         "model": "candidate_policy_value",
@@ -1021,6 +1075,7 @@ def main() -> None:
         "action_value_temperature": args.action_value_temperature,
         "action_value_stderr_scale": args.action_value_stderr_scale,
         "action_value_confidence_z": args.action_value_confidence_z,
+        "action_value_pairwise_confidence_z": args.action_value_pairwise_confidence_z,
         "action_value_margin_scale": args.action_value_margin_scale,
         "base_learning_rate_scale": args.base_learning_rate_scale,
         "inputs": {
@@ -1045,7 +1100,11 @@ def main() -> None:
         "policy_targets": {
             "teacher_and_curriculum": "hard_teacher_action",
             "counterfactual_action_value_rollout": (
-                "softmax((terminal_score_q_pi - confidence_z * action_stderr) / temperature)"
+                "softmax(conservative_action_value_preference / temperature)"
+            ),
+            "conservative_action_value_preference": (
+                "absolute_q_minus_confidence_z_times_action_stderr; "
+                "optionally_pairwise_gap_minus_pairwise_confidence_z_times_gap_stderr"
             ),
         },
         "checkpoint_selection": {

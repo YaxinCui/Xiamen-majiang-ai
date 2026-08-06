@@ -108,6 +108,10 @@ class TeacherDecision:
     # replicates.  ``None`` means the collector only ran one replicate, not
     # that the action value is known without uncertainty.
     action_value_stderrs: tuple[float, ...] | None = None
+    # Standard errors of paired (best action − this action) return gaps.  The
+    # collector forces all actions in one sampled world per replicate, so this
+    # captures their covariance and is more relevant to policy ranking.
+    action_value_gap_stderrs: tuple[float, ...] | None = None
 
     @property
     def chosen_action(self) -> GameAction:
@@ -126,6 +130,8 @@ class TeacherDecision:
             payload["action_values"] = list(self.action_values)
         if self.action_value_stderrs is not None:
             payload["action_value_stderrs"] = list(self.action_value_stderrs)
+        if self.action_value_gap_stderrs is not None:
+            payload["action_value_gap_stderrs"] = list(self.action_value_gap_stderrs)
         if self.seed is not None:
             payload["seed"] = self.seed
         return payload
@@ -169,6 +175,24 @@ class TeacherDecision:
             action_value_stderrs = tuple(
                 float(value) for value in raw_action_value_stderrs
             )
+        raw_action_value_gap_stderrs = payload.get("action_value_gap_stderrs")
+        action_value_gap_stderrs = None
+        if raw_action_value_gap_stderrs is not None:
+            if (
+                action_values is None
+                or not isinstance(raw_action_value_gap_stderrs, list)
+                or len(raw_action_value_gap_stderrs) != len(actions)
+                or not all(
+                    isinstance(value, (int, float))
+                    and math.isfinite(float(value))
+                    and float(value) >= 0
+                    for value in raw_action_value_gap_stderrs
+                )
+            ):
+                raise ValueError("动作价值差值标准误必须与动作价值逐项对应且非负")
+            action_value_gap_stderrs = tuple(
+                float(value) for value in raw_action_value_gap_stderrs
+            )
         return cls(
             profile=str(payload["profile"]),
             seed=int(payload["seed"]) if payload.get("seed") is not None else None,
@@ -178,6 +202,7 @@ class TeacherDecision:
             chosen_index=chosen_index,
             action_values=action_values,
             action_value_stderrs=action_value_stderrs,
+            action_value_gap_stderrs=action_value_gap_stderrs,
         )
 
 
@@ -211,6 +236,7 @@ class ActionValueDatasetSummary:
     action_counts: dict[str, int]
     mean_action_value_span: float
     mean_action_value_stderr: float | None
+    mean_action_value_gap_stderr: float | None
     rollout_batch_size: int
     batched_inference_calls: int
     batched_inference_decisions: int
@@ -2474,6 +2500,7 @@ def collect_counterfactual_action_value_trajectories(
     repeated_decisions = 0
     action_value_spans: list[float] = []
     action_value_stderrs: list[float] = []
+    action_value_gap_stderrs: list[float] = []
     for seed_offset in range(seed_count):
         hand_seed = seed + seed_offset
         split_group_id = uuid4().hex
@@ -2633,6 +2660,7 @@ def collect_counterfactual_action_value_trajectories(
                     sum(samples) / len(samples) for samples in action_return_samples
                 )
                 action_value_errors = None
+                action_value_gap_errors = None
                 if rollouts_per_action > 1:
                     action_value_errors = tuple(
                         math.sqrt(
@@ -2646,6 +2674,25 @@ def collect_counterfactual_action_value_trajectories(
                 chosen_index = max(
                     range(len(legal)), key=lambda index: (action_values[index], -index)
                 )
+                if rollouts_per_action > 1:
+                    best_samples = action_return_samples[chosen_index]
+                    action_value_gap_errors = tuple(
+                        0.0
+                        if index == chosen_index
+                        else math.sqrt(
+                            sum(
+                                (
+                                    (best_samples[sample_index] - samples[sample_index])
+                                    - (action_values[chosen_index] - action_values[index])
+                                )
+                                ** 2
+                                for sample_index in range(len(samples))
+                            )
+                            / (len(samples) * (len(samples) - 1))
+                        )
+                        for index, samples in enumerate(action_return_samples)
+                    )
+                    action_value_gap_stderrs.extend(action_value_gap_errors)
                 decision = TeacherDecision(
                     profile=rules.profile,
                     seed=hand_seed,
@@ -2655,6 +2702,7 @@ def collect_counterfactual_action_value_trajectories(
                     chosen_index=chosen_index,
                     action_values=action_values,
                     action_value_stderrs=action_value_errors,
+                    action_value_gap_stderrs=action_value_gap_errors,
                 )
                 action_counts[decision.chosen_action.kind] += 1
                 if snapshot.phase == "response":
@@ -2743,6 +2791,11 @@ def collect_counterfactual_action_value_trajectories(
         mean_action_value_stderr=(
             sum(action_value_stderrs) / len(action_value_stderrs)
             if action_value_stderrs
+            else None
+        ),
+        mean_action_value_gap_stderr=(
+            sum(action_value_gap_stderrs) / len(action_value_gap_stderrs)
+            if action_value_gap_stderrs
             else None
         ),
         rollout_batch_size=rollout_batch_size,
@@ -3079,6 +3132,7 @@ def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str,
     action_value_decisions = 0
     action_value_spans: list[float] = []
     action_value_stderrs: list[float] = []
+    action_value_gap_stderrs: list[float] = []
     for trajectory in records:
         rules_versions[trajectory.rules_version] += 1
         agent_profiles.update(trajectory.agent_profiles)
@@ -3094,6 +3148,8 @@ def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str,
                 )
             if decision.action_value_stderrs is not None:
                 action_value_stderrs.extend(decision.action_value_stderrs)
+            if decision.action_value_gap_stderrs is not None:
+                action_value_gap_stderrs.extend(decision.action_value_gap_stderrs)
     return {
         "version": TRAJECTORY_DATASET_VERSION,
         "hands": len(records),
@@ -3116,6 +3172,12 @@ def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str,
         "mean_action_value_stderr": (
             sum(action_value_stderrs) / len(action_value_stderrs)
             if action_value_stderrs
+            else None
+        ),
+        "action_value_gap_stderr_observations": len(action_value_gap_stderrs),
+        "mean_action_value_gap_stderr": (
+            sum(action_value_gap_stderrs) / len(action_value_gap_stderrs)
+            if action_value_gap_stderrs
             else None
         ),
     }

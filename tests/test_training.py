@@ -422,9 +422,11 @@ class TrainingTests(unittest.TestCase):
         self.assertGreater(summary.branch_rollouts, summary.decisions)
         self.assertEqual(summary.repeated_decisions, summary.decisions)
         self.assertIsNotNone(summary.mean_action_value_stderr)
+        self.assertIsNotNone(summary.mean_action_value_gap_stderr)
         manifest = trajectory_manifest(trajectories)
         self.assertEqual(manifest["action_value_decisions"], summary.decisions)
         self.assertGreater(manifest["action_value_stderr_observations"], 0)
+        self.assertGreater(manifest["action_value_gap_stderr_observations"], 0)
         for trajectory in trajectories:
             decision = trajectory.decisions[0]
             self.assertTrue(trajectory.outcome["synthetic"])
@@ -433,6 +435,9 @@ class TrainingTests(unittest.TestCase):
             )
             self.assertEqual(
                 len(decision.action_value_stderrs or ()), len(decision.legal_actions)
+            )
+            self.assertEqual(
+                len(decision.action_value_gap_stderrs or ()), len(decision.legal_actions)
             )
             self.assertEqual(
                 decision.chosen_index,
@@ -462,12 +467,14 @@ class TrainingTests(unittest.TestCase):
             serialized = path.read_text(encoding="utf-8")
             self.assertIn('"action_values"', serialized)
             self.assertIn('"action_value_stderrs"', serialized)
+            self.assertIn('"action_value_gap_stderrs"', serialized)
             self.assertNotIn('"seed"', serialized)
             restored = read_trajectory_jsonl(path)
             self.assertTrue(
                 all(
                     decision.action_values is not None
                     and decision.action_value_stderrs is not None
+                    and decision.action_value_gap_stderrs is not None
                     for trajectory in restored
                     for decision in trajectory.decisions
                 )
@@ -593,6 +600,7 @@ class TrainingTests(unittest.TestCase):
                     decision.chosen_index,
                     decision.action_values,
                     decision.action_value_stderrs,
+                    decision.action_value_gap_stderrs,
                     trajectory.public_actions,
                 )
                 for trajectory in trajectories

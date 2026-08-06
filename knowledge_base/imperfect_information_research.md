@@ -107,3 +107,16 @@ core 冒烟已验证该边界：16 局、8 路 batch、32 隐层 critic、一次
 保存的 `.pt` 仅含 actor `state_dict`，报告中不出现 `wall`、`opponent_hands` 或 `privileged_features`。
 这不是强度实验；critic 参数在训练进程结束后销毁，后续对照将以同一 actor 起点和 rollout 预算检查其
 是否实际降低 advantage 标准差并带来独立牌墙增益。
+
+## 2026-08-07：配对动作价值不确定性
+
+反事实 collector 在一个 rollout replicate 内会从同一个 actor-visible belief world 出发，对每个合法
+动作各强制一次，再使用同一冻结对手配置继续。因此动作回报并非独立；直接用各动作的边际标准误来判断
+“吃/碰/过哪个更好”会浪费 common-random-number 的协方差。新数据格式额外导出
+`action_value_gap_stderrs`：以该状态的均值最优动作为锚，记录 `Q(best)-Q(action)` 的配对标准误，仍只
+包含聚合分数、绝不包含 world、暗手或牌墙。
+
+真实 classic 一墙、4 个 response 决策、每动作 6 个 world 的校准中，边际动作价值标准误均值为 18.58 分，
+配对差值标准误为 12.13 分。训练器可通过 `--action-value-pairwise-confidence-z` 将未显著的差值收缩为
+平局；z=0 与旧均值 softmax 完全一致。正式数据必须继续报告两种误差，只有配对误差确实更小且按牌墙
+切分的验证集足够大时，才进入候选训练。

@@ -235,7 +235,9 @@ Teacher / DAgger 的标签只有“Teacher 会选哪一个动作”，因此上�
 `--action-value-margin-scale 16` 将其权重压到零；若采集时有多次 rollout，还可用
 `--action-value-stderr-scale` 下调高方差目标。若不同合法动作的标准误差异很大，
 `--action-value-confidence-z 1.0` 可将软偏好目标改为 `Q - z × stderr` 的逐动作下置信界；默认 `0`
-不改变原始均值目标。`--checkpoint-selection-source` 防止大量 Teacher
+不改变原始均值目标。对于每次在**同一 belief world**内评估的合法动作，采集器还会导出动作差值标准误；
+`--action-value-pairwise-confidence-z 1.0` 只保留大于该配对误差的动作价值间隔，通常比绝对 Q 标准误
+更适合判断吃/碰/过的排序可靠性。`--checkpoint-selection-source` 防止大量 Teacher
 样本掩盖在线动作价值留出集；当训练 Q 头时，`--checkpoint-selection-metric action_value_huber_loss`
 应和该来源配套，避免按另一个策略目标选择 epoch。最终是否保留
 checkpoint，仍由全新牌墙上的四座轮换配对评测决定。

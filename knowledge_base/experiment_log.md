@@ -207,3 +207,11 @@ checkpoint。训练器新增逐动作下置信界软标签 `Q - z × stderr`（`
 16 局 core CLI 冒烟（run4 actor、8 路 rollout batch、32 隐层 critic、1 PPO epoch）产生 143 个候选
 决策，actor checkpoint 中没有 critic 参数，报告没有 `wall`、`opponent_hands` 或 `privileged_features`。
 该过程仅验证可执行性和隔离边界，不产生可比较强度数字。
+
+## 2026-08-07：配对动作价值误差（采集器升级）
+
+反事实分支已在同一 belief world、同一冻结对手配置中对所有合法动作执行，故新增对每个动作相对于
+均值最优动作的配对 gap 标准误，而不仅是各动作边际 Q 标准误。真实 classic 校准（1 墙四座、4 个
+response、每动作 6 world）边际标准误为 **18.58** 分，配对 gap 标准误为 **12.13** 分；这支持在策略
+软标签中按配对置信界收缩不可靠的排序。该字段没有保存任何私有 world。当前正在采集按物理牌墙分组的
+正式数据；尚未训练或做强度判断。

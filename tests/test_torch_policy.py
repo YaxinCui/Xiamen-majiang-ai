@@ -111,6 +111,45 @@ class CheckpointSelectionTests(unittest.TestCase):
                 confidence_z=-0.1,
             )
 
+    def test_rollout_soft_preference_can_shrink_only_uncertain_paired_gaps(self):
+        from scripts.train_policy_value import policy_preference_loss
+
+        logits = torch.tensor([[4.0, -4.0]])
+        chosen = torch.tensor([0])
+        action_values = torch.tensor([[10.0, 0.0]])
+        rollout_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True]])
+        raw_loss = policy_preference_loss(
+            logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=rollout_mask,
+            action_mask=legal,
+            temperature=2.0,
+        )
+        uncertain_gap_loss = policy_preference_loss(
+            logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=rollout_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_gap_stderrs=torch.tensor([[0.0, 30.0]]),
+            pairwise_confidence_z=0.5,
+        )
+        certain_gap_loss = policy_preference_loss(
+            logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=rollout_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_gap_stderrs=torch.zeros((1, 2)),
+            pairwise_confidence_z=0.5,
+        )
+        self.assertGreater(float(uncertain_gap_loss[0]), float(raw_loss[0]))
+        self.assertAlmostEqual(float(certain_gap_loss[0]), float(raw_loss[0]))
+
     def test_direct_action_value_loss_keeps_terminal_score_magnitude(self):
         from scripts.train_policy_value import action_value_regression_loss
 
@@ -211,6 +250,7 @@ class CheckpointSelectionTests(unittest.TestCase):
             source="test",
             action_values=None,
             action_value_stderrs=None,
+            action_value_gap_stderrs=None,
             value_target=None,
             sample_weight=0.5,
         )
