@@ -222,3 +222,23 @@ response、每动作 6 world）边际标准误为 **18.58** 分，配对 gap 标
 confidence z=1、反事实权重 1，在全新 22,980,000 起的 200 墙筛选为 **+0.84 ± 0.70**，95% CI
 **[−0.53, +2.21]**。未通过筛选，不做 400 墙终检、不晋升。结论是配对估计显著降低标签方差，但这批
 状态量和离线 policy 更新仍不足以形成可验证胜率；下一轮转向更大规模、方差更低的 on-policy 训练。
+
+## 2026-08-07：训练期特权 critic 的受控 PPO 反证
+
+`torch-ppo-classic-privileged-critic-v1-run1` 固定 run4 起点、经典档、3 × 1,024 局、32 路 rollout batch、
+75% Teacher / 25% 冻结 run3 对手；只开启 128 隐层、损失权重 0.25 的训练期特权 critic。共产生 33,688 个
+候选决策。三个迭代的 advantage 标准差依次为 0.591、0.578、0.555，critic Huber loss 为 0.164、0.161、
+0.146；这是同一 run 内的优化诊断，旧 PPO 报告没有该方差字段，**不能**据此声称相对无 critic 的因果降方差。
+三份 actor checkpoint 均不含 critic 参数或 `wall`、`opponent_hands`、`privileged_features` 字段。
+
+在同一组全新 23,000,000 起的 100 个物理牌墙筛选中，相对 run4 的配对净分为：iteration 1 **+0.545 ±
+0.583**，95% CI **[−0.597, +1.687]**；iteration 2 **−1.285 ± 0.834**，95% CI **[−2.921, +0.351]**；
+iteration 3 **−0.223 ± 0.740**，95% CI **[−1.673, +1.228]**。没有一个 iteration 通过正向下界门槛，故不做
+400 墙终检、不晋升。结论是 privacy boundary 和训练管线成立，但当前 critic 配置及 3k 局 PPO 没有给出可验证
+强度增益；下一步应先补齐固定策略、同一 rollout 的 critic-on/off 方差 A/B，再决定是否继续投入该路线。
+
+该 A/B 现已完成：用 run4 actor、相同的 run3/Teacher 对手池，先以 512 局独立墙校准 128 隐层 critic，再在
+另 512 局（5,704 个候选决策）上以完全相同的 actor 轨迹比较基线。轨迹逐条一致；公开 value 的残差标准差/
+均方为 **0.513 / 0.263**，critic 为 **0.591 / 0.350**，残差均方变化为 **−33.0%**（负数表示劣化）。这直接
+否定“当前 critic 已降低 PPO 方差”的假设：停止该配置的进一步 self-play，不生成或晋升任何模型。新增
+`scripts/measure_ppo_baseline_variance.py` 固化该检验，且仅写入聚合残差；critic、墙与暗手永不落盘。

@@ -110,6 +110,7 @@ class TorchPpoTests(unittest.TestCase):
             PrivilegedCritic,
             collect_rollouts_batched,
             ppo_update,
+            train_privileged_critic,
         )
         from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
 
@@ -156,6 +157,35 @@ class TorchPpoTests(unittest.TestCase):
             payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
         self.assertFalse(
             any("privileged" in key or "critic" in key for key in payload["state_dict"])
+        )
+
+        actor_before = {
+            name: value.detach().clone() for name, value in policy.network.state_dict().items()
+        }
+        critic_before = {
+            name: value.detach().clone() for name, value in critic.state_dict().items()
+        }
+        critic_metrics = train_privileged_critic(
+            critic,
+            steps,
+            device=policy.device,
+            batch_size=32,
+            epochs=1,
+            learning_rate=0.0001,
+            seed=852,
+        )
+        self.assertGreater(critic_metrics["updates"], 0)
+        self.assertTrue(
+            all(
+                torch.equal(actor_before[name], value)
+                for name, value in policy.network.state_dict().items()
+            )
+        )
+        self.assertTrue(
+            any(
+                not torch.equal(critic_before[name], value)
+                for name, value in critic.state_dict().items()
+            )
         )
 
 

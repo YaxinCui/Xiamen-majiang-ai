@@ -276,6 +276,20 @@ checkpoint，仍由全新牌墙上的四座轮换配对评测决定。
   --device cuda --output-dir artifacts/torch-ppo-classic-privileged-critic-v1
 ```
 
+在增加此类 PPO 预算前，先运行固定 actor 的 critic-on/off 方差 A/B。该工具用独立墙组校准 critic，随后
+在**同一** actor、牌墙、座位和对手抽样下回放两次；只有轨迹逐条一致时才比较 `reward - baseline` 的聚合
+残差。它不保存 critic、墙、暗手或私有特征：
+
+```bash
+.venv/bin/python scripts/measure_ppo_baseline_variance.py \
+  --checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --profile classic --calibration-episodes 512 --evaluation-episodes 512 \
+  --rollout-batch-size 32 \
+  --opponent-checkpoint artifacts/policy-value-classic-v1-run3/policy-value.pt \
+  --teacher-opponent-probability 0.75 --device cuda \
+  --output artifacts/ppo-baseline-variance.json
+```
+
 针对 `.pt` checkpoint，采集和评测命令会记录推理设备；同一轮比较必须固定同一设备，避免
 CPU/GPU 浮点舍入在临界动作处造成不必要的策略差异。
 

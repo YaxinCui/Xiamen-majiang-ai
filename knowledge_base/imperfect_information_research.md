@@ -125,3 +125,20 @@ core 冒烟已验证该边界：16 局、8 路 batch、32 隐层 critic、一次
 14.33 分、配对 gap 误差 9.96 分，说明协方差修正确实有效。尽管如此，pairwise z=1 的 policy 候选在
 22,980,000 起 200 个新牌墙上相对 run4 的结果为 +0.84 ± 0.70，95% 区间 [-0.53, +2.21]。这不足以
 进入 400 墙终检：更好的静态反事实标签不能替代足量的 on-policy 学习与长程 credit assignment。
+
+## 2026-08-07：特权 critic 的首个强度筛选
+
+训练期 centralized critic 在 3 × 1,024 局、75% Teacher / 25% 冻结 run3 的 PPO 中保持了既定隔离边界：
+actor checkpoint 没有 critic 权重，导出 metadata 也不含墙、对手手牌或 oracle feature 名称。该 run 中的
+advantage 标准差从第 1 轮的 0.591 变为第 3 轮的 0.555，但这不是 critic-on/off A/B，不能当作降方差证据。
+
+真正的外部筛选也没有支持继续扩大：三个 PPO iteration 在同一 100 墙组上分别为 +0.545 ± 0.583、
+−1.285 ± 0.834、−0.223 ± 0.740，三个 95% 区间均跨零。故不进入 400 墙终检。下一个最小可证伪实验
+应在**相同冻结 actor、相同牌墙、相同对手抽样**上仅切换 critic，记录 reward-minus-baseline 的方差；若无
+稳定下降，就停止在该 critic 路线投入更多 self-play 预算。
+
+该最小 A/B 已经否定当前路线：512 局独立校准后，在另一组 512 局、5,704 个逐条相同的 actor 决策上，公开
+value baseline 的残差 std/MSE 为 0.513/0.263，特权 critic 为 0.591/0.350，MSE **恶化 33.0%**。因此这不是
+“方差稍降但强度未升”的情况，而是 critic 本身尚未比公开 value 更准确；暂停该配置的 PPO 扩容。保留
+`measure_ppo_baseline_variance.py` 作为后续任何 oracle baseline 的硬性门槛：先通过固定策略 A/B，才允许进入
+强度训练与未见牌墙筛选。

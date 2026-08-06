@@ -723,6 +723,74 @@ def tensors(
     return candidates, action_mask, actions, old_log_probabilities, old_values, rewards
 
 
+def _privileged_critic_training_tensors(
+    steps: Sequence[PpoStep], *, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return only in-process oracle inputs and terminal rewards for a critic.
+
+    This is deliberately separate from the actor tensors so an experiment can
+    calibrate a centralized baseline without taking an actor optimization step.
+    Callers must keep both returned tensors inside the current trainer process.
+    """
+
+    if not steps:
+        raise ValueError("privileged critic 校准没有 rollout step")
+    if any(step.privileged_features is None for step in steps):
+        raise ValueError("启用 privileged critic 的 PPO step 缺少内存特征")
+    inputs = torch.tensor(
+        [step.privileged_features for step in steps],
+        dtype=torch.float32,
+        device=device,
+    )
+    if inputs.shape != (len(steps), PRIVILEGED_CRITIC_FEATURE_DIM):
+        raise ValueError("privileged critic PPO 特征维度不匹配")
+    rewards = torch.tensor(
+        [step.reward for step in steps], dtype=torch.float32, device=device
+    )
+    return inputs, rewards
+
+
+def train_privileged_critic(
+    privileged_critic: PrivilegedCritic,
+    steps: Sequence[PpoStep],
+    *,
+    device: torch.device,
+    batch_size: int,
+    epochs: int,
+    learning_rate: float,
+    seed: int,
+) -> dict[str, float]:
+    """Fit only the training-time critic, never the deployable actor.
+
+    This supports a fixed-policy critic-on/off variance A/B.  It does not
+    mutate an actor or serialize data; the caller owns the short-lived critic.
+    """
+
+    if batch_size <= 0 or epochs <= 0 or learning_rate <= 0:
+        raise ValueError("privileged critic 校准超参数不合法")
+    inputs, rewards = _privileged_critic_training_tensors(steps, device=device)
+    optimizer = torch.optim.AdamW(
+        privileged_critic.parameters(), lr=learning_rate, weight_decay=0.0001
+    )
+    indices = list(range(len(steps)))
+    total_loss = 0.0
+    updates = 0
+    privileged_critic.train()
+    for epoch in range(epochs):
+        random.Random(seed + epoch).shuffle(indices)
+        for start in range(0, len(indices), batch_size):
+            row_indices = torch.tensor(indices[start : start + batch_size], device=device)
+            loss = F.smooth_l1_loss(privileged_critic(inputs[row_indices]), rewards[row_indices])
+            optimizer.zero_grad(set_to_none=True)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(privileged_critic.parameters(), max_norm=5.0)
+            optimizer.step()
+            total_loss += float(loss.detach().cpu())
+            updates += 1
+    privileged_critic.eval()
+    return {"updates": float(updates), "loss": total_loss / updates}
+
+
 def ppo_update(
     network: CandidatePolicyValueNetwork,
     steps: Sequence[PpoStep],
@@ -747,15 +815,9 @@ def ppo_update(
         raise ValueError("privileged critic weight 不能为负数")
     privileged_inputs: torch.Tensor | None = None
     if privileged_critic is not None:
-        if any(step.privileged_features is None for step in steps):
-            raise ValueError("启用 privileged critic 的 PPO step 缺少内存特征")
-        privileged_inputs = torch.tensor(
-            [step.privileged_features for step in steps],
-            dtype=torch.float32,
-            device=device,
+        privileged_inputs, _ = _privileged_critic_training_tensors(
+            steps, device=device
         )
-        if privileged_inputs.shape != (len(steps), PRIVILEGED_CRITIC_FEATURE_DIM):
-            raise ValueError("privileged critic PPO 特征维度不匹配")
     advantages = rewards - old_values
     advantages = (advantages - advantages.mean()) / advantages.std(unbiased=False).clamp_min(1e-6)
     optimizer = torch.optim.AdamW(
