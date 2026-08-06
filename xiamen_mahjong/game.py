@@ -91,6 +91,13 @@ class XiamenMahjongGame:
         self.score_breakdown: dict[str, Any] | None = None
         self.gold_discard_lock_seat: int | None = None
         self.last_drawn_tiles: list[int | None] = [None] * self.rules.player_count
+        # Replacement flowers are public. Keep their ordered faces alongside
+        # the most recent physical draw so the corresponding public ``draw``
+        # event can preserve that fact without exposing the final playable
+        # tile or any wall position.
+        self.last_drawn_flowers: list[tuple[int, ...]] = [
+            () for _ in range(self.rules.player_count)
+        ]
         self.first_turn_pending: set[int] = set(range(self.rules.player_count))
         self.opening_wait_seats: set[int] = set()
         self.pending_tour_seat: int | None = None
@@ -151,15 +158,19 @@ class XiamenMahjongGame:
         raise RuntimeError("wall has no base tile for the gold indicator")
 
     def _draw_for_player(self, player: Player) -> int | None:
+        drawn_flowers: list[int] = []
         while self.wall:
             tile = self.wall.pop(0)
             if tile >= BASE_TILE_COUNT:
                 player.flowers.append(tile)
+                drawn_flowers.append(tile)
                 self._event("补花", f"{self._seat_name(player.seat)}补到花牌")
                 continue
             player.hand.append(tile)
             player.hand.sort()
+            self.last_drawn_flowers[player.seat] = tuple(drawn_flowers)
             return tile
+        self.last_drawn_flowers[player.seat] = tuple(drawn_flowers)
         return None
 
     @property
@@ -247,7 +258,13 @@ class XiamenMahjongGame:
         self.phase = "discard"
         self.last_drawn_tiles[player_id] = tile
         self.turn_count += 1
-        self._record_public_action("draw", seat=player_id)
+        self._record_public_action(
+            "draw",
+            seat=player_id,
+            # Flower faces are exposed at the table; the actual playable draw
+            # remains concealed. Empty tuples retain the legacy compact event.
+            tiles=self.last_drawn_flowers[player_id],
+        )
         if self._tour_resolution_level(player_id):
             labels = {1: "游金", 2: "双游", 3: "三游"}
             self.message = f"{self._seat_name(player_id)}进入{labels[self.tour_state['level']]}决胜摸牌"

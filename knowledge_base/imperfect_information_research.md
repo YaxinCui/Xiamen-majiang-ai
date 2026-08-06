@@ -105,10 +105,14 @@ ESS 为 **190.04/256 = 0.742**。这只说明该**一个**可枚举的 setup 约
 弃牌选择、暗杠或多个历史事件，不是 full-history posterior，未接入 collector、Q 标签或网页。下一步须在同一
 exact-density 原则下加入一个“对手摸牌后弃牌”的 transition，并先以小牌墙精确后验校准。
 
-在设计该 transition 前还发现一个公开观测缺口：对手补花后的花数量对玩家可见，但旧 `public_actions` 没有把
-补花定位到逐事件历史中。resampled replay 现对任何包含**后续对手补花**的 core snapshot 明确返回
-`opponent_flower_history_unsupported`，而不是把它误当作可条件化世界；源局 replay oracle 不受此限制。补花
-public transition 与其 density 是 draw→discard proposal 的前置工作，未完成前相关前缀保持拒绝。
+为 draw→discard transition 补齐了一项公开观测：普通摸牌的 `public_actions` 现在以 `draw.tiles` 按顺序记录
+该次摸牌先补到的花牌牌面；真正摸到的可打牌仍不公开。重放会校验最终对手花数与这些事件的累加一致，旧记录或
+补杠／明杠 replacement draw 等未定位补花仍返回 `opponent_flower_history_unsupported`。对已定位的普通补花，
+已在小牌墙验证 wall-only 的条件采样与解析 `p/q`：对给定公开花序列，proposal 固定该序列，并按剩余底牌的物理
+张数抽取暗摸牌，重要性修正是“该序列后紧接任意底牌”的精确先验概率。它尚未联立未知对手初始手牌／花牌分配，
+因此仍不能称为完整 setup-to-draw density；resampled replay 继续返回
+`opponent_flower_transition_unsupported`，不会把未条件化墙采样伪装成 posterior；源局 replay oracle 不受影响。
+下一步是推导该 wall 条件与结构化 setup allocation 的联合密度，再将其并入 draw→discard proposal。
 
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 

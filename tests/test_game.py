@@ -14,6 +14,24 @@ class GameTests(unittest.TestCase):
         self.assertTrue(all(player["hand"] is None for player in state["players"][1:]))
         self.assertLess(state["gold_tile"]["id"], BASE_TILE_COUNT)
 
+    def test_public_draw_records_replacement_flower_faces(self):
+        game = XiamenMahjongGame(seed=20260807, auto_advance=False)
+        player = game.players[1]
+        # A normal draw may reveal one or more flower replacements before the
+        # concealed playable tile.  The table sees the former, never the latter.
+        game.wall = [34, 35, 0]
+
+        game._start_turn(1)
+
+        event = game.public_actions[-1]
+        self.assertEqual(event["kind"], "draw")
+        self.assertEqual(event["seat"], 1)
+        self.assertEqual(event["tiles"], [34, 35])
+        self.assertNotIn("tile", event)
+        self.assertEqual(game.last_drawn_flowers[1], (34, 35))
+        self.assertEqual(player.flowers[-2:], [34, 35])
+        self.assertEqual(game.last_drawn_tiles[1], 0)
+
     def test_human_legal_action_advances_or_requests_a_response(self):
         game = XiamenMahjongGame(seed=7)
         state = game.public_state()

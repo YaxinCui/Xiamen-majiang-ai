@@ -92,9 +92,11 @@ MLP 和游金课程。当前 MLP 的 Teacher 动作一致率不能视为实战�
 ESS/接受率和不泄露私有世界的回归测试。只有连续事件通过这些门槛，才可新建独立 multi-world value 消融；禁止把
 当前局部或 repair audit 直接接入训练、选牌或网页。
 
-其中补花必须作为公开 transition 先行建模：它改变可见花数量，不能仅在 private wall 内悄悄跳过。现有 resampled
-history replay 会拒绝含后续对手补花、但未在 `public_actions` 中定位的前缀；这是保护正确性的限制，不是缺失事件
-可以忽略的许可。
+其中补花必须作为公开 transition 先行建模：它改变可见花数量，不能仅在 private wall 内悄悄跳过。普通摸牌的
+`draw.tiles` 现已按顺序记录公开补花牌面（不记录随后可打出的暗摸牌）。小牌墙已验证单次普通摸牌的 wall-only
+条件采样：给定公开花序列，`p/q` 是该花序列后紧接任意底牌的解析概率，暗摸底牌按剩余张数抽样。它尚未与未知
+对手初始手牌／花牌分配联立成完整 setup density，因此 resampled history replay 仍会明确拒绝此类前缀；补杠／明杠
+后的 replacement draw 也尚未形成公开 draw transition。这是保护正确性的限制，不是缺失事件可以忽略的许可。
 
 ## 实验记录模板
 

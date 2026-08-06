@@ -22,6 +22,7 @@ from xiamen_mahjong.training import (
     _sample_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
     _sample_replay_setup_for_actor,
+    _sample_wall_given_normal_draw_flowers,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
     _turn_actions,
@@ -108,6 +109,34 @@ class TrainingTests(unittest.TestCase):
             double_one_hands += hand.count(1) == 2
         self.assertAlmostEqual(double_one_hands / samples, 1.0 / 5.0, delta=0.03)
 
+    def test_normal_draw_flower_wall_proposal_has_exact_density(self):
+        # In [0, 0, 1, 34], observing flower 34 and then a hidden base tile
+        # has probability 1/4.  Conditional on that fact, base 0 has mass 2/3
+        # and base 1 has mass 1/3; the remaining suffix is unconstrained.
+        samples = 3_000
+        base_counts: Counter[int] = Counter()
+        for index in range(samples):
+            sampled = _sample_wall_given_normal_draw_flowers(
+                Counter({0: 2, 1: 1, 34: 1}),
+                observed_flowers=(34,),
+                rng=random.Random(8_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            wall, condition_probability = sampled or ([], 0.0)
+            self.assertEqual(wall[0], 34)
+            self.assertIn(wall[1], {0, 1})
+            self.assertAlmostEqual(condition_probability, 1.0 / 4.0)
+            base_counts[wall[1]] += 1
+        self.assertAlmostEqual(base_counts[0] / samples, 2.0 / 3.0, delta=0.035)
+        self.assertAlmostEqual(base_counts[1] / samples, 1.0 / 3.0, delta=0.035)
+        self.assertIsNone(
+            _sample_wall_given_normal_draw_flowers(
+                Counter({0: 2, 1: 1, 34: 1}),
+                observed_flowers=(35,),
+                rng=random.Random(1),
+            )
+        )
+
     def test_exact_density_audit_covers_only_initial_response_claims(self):
         teacher = HeuristicTeacherAgent()
         game = XiamenMahjongGame(
@@ -168,7 +197,7 @@ class TrainingTests(unittest.TestCase):
         self.assertNotIn("wall", payload)
         self.assertNotIn("opponent_hands", payload)
 
-    def test_resampled_history_rejects_unpositioned_opponent_flower_events(self):
+    def test_resampled_history_rejects_positioned_opponent_flower_transition_without_density(self):
         teacher = HeuristicTeacherAgent()
         game = XiamenMahjongGame(
             seed=2,
@@ -191,6 +220,20 @@ class TrainingTests(unittest.TestCase):
                 for seat in range(1, 4)
             )
         )
+        observed_flowers = [
+            event
+            for event in snapshot.game.public_actions
+            if event.get("kind") == "draw"
+            and event.get("seat") in {1, 2, 3}
+            and event.get("tiles")
+        ]
+        self.assertTrue(observed_flowers)
+        self.assertTrue(
+            all(
+                all(isinstance(tile, int) and tile >= 34 for tile in event["tiles"])
+                for event in observed_flowers
+            )
+        )
         proposal = _sample_replay_setup_for_actor(snapshot, rng=random.Random(929))
         self.assertIsNotNone(proposal)
         replay = _replay_snapshot_public_history(
@@ -200,7 +243,9 @@ class TrainingTests(unittest.TestCase):
             condition_actor_draws=True,
         )
         self.assertFalse(replay.accepted)
-        self.assertEqual(replay.rejection_reason, "opponent_flower_history_unsupported")
+        self.assertEqual(
+            replay.rejection_reason, "opponent_flower_transition_unsupported"
+        )
 
     def test_history_replay_prefers_available_policy_scores_over_argmax_fallback(self):
         game = XiamenMahjongGame(

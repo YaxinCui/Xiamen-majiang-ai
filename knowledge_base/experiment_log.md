@@ -451,10 +451,12 @@ collector/Q 数据门槛；其作用是将下一步明确限定为“可计算�
 这只是一个极窄 setup 事件的**构造正确性**验证：后续摸牌、弃牌、暗杠与多个事件尚未有 density，故不改变 run4、
 不接入 collector/Q/网页，也不能解释为完整 history posterior 或模型强度提升。
 
-继续扩展到 draw→discard 前发现：对手补花的数量虽对玩家可见，但旧 `public_actions` 还未记录其发生位置。为避免
-把遗漏公开观测的 hidden world 当成 posterior，resampled core history replay 现在会拒绝任何含后续对手补花的
-snapshot，理由为 `opponent_flower_history_unsupported`；source-world replay oracle 不受影响。此拒绝有独立回归测试。
-因此下一个 proposal 不是直接重抽墙，而是先把补花写为公开、可重放、可计算 density 的 transition。
+为扩展 draw→discard，普通摸牌的 `public_actions` 已新增 `draw.tiles`：它按顺序记录该次摸牌公开补到的花牌，
+不记录随后拿到的可打牌。重放先校验对手最终花数能由这些事件解释；旧记录或补杠／明杠后的未定位 replacement draw
+仍拒绝为 `opponent_flower_history_unsupported`。小牌墙已验证 wall-only 条件 proposal：固定公开花序列、依剩余物理
+张数抽取隐藏底牌，`p/q` 等于该观察的解析先验概率；其底牌条件分布也有独立回归测试。它尚未与未知对手 setup
+allocation 形成联合 density，因此 resampled replay 仍以 `opponent_flower_transition_unsupported` 安全拒绝；回归测试
+同时验证公开牌面和该门禁。下一步不是直接重抽墙，而是推导这两部分的联合 density，再接入 draw→discard proposal。
 
 ## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
 

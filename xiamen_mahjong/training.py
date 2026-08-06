@@ -1775,6 +1775,68 @@ def _sample_multivariate_hand_given_required_tiles(
     return selected, valid_ways / all_ways
 
 
+def _sample_wall_given_normal_draw_flowers(
+    pool: Counter[int],
+    *,
+    observed_flowers: Sequence[int],
+    rng: random.Random,
+) -> tuple[list[int], float] | None:
+    """Sample an exact wall permutation conditional on one normal draw.
+
+    A normal draw repeatedly reveals flowers, then stops at the first base
+    tile.  Given a uniform permutation of the physical cards in ``pool``,
+    this routine samples exactly from the conditional law in which the
+    revealed flower *faces and order* equal ``observed_flowers``.  The
+    playable base tile remains hidden and is drawn according to its
+    conditional multiplicity.  The return value is ``(wall, P(observation))``
+    so a caller using this conditional proposal has the explicit importance
+    factor ``p / q = P(observation)``.
+
+    This is deliberately a wall-only probability primitive.  It does not yet
+    condition the earlier allocation of unknown opponent hands and flowers,
+    nor authorize a history or Q-value collector.
+    """
+
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    total = sum(remaining.values())
+    if total <= 0 or any(
+        not isinstance(tile, int) or is_base_tile(tile) for tile in observed_flowers
+    ):
+        return None
+
+    prefix: list[int] = []
+    probability = 1.0
+    for flower in observed_flowers:
+        count = remaining[flower]
+        if count <= 0 or total <= 0:
+            return None
+        probability *= count / total
+        remaining[flower] -= 1
+        total -= 1
+        prefix.append(int(flower))
+
+    base_total = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile) and count > 0
+    )
+    if base_total <= 0 or total <= 0:
+        return None
+    probability *= base_total / total
+    base_tile = _weighted_choice(
+        [
+            (tile, count)
+            for tile, count in remaining.items()
+            if is_base_tile(tile) and count > 0
+        ],
+        rng,
+    )
+    remaining[base_tile] -= 1
+    suffix = [
+        tile for tile, count in remaining.items() for _ in range(max(0, count))
+    ]
+    rng.shuffle(suffix)
+    return [*prefix, base_tile, *suffix], probability
+
+
 def _sample_replay_setup_for_actor(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
@@ -2201,26 +2263,53 @@ def _replay_snapshot_public_history(
         return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "setup_prefix")
     if game.rules.profile != "core":
         return _HistoryReplayResult(False, 0.0, float("-inf"), cursor, "profile")
-    if condition_actor_draws and any(
-        len(snapshot.game.players[seat].flowers)
-        != len(snapshot.initial_game.players[seat].flowers)
-        for seat in range(game.rules.player_count)
-        if seat != trace.actor_seat
-    ):
-        # Opponent flower counts are publicly visible, but the historic
-        # ``public_actions`` format does not yet position their replacement
-        # draws relative to other events. A resampled hidden-world replay
-        # therefore cannot honestly condition on a later opponent flower.
-        # Reject this prefix until an explicit public flower transition and
-        # density are implemented; source-world replay remains available as a
-        # rules oracle and does not take this resampling path.
-        return _HistoryReplayResult(
-            False,
-            0.0,
-            float("-inf"),
-            cursor,
-            "opponent_flower_history_unsupported",
-        )
+    if condition_actor_draws:
+        observed_opponent_flowers = Counter()
+        for event in all_target_events:
+            if event.get("kind") != "draw" or event.get("seat") == trace.actor_seat:
+                continue
+            flowers = event.get("tiles", ())
+            if not isinstance(flowers, (list, tuple)) or not all(
+                isinstance(tile, int) and not is_base_tile(tile) for tile in flowers
+            ):
+                return _HistoryReplayResult(
+                    False,
+                    0.0,
+                    float("-inf"),
+                    cursor,
+                    "malformed_public_draw_flowers",
+                )
+            observed_opponent_flowers[int(event["seat"])] += len(flowers)
+        if any(
+            len(snapshot.game.players[seat].flowers)
+            != len(snapshot.initial_game.players[seat].flowers)
+            + observed_opponent_flowers[seat]
+            for seat in range(game.rules.player_count)
+            if seat != trace.actor_seat
+        ):
+            # Legacy/malformed histories without positioned replacement
+            # flowers remain unusable for a resampled belief. A source-world
+            # replay is still valid as a rules oracle because it never makes
+            # a posterior claim.
+            return _HistoryReplayResult(
+                False,
+                0.0,
+                float("-inf"),
+                cursor,
+                "opponent_flower_history_unsupported",
+            )
+        if any(observed_opponent_flowers.values()):
+            # The public fact is now represented, but an exact conditional
+            # wall transition for flower replacements has not yet been
+            # derived. Keep this branch explicit rather than let an
+            # unconditioned wall sampler manufacture a posterior.
+            return _HistoryReplayResult(
+                False,
+                0.0,
+                float("-inf"),
+                cursor,
+                "opponent_flower_transition_unsupported",
+            )
 
     # The opening dealer draw already exists in ``initial_game``.  Later
     # candidate draws must agree with the private trace even when no public
@@ -2242,6 +2331,7 @@ def _replay_snapshot_public_history(
                 return original_draw(player)
             # Draw the next unknown physical tile; reservations represent
             # later actor-known cards and must never be handed to an opponent.
+            drawn_flowers: list[int] = []
             while game.wall:
                 try:
                     index = next(
@@ -2254,11 +2344,14 @@ def _replay_snapshot_public_history(
                 tile = game.wall.pop(index)
                 if tile >= BASE_TILE_COUNT:
                     player.flowers.append(tile)
+                    drawn_flowers.append(tile)
                     game._event("补花", f"{game._seat_name(player.seat)}补到花牌")
                     continue
                 player.hand.append(tile)
                 player.hand.sort()
+                game.last_drawn_flowers[player.seat] = tuple(drawn_flowers)
                 return tile
+            game.last_drawn_flowers[player.seat] = tuple(drawn_flowers)
             return None
         if next_draw is None:
             next_draw = next(remaining_draws, None)
@@ -2279,6 +2372,7 @@ def _replay_snapshot_public_history(
             tile = next_draw.tile
             player.hand.append(tile)
             player.hand.sort()
+            game.last_drawn_flowers[player.seat] = tuple(next_draw.flowers)
         else:
             tile = original_draw(player)
         observed_flowers = tuple(player.flowers[known_actor_flowers:])
@@ -3029,6 +3123,13 @@ def _latest_normal_draw_discard_pre_state(
     # This draw is public, so restoring the just-drawn tile does not inject a
     # source-world secret into the opponent's policy observation.
     pre_state.last_drawn_tiles[discarder] = tile
+    draw_flowers = draw_event.get("tiles", ())
+    pre_state.last_drawn_flowers[discarder] = (
+        tuple(draw_flowers)
+        if isinstance(draw_flowers, (list, tuple))
+        and all(isinstance(flower, int) and not is_base_tile(flower) for flower in draw_flowers)
+        else ()
+    )
     if pre_state.rules.profile == "classic":
         # The gold-lock flag is also a deterministic public-history predicate:
         # a seat is locked exactly when its previous ordinary discard was gold.
