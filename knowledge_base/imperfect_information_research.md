@@ -75,6 +75,19 @@ posterior，也不能替换现有局部 SIR 或网页默认 run4。
 proposal `q(01)=3/4, q(11)=1/4` 在用 `p/q` 修正后精确恢复 `P(01 | 弃1)=16/19`。这只验证重要性
 修正 API 和带重复物理牌的枚举契约；尚未给真实修复 proposal 赋予密度，也不改变上述拒绝结论。
 
+## 2026-08-07：不改写暗牌的 sequential SMC 基线（审计结果：淘汰）
+
+新增 `core_public_history_sequential_smc_v0`，只用于 core audit。它不执行任何 tile repair：每个粒子
+从本家可见 setup prior 采样，故初始 `p/q=1`；随后把公开日志按“一个玩家动作 + 该动作自动生成的 draw/result”
+分组逐步重放，以增量冻结行为似然更新权重，并在预重采样 ESS 低时使用标准 systematic resampling。这个分组
+避免把一次弃牌导致的自动摸牌误判为 prefix mismatch；粒子世界、随机状态和重放游戏均不导出。
+
+同一 core seed 953、9 个公开 action 的夹具中，200 粒子在仅完成 4 个公开 action 后即全部不一致；1024
+粒子可走完全程，但最小预重采样 ESS 为 **1/1024**，随后重采样导致最终表面权重重新均匀。由此可见，标准
+SMC 解决了“全前缀一次性 rejection”但没有解决稀有公开弃牌/副露造成的极端退化。它也未通过数据门槛，
+不会接入 collector；下一步必须是具有显式密度、且在可枚举小牌墙上校准 posterior 误差的条件 proposal，
+并用未重采样 ESS 而不是最终均匀权重作门槛。
+
 ## 2026-08-06：受限的最新弃牌局部 SIR（默认关闭）
 
 作为完整序列 proposal 前的受控中间步骤，新增 `latest_normal_draw_discard_sir_v1`。它只作用于

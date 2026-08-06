@@ -428,6 +428,17 @@ Q 训练或实战评测门槛；run4 和网页默认策略不变。下一步应�
 `p/q` 输入后，过滤器精确恢复 `16/19`。这仅是 proposal-density API 的校准，不是厦门麻将 belief 或训练样本；
 真实全历史方案必须先满足同类枚举测试，才有资格替代当前 audit-only repair。
 
+对同一 core seed 953、9 个公开 action、200 个固定 proposal 粒子的复核显示，单靠放宽确定性
+Teacher fallback 的均匀平滑也不能挽救全历史权重：`uniform_mixture=0.02/0.10/0.25/0.50` 时，接受数均为
+192，行为权重 ESS 比例仅为 **1.09% / 1.33% / 1.94% / 4.16%**。故不能用“更大 uniform noise”伪装出
+健康 posterior；下一代方案需要可校准的行为能量模型与显式 proposal density，两者缺一不可。
+
+为排除“整段 rejection 没有逐步重采样”的解释，又实现了 `core_public_history_sequential_smc_v0`：setup prior
+保持 `p/q=1`、不交换暗牌，公开日志按玩家动作与其自动 draw/result 分组；每组按增量行为似然更新、低 ESS
+时 systematic resample。seed 953 的 9-event fixture 中，**200** 粒子在完成 4 个公开 event 后耗尽；**1024**
+粒子走完，但最小预重采样 ESS 为 **1/1024**，重采样后最终均匀权重不能掩盖该退化。该严格基线同样不通过
+collector/Q 数据门槛；其作用是将下一步明确限定为“可计算密度且经小牌墙 posterior 校准的条件 proposal”。
+
 ## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
 
 “胜过人类”不能由 Teacher 配对分数替代。网页现在支持显式 `--human-log local_human_data/*.jsonl`：只在

@@ -19,7 +19,11 @@ from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from .agents import GameAction, HeuristicTeacherAgent
-from .belief import smoothed_deterministic_likelihood, smoothed_policy_likelihood
+from .belief import (
+    SequentialParticleBelief,
+    smoothed_deterministic_likelihood,
+    smoothed_policy_likelihood,
+)
 from .game import XiamenMahjongGame
 from .hand import hand_quality, wait_tiles
 from .rules import XiamenRules
@@ -1382,6 +1386,64 @@ class _HistoryConstraintRepairAudit:
 
 
 @dataclass(frozen=True)
+class _SequentialHistoryBeliefAudit:
+    """Safe aggregate diagnostics for an exact-base-proposal SMC audit.
+
+    The particle objects are setup worlds and stay entirely in-memory.  The
+    base proposal is the actor-visible setup prior, so its importance ratio is
+    exactly one; only observed opponent-action behavior likelihoods update
+    weights. This still does not make the frozen behavior model calibrated.
+    """
+
+    proposed_particles: int
+    initialized_particles: int
+    setup_failures: int
+    requested_public_events: int
+    conditioned_public_events: int
+    minimum_ess_fraction: float
+    final_effective_sample_size: float
+    resample_count: int
+    zero_likelihood_particles: int
+    proposal_failures: int
+    stopped_reason: str | None
+
+    @property
+    def completed(self) -> bool:
+        return self.conditioned_public_events == self.requested_public_events
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposal": "core_public_history_sequential_smc_v0",
+            "proposal_density_ratio": "prior_over_proposal_equals_1",
+            "proposed_particles": self.proposed_particles,
+            "initialized_particles": self.initialized_particles,
+            "setup_failures": self.setup_failures,
+            "requested_public_events": self.requested_public_events,
+            "conditioned_public_events": self.conditioned_public_events,
+            "completed": self.completed,
+            "minimum_ess_fraction": self.minimum_ess_fraction,
+            "final_effective_sample_size": self.final_effective_sample_size,
+            "resample_count": self.resample_count,
+            "zero_likelihood_particles": self.zero_likelihood_particles,
+            "proposal_failures": self.proposal_failures,
+            "stopped_reason": self.stopped_reason,
+            "warning": (
+                "Sequential base-prior SMC audit only; frozen behavior "
+                "likelihood calibration and collector authorization remain "
+                "separate gates."
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class _SequentialHistoryReplayParticle:
+    """Opaque runtime particle retaining one actor-conditioned setup world."""
+
+    initial_game: XiamenMahjongGame
+    prefix_log_likelihood: float = 0.0
+
+
+@dataclass(frozen=True)
 class _LatestDiscardBeliefDiagnostics:
     """Safe diagnostics for a one-event, latest-discard SIR proposal.
 
@@ -1447,6 +1509,39 @@ def _event_compatible_actions(
         expected_tiles = tuple(event["tiles"])
         matches = [action for action in matches if action.tiles == expected_tiles]
     return tuple(matches)
+
+
+def _history_replay_transition_targets(
+    snapshot: _CounterfactualDecisionSnapshot,
+) -> tuple[int, ...]:
+    """Return stable replay-prefix boundaries for public action groups.
+
+    The rules engine may emit an automatic ``draw`` or terminal ``result``
+    while applying one observed player action.  Stopping in the middle of that
+    atomic transition would falsely call a correct particle a mismatch.  A
+    sequential audit consequently observes one player action plus its trailing
+    automatic public events at a time, rather than pretending every public-log
+    row is independently replayable.
+    """
+
+    setup_count = len(snapshot.initial_game.public_actions)
+    events = snapshot.game.public_actions
+    targets: list[int] = []
+    index = setup_count
+    automatic_kinds = {"draw", "result"}
+    while index < len(events):
+        if events[index].get("kind") in automatic_kinds:
+            # Setup normally ends after the dealer's draw. Any later automatic
+            # event belongs to the preceding player transition and is consumed
+            # there. Keep this guard for malformed/unsupported prefixes.
+            index += 1
+            continue
+        end = index + 1
+        while end < len(events) and events[end].get("kind") in automatic_kinds:
+            end += 1
+        targets.append(end)
+        index = end
+    return tuple(targets)
 
 
 def _frozen_behavior_action_likelihood(
@@ -1846,6 +1941,7 @@ def _replay_snapshot_public_history(
     initial_game: XiamenMahjongGame | None = None,
     condition_actor_draws: bool = False,
     allow_constraint_repairs: bool = False,
+    target_public_action_count: int | None = None,
 ) -> _HistoryReplayResult:
     """Strictly replay one snapshot's public prefix in its original world.
 
@@ -1858,6 +1954,9 @@ def _replay_snapshot_public_history(
     proposal: it may exchange hidden tiles between the wall and non-actor
     hands to make an already-observed opponent action feasible.  It never
     modifies the actor's private state and must not be enabled by collection.
+    ``target_public_action_count`` can stop at a validated prefix for the
+    sequential SMC audit; normal callers leave it unset and replay the whole
+    retained history.
 
     It deliberately supports the core event vocabulary only.  A new profile
     feature must gain a precise replay transition before the collector is
@@ -1870,7 +1969,18 @@ def _replay_snapshot_public_history(
         raise ValueError("uniform_mixture 必须在 0（含）到 1（不含）之间")
     trace = snapshot.actor_trace
     game = copy.deepcopy(initial_game or snapshot.initial_game)
-    target_events = tuple(dict(event) for event in snapshot.game.public_actions)
+    all_target_events = tuple(dict(event) for event in snapshot.game.public_actions)
+    if target_public_action_count is None:
+        target_public_action_count = len(all_target_events)
+    if not len(game.public_actions) <= target_public_action_count <= len(all_target_events):
+        return _HistoryReplayResult(
+            False,
+            0.0,
+            float("-inf"),
+            len(game.public_actions),
+            "target_event_range",
+        )
+    target_events = all_target_events[:target_public_action_count]
     cursor = len(game.public_actions)
     if cursor > len(target_events) or any(
         not _public_events_match(game.public_actions[index], target_events[index])
@@ -2241,6 +2351,156 @@ def _audit_resampled_history_prefix(
             else None
         ),
         rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
+def _audit_sequential_history_prefix(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+    resample_ess_fraction: float = 0.5,
+) -> _SequentialHistoryBeliefAudit:
+    """Audit base-prior sequential SMC over every retained public event.
+
+    Unlike the repair diagnostic, this never edits a sampled hidden world.
+    Every particle is drawn from the actor-visible setup prior, so its base
+    importance ratio is ``p / q = 1``. For each next public event we replay
+    the prefix from that opaque setup world, use only the *incremental*
+    frozen-behavior likelihood, and let :class:`SequentialParticleBelief`
+    perform standard systematic resampling when its pre-resample ESS is low.
+
+    Replaying from setup for every event is intentionally expensive but makes
+    the first implementation easy to audit: it avoids retaining an unexported
+    mutable game cursor whose transition might silently diverge. This function
+    is diagnostic-only and is not a trajectory collector.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    if not math.isfinite(behavior_temperature) or behavior_temperature <= 0.0:
+        raise ValueError("behavior_temperature 必须为正且有限")
+    if not 0.0 <= uniform_mixture < 1.0:
+        raise ValueError("uniform_mixture 必须在 0（含）到 1（不含）之间")
+    if not 0.0 <= resample_ess_fraction <= 1.0:
+        raise ValueError("resample_ess_fraction 必须在 0 到 1 之间")
+    if snapshot.initial_game.rules.profile != "core":
+        return _SequentialHistoryBeliefAudit(
+            proposed_particles=particle_count,
+            initialized_particles=0,
+            setup_failures=0,
+            requested_public_events=0,
+            conditioned_public_events=0,
+            minimum_ess_fraction=0.0,
+            final_effective_sample_size=0.0,
+            resample_count=0,
+            zero_likelihood_particles=0,
+            proposal_failures=0,
+            stopped_reason="profile",
+        )
+
+    particles: list[_SequentialHistoryReplayParticle] = []
+    setup_failures = 0
+    for _ in range(particle_count):
+        initial_game = _sample_replay_setup_for_actor(snapshot, rng=rng)
+        if initial_game is None:
+            setup_failures += 1
+            continue
+        particles.append(_SequentialHistoryReplayParticle(initial_game))
+    setup_event_count = len(snapshot.initial_game.public_actions)
+    total_event_count = len(snapshot.game.public_actions)
+    requested_events = total_event_count - setup_event_count
+    transition_targets = _history_replay_transition_targets(snapshot)
+    if not particles:
+        return _SequentialHistoryBeliefAudit(
+            proposed_particles=particle_count,
+            initialized_particles=0,
+            setup_failures=setup_failures,
+            requested_public_events=requested_events,
+            conditioned_public_events=0,
+            minimum_ess_fraction=0.0,
+            final_effective_sample_size=0.0,
+            resample_count=0,
+            zero_likelihood_particles=0,
+            proposal_failures=0,
+            stopped_reason="setup_proposal",
+        )
+
+    belief = SequentialParticleBelief(
+        particles,
+        seed=rng.randrange(2**63),
+        resample_ess_fraction=resample_ess_fraction,
+    )
+
+    def replay_next_event(
+        particle: _SequentialHistoryReplayParticle,
+        target_count: int,
+        _particle_rng: random.Random,
+    ) -> tuple[_SequentialHistoryReplayParticle | None, float]:
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=particle.initial_game,
+            condition_actor_draws=True,
+            target_public_action_count=target_count,
+        )
+        if not result.accepted:
+            return None, 0.0
+        incremental_log_likelihood = (
+            result.log_likelihood - particle.prefix_log_likelihood
+        )
+        # Each replay likelihood is a product of per-event probabilities. A
+        # positive incremental log probability would prove that prefix states
+        # have been mixed incorrectly rather than justify a weight above one.
+        if (
+            not math.isfinite(incremental_log_likelihood)
+            or incremental_log_likelihood > 1e-9
+        ):
+            return None, 0.0
+        likelihood = (
+            math.exp(incremental_log_likelihood)
+            if incremental_log_likelihood > -745.0
+            else 0.0
+        )
+        return (
+            _SequentialHistoryReplayParticle(
+                particle.initial_game, result.log_likelihood
+            ),
+            likelihood,
+        )
+
+    minimum_ess_fraction = 1.0
+    conditioned_events = 0
+    stopped_reason: str | None = None
+    for target_count in transition_targets:
+        try:
+            diagnostics = belief.observe(target_count, replay_next_event)
+        except ValueError:
+            stopped_reason = "all_particles_inconsistent"
+            break
+        conditioned_events = target_count - setup_event_count
+        minimum_ess_fraction = min(
+            minimum_ess_fraction,
+            diagnostics.effective_sample_fraction,
+        )
+    diagnostics = belief.diagnostics
+    return _SequentialHistoryBeliefAudit(
+        proposed_particles=particle_count,
+        initialized_particles=len(particles),
+        setup_failures=setup_failures,
+        requested_public_events=requested_events,
+        conditioned_public_events=conditioned_events,
+        minimum_ess_fraction=minimum_ess_fraction,
+        final_effective_sample_size=diagnostics.effective_sample_size,
+        resample_count=diagnostics.resample_count,
+        zero_likelihood_particles=diagnostics.zero_likelihood_particles,
+        proposal_failures=diagnostics.proposal_failures,
+        stopped_reason=stopped_reason,
     )
 
 

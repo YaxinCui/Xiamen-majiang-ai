@@ -13,7 +13,9 @@ from xiamen_mahjong.training import (
     StateValueBaseline,
     _audit_constraint_repaired_history_prefix,
     _audit_resampled_history_prefix,
+    _audit_sequential_history_prefix,
     _frozen_behavior_action_likelihood,
+    _history_replay_transition_targets,
     _sample_latest_discard_conditioned_world,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
@@ -778,6 +780,42 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(source_repaired.constraint_repairs, 0)
         self.assertEqual(tuple(snapshots[1].initial_game.players[0].hand), source_actor_hand)
         self.assertEqual(tuple(snapshots[1].initial_game.wall), source_wall)
+
+        # Sequential SMC observes stable action transitions rather than
+        # stopping halfway through a discard that automatically starts the
+        # next draw. It retains the unedited actor-visible setup proposal and
+        # must surface low-particle collapse instead of manufacturing a world.
+        transition_targets = _history_replay_transition_targets(snapshots[1])
+        self.assertEqual(transition_targets, (3, 5, 6, 7, 9))
+        replay_prefix = _replay_snapshot_public_history(
+            snapshots[1],
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            target_public_action_count=transition_targets[0],
+        )
+        self.assertTrue(replay_prefix.accepted, replay_prefix.rejection_reason)
+        self.assertEqual(replay_prefix.public_action_count, transition_targets[0])
+        sequential_audit = _audit_sequential_history_prefix(
+            snapshots[1],
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            particle_count=64,
+            rng=random.Random(955),
+        )
+        self.assertFalse(sequential_audit.completed)
+        self.assertLess(
+            sequential_audit.conditioned_public_events,
+            sequential_audit.requested_public_events,
+        )
+        self.assertLess(sequential_audit.minimum_ess_fraction, 0.2)
+        sequential_payload = sequential_audit.payload()
+        self.assertEqual(
+            sequential_payload["proposal"], "core_public_history_sequential_smc_v0"
+        )
+        self.assertEqual(
+            sequential_payload["proposal_density_ratio"],
+            "prior_over_proposal_equals_1",
+        )
+        self.assertNotIn("wall", sequential_payload)
+        self.assertNotIn("opponent_hands", sequential_payload)
 
         trajectories, _summary = collect_counterfactual_action_value_trajectories(
             policy,
