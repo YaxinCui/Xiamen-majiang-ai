@@ -1,6 +1,7 @@
 import copy
 import unittest
 
+from xiamen_mahjong.agents import GameAction
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.rollout_agent import InformationSetRolloutAgent
 from xiamen_mahjong.rules import XiamenRules
@@ -76,6 +77,48 @@ class InformationSetRolloutAgentTests(unittest.TestCase):
     def test_rejects_non_positive_belief_world_count(self):
         with self.assertRaisesRegex(ValueError, "belief_worlds"):
             InformationSetRolloutAgent(belief_worlds=0)
+
+    def test_paired_lcb_keeps_teacher_when_only_one_world_is_available(self):
+        teacher_action = GameAction("pass")
+        claim_action = GameAction("pong", tile=1, tiles=(1, 1))
+        agent = InformationSetRolloutAgent(
+            belief_worlds=1, selection_mode="paired_lcb"
+        )
+
+        chosen = agent._choose_paired_lcb(
+            (teacher_action, claim_action),
+            teacher_action,
+            ((10,), (100,)),
+        )
+
+        self.assertEqual(chosen, teacher_action)
+
+    def test_paired_lcb_requires_a_positive_paired_lower_bound(self):
+        teacher_action = GameAction("pass")
+        claim_action = GameAction("pong", tile=1, tiles=(1, 1))
+        agent = InformationSetRolloutAgent(
+            belief_worlds=3, selection_mode="paired_lcb", paired_lcb_z=1.0
+        )
+
+        selected = agent._choose_paired_lcb(
+            (teacher_action, claim_action),
+            teacher_action,
+            ((10, 10, 10), (18, 19, 17)),
+        )
+        rejected = agent._choose_paired_lcb(
+            (teacher_action, claim_action),
+            teacher_action,
+            ((10, 10, 10), (50, -30, 40)),
+        )
+
+        self.assertEqual(selected, claim_action)
+        self.assertEqual(rejected, teacher_action)
+
+    def test_rejects_invalid_paired_lcb_configuration(self):
+        with self.assertRaisesRegex(ValueError, "selection_mode"):
+            InformationSetRolloutAgent(selection_mode="unknown")
+        with self.assertRaisesRegex(ValueError, "paired_lcb_z"):
+            InformationSetRolloutAgent(paired_lcb_z=-0.1)
 
 
 if __name__ == "__main__":

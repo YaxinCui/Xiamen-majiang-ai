@@ -11,6 +11,7 @@ model, and is useful only after independent paired evaluation.
 from __future__ import annotations
 
 import copy
+import math
 import random
 from typing import Any, Sequence
 
@@ -36,11 +37,19 @@ class InformationSetRolloutAgent:
         belief_worlds: int = 1,
         seed: int = 20260807,
         rollout_turn_actions: bool = False,
+        selection_mode: str = "mean",
+        paired_lcb_z: float = 1.0,
     ) -> None:
         if belief_worlds <= 0:
             raise ValueError("belief_worlds 必须为正数")
+        if selection_mode not in {"mean", "paired_lcb"}:
+            raise ValueError("selection_mode 必须为 mean 或 paired_lcb")
+        if paired_lcb_z < 0.0:
+            raise ValueError("paired_lcb_z 不能为负数")
         self.belief_worlds = int(belief_worlds)
         self.rollout_turn_actions = bool(rollout_turn_actions)
+        self.selection_mode = selection_mode
+        self.paired_lcb_z = float(paired_lcb_z)
         self._rng = random.Random(seed)
         self._teacher = HeuristicTeacherAgent()
         self.last_diagnostics: dict[str, int] = {
@@ -140,9 +149,54 @@ class InformationSetRolloutAgent:
         }
         if not usable_worlds:
             return fallback
+        if self.selection_mode == "paired_lcb":
+            return self._choose_paired_lcb(legal, fallback, returns)
         return legal[
             max(
                 range(len(legal)),
                 key=lambda index: (sum(returns[index]) / len(returns[index]), -index),
             )
         ]
+
+    def _choose_paired_lcb(
+        self,
+        legal: tuple[GameAction, ...],
+        fallback: GameAction,
+        returns: Sequence[Sequence[int]],
+    ) -> GameAction:
+        """Override Teacher only on a paired lower-confidence improvement.
+
+        Every action is rolled out in the same determinized worlds, so a
+        candidate-vs-Teacher score difference removes much of the world
+        variance.  Requiring a positive lower confidence bound specifically
+        controls the maximization bias of selecting the largest noisy rollout
+        average.  A single world cannot estimate this uncertainty and thus
+        deliberately falls back to Teacher.
+        """
+
+        fallback_index = legal.index(fallback)
+        reference = returns[fallback_index]
+        if len(reference) < 2:
+            return fallback
+        best_index = fallback_index
+        best_lower_bound = 0.0
+        for index, action_returns in enumerate(returns):
+            if index == fallback_index:
+                continue
+            deltas = [
+                float(value - baseline)
+                for value, baseline in zip(action_returns, reference)
+            ]
+            if len(deltas) != len(reference):
+                raise RuntimeError("rollout 分支没有共享的 world 数")
+            mean_delta = sum(deltas) / len(deltas)
+            variance = sum((value - mean_delta) ** 2 for value in deltas) / (
+                len(deltas) - 1
+            )
+            lower_bound = mean_delta - self.paired_lcb_z * math.sqrt(
+                variance / len(deltas)
+            )
+            if lower_bound > best_lower_bound:
+                best_index = index
+                best_lower_bound = lower_bound
+        return legal[best_index]
