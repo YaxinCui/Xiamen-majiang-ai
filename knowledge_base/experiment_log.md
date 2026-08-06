@@ -556,3 +556,22 @@ CUDA policy head。绝对均分依次是：Teacher **+0.6875 ± 2.2509**、run3 
 这只是 20 墙筛选，所有区间均跨 0，既不建立模型强度排序，也不授权更多 Teacher/DAgger 微调。可复核产物为
 `artifacts/evaluation-league-{teacher,run3,run4}-run3-run4-screen-202608271.json`。今后 PPO 或其他候选须先
 在 Teacher 基准和固定异质阵容两者中通过筛选，才允许进入 200/400 墙终检；这仍不等同于胜过人类。
+
+## 2026-08-07：当前策略快照 PPO（小规模消融：拒绝）
+
+参考四人不完全信息牌类的近期自博弈工作，PPO 增加“本轮更新前 actor 的冻结快照”对手。快照在每轮采样前
+复制，不共享参数或梯度，更新后才刷新；所有对手抽样、源代码 revision 和各类型计数写入 report。该消融从
+run3（SHA-256 `01616a38…b19f70`）出发，连续三个独立 stage，每个经典档 128 局、32 路 batch、默认 PPO
+超参数，Teacher/current-snapshot 概率各 0.5。三段共 **384** 局、**4,273** 个候选决策；各段的实际对手数为
+Teacher/current snapshot `178/206`、`190/194`、`196/188`。训练时的回报不作为强度指标。
+
+冻结 stage3 参数（SHA-256 `c39d3a63f9ab7b6c4f3220161162261dd82df68e5697ee5711a0c1fddcc47d23`）在全新
+Teacher 筛选的两段 40 墙（合计 **80** 墙）为 **+0.7406 ± 1.7495** 分/局，95% CI **[−2.6885, +4.1698]**；
+同墙 run3 为 **−0.5031 ± 1.5810**。候选 − run3 的配对差为 **+1.2438 ± 1.4029**，95% CI
+**[−1.5060, +3.9935]**，不通过第一道正向下界。
+
+固定 `[run3, run4-dagger, Teacher]` 阵容的另一组全新 20 墙筛选中，候选绝对均分 **+1.1375 ± 2.2310**；
+相对 Teacher 为 **+0.8375 ± 2.9100**（95% CI **[−4.8661, +6.5411]**），相对 run3 为
+**−1.1875 ± 1.7310**（**[−4.5802, +2.2052]**）。双门槛均不通过，故不做 200/400 墙终检、不晋升、不作为
+下一轮训练起点或网页 AI。产物保留在 `artifacts/torch-ppo-classic-current-selfplay-v1-stage{1,2,3}/` 及
+`artifacts/evaluation-{torch-ppo-classic-current-selfplay-v1,run3,league-*-current-selfplay}-*.json`，用于复核而非部署。

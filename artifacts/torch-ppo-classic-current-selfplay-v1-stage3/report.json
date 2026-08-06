@@ -1,0 +1,58 @@
+{
+  "algorithm": "legal_action_ppo_terminal_score_v1",
+  "source_revision": "78ea8439700befd4b09f80c3e1926e5cfe47d73e",
+  "profile": "classic",
+  "checkpoint_source": "artifacts/torch-ppo-classic-current-selfplay-v1-stage2/policy-value-ppo-iteration-1.pt",
+  "device": "cuda",
+  "reward_scale": 80.0,
+  "rollout_batch_size": 32,
+  "privileged_critic": {
+    "enabled": false,
+    "training_only": true,
+    "feature_scope": "complete_simulator_state_in_memory_only",
+    "hidden_size": null,
+    "loss_weight": null,
+    "serialized_with_actor_checkpoint": false
+  },
+  "opponent_pool": {
+    "teacher_probability": 0.5,
+    "current_policy_snapshot_probability": 0.5,
+    "current_policy_snapshot_refresh": "once_per_iteration_before_update",
+    "frozen_checkpoints": []
+  },
+  "iterations": [
+    {
+      "iteration": 1,
+      "rollout": {
+        "episodes": 128,
+        "decisions": 1398,
+        "wins": 128,
+        "draws": 0,
+        "reward_mean": 0.058300781249999996,
+        "reward_stderr": 0.05308686053939571,
+        "action_counts": {
+          "add_kan": 4,
+          "an_kan": 5,
+          "chi": 172,
+          "discard": 1046,
+          "hu": 34,
+          "ming_kan": 5,
+          "pong": 132
+        },
+        "opponent_profile_counts": {
+          "current_policy_snapshot": 188,
+          "heuristic_teacher": 196
+        }
+      },
+      "update": {
+        "updates": 24.0,
+        "policy_loss": -0.005269219633191824,
+        "value_loss": 0.14335873474677405,
+        "entropy": 0.22677425295114517,
+        "advantage_mean_before_normalization": 0.03604196012020111,
+        "advantage_std_before_normalization": 0.5621806383132935
+      }
+    }
+  ],
+  "final_checkpoint": "artifacts/torch-ppo-classic-current-selfplay-v1-stage3/policy-value-ppo-iteration-1.pt"
+}
