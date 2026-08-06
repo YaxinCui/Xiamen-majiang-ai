@@ -439,6 +439,18 @@ Teacher fallback 的均匀平滑也不能挽救全历史权重：`uniform_mixtur
 粒子走完，但最小预重采样 ESS 为 **1/1024**，重采样后最终均匀权重不能掩盖该退化。该严格基线同样不通过
 collector/Q 数据门槛；其作用是将下一步明确限定为“可计算密度且经小牌墙 posterior 校准的条件 proposal”。
 
+### 精确 setup-claim density 的最窄正向验证（不进入训练）
+
+新增 `core_initial_response_claim_exact_density_v0`：仅限 core 开局中“本家弃牌后另一家立即吃／碰／明杠”。
+该家尚未摸牌，因此可对其初始暗手以多元超几何分布直接抽样，条件为包含公开副露消耗的牌。组合动态规划精确
+给出条件概率，完整 setup 的修正为 `p/q=P(初始暗手包含所需牌)`；不是通过手工交换暗牌伪造一个 world。
+
+固定 `seed=2` 的首吃前缀、256 粒子审计：普通 setup prior 重放为 **40/256** 接受；该 exact-density proposal
+为 **256/256** 接受，`p/q=0.13146149`，加冻结 Teacher 平滑行为似然后的 ESS 是 **190.04/256（74.2%）**。
+数学 micro-deck 单测也验证 `{0,0,1,1}` 抽 2 张且要求含 `1` 的条件概率为 `5/6`，条件后 `11` 的概率为 `1/5`。
+这只是一个极窄 setup 事件的**构造正确性**验证：后续摸牌、弃牌、暗杠与多个事件尚未有 density，故不改变 run4、
+不接入 collector/Q/网页，也不能解释为完整 history posterior 或模型强度提升。
+
 ## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
 
 “胜过人类”不能由 Teacher 配对分数替代。网页现在支持显式 `--human-log local_human_data/*.jsonl`：只在

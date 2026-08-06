@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 import random
 
@@ -12,11 +13,15 @@ from xiamen_mahjong.training import (
     RulePolicyModel,
     StateValueBaseline,
     _audit_constraint_repaired_history_prefix,
+    _audit_initial_setup_response_claim_density,
     _audit_resampled_history_prefix,
     _audit_sequential_history_prefix,
     _frozen_behavior_action_likelihood,
     _history_replay_transition_targets,
+    _initial_setup_response_claim_constraint,
+    _sample_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
+    _sample_replay_setup_for_actor,
     _replay_snapshot_public_history,
     _run_candidate_base_hand,
     _turn_actions,
@@ -83,6 +88,86 @@ class _KnownFirstLegalPolicy(_BatchFirstLegalPolicy):
 
 
 class TrainingTests(unittest.TestCase):
+    def test_exact_initial_hand_constraint_uses_multivariate_density(self):
+        # Four physical unknown tiles: 0, 0, 1, 1. A two-tile hand contains
+        # tile 1 with probability 5/6 (only 00 fails). Conditional on that
+        # public feasibility event, the 11 hand has probability 1/5.
+        samples = 4_000
+        double_one_hands = 0
+        for index in range(samples):
+            sampled = _sample_multivariate_hand_given_required_tiles(
+                Counter({0: 2, 1: 2}),
+                hand_size=2,
+                required_tiles=(1,),
+                rng=random.Random(41 + index),
+            )
+            self.assertIsNotNone(sampled)
+            hand, condition_probability = sampled or ([], 0.0)
+            self.assertGreaterEqual(hand.count(1), 1)
+            self.assertAlmostEqual(condition_probability, 5.0 / 6.0)
+            double_one_hands += hand.count(1) == 2
+        self.assertAlmostEqual(double_one_hands / samples, 1.0 / 5.0, delta=0.03)
+
+    def test_exact_density_audit_covers_only_initial_response_claims(self):
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=2,
+            rules=XiamenRules.from_profile("core"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        snapshots = _run_candidate_base_hand(
+            game,
+            candidate_seat=0,
+            candidate_policy=teacher,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+        )
+        snapshot = next(
+            item
+            for item in snapshots
+            if _initial_setup_response_claim_constraint(item) is not None
+        )
+        target_public_action_count, _claimant, _required_tiles = (
+            _initial_setup_response_claim_constraint(snapshot) or (0, 0, ())
+        )
+        actor_hand_before = tuple(snapshot.initial_game.players[0].hand)
+        wall_before = tuple(snapshot.initial_game.wall)
+        audit = _audit_initial_setup_response_claim_density(
+            snapshot,
+            opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+            particle_count=64,
+            rng=random.Random(917),
+        )
+        self.assertEqual(audit.initialized_particles, 64)
+        self.assertEqual(audit.accepted_particles, 64)
+        self.assertGreater(audit.condition_probability or 0.0, 0.0)
+        self.assertLess(audit.condition_probability or 1.0, 1.0)
+        self.assertGreater(audit.effective_sample_size, 0.0)
+        baseline_accepts = 0
+        baseline_rng = random.Random(917)
+        for _ in range(64):
+            setup = _sample_replay_setup_for_actor(snapshot, rng=baseline_rng)
+            self.assertIsNotNone(setup)
+            result = _replay_snapshot_public_history(
+                snapshot,
+                opponents={seat: ("heuristic_teacher", teacher) for seat in range(1, 4)},
+                initial_game=setup,
+                condition_actor_draws=True,
+                target_public_action_count=target_public_action_count,
+            )
+            baseline_accepts += result.accepted
+        self.assertLess(baseline_accepts, audit.accepted_particles)
+        self.assertEqual(tuple(snapshot.initial_game.players[0].hand), actor_hand_before)
+        self.assertEqual(tuple(snapshot.initial_game.wall), wall_before)
+        payload = audit.payload()
+        self.assertEqual(
+            payload["proposal"], "core_initial_response_claim_exact_density_v0"
+        )
+        self.assertIn("prior_over_proposal", payload["proposal_density_ratio"])
+        self.assertIn("not authorized", payload["warning"])
+        self.assertNotIn("wall", payload)
+        self.assertNotIn("opponent_hands", payload)
+
     def test_history_replay_prefers_available_policy_scores_over_argmax_fallback(self):
         game = XiamenMahjongGame(
             seed=929,

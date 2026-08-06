@@ -1386,6 +1386,60 @@ class _HistoryConstraintRepairAudit:
 
 
 @dataclass(frozen=True)
+class _InitialClaimDensityAudit:
+    """Aggregate-only audit for one exact setup-hand conditional proposal.
+
+    This does *not* claim a full public-history posterior.  It only audits the
+    earliest response claim after an actor's setup turn, whose required
+    concealed tiles all belonged to the claimant's initial hand.  The
+    particle worlds and public tile identities remain runtime-only.
+    """
+
+    proposed_particles: int
+    initialized_particles: int
+    accepted_particles: int
+    condition_probability: float | None
+    effective_sample_size: float
+    mean_accepted_log_likelihood: float | None
+    rejection_counts: dict[str, int]
+
+    @property
+    def acceptance_rate(self) -> float:
+        return self.accepted_particles / self.proposed_particles
+
+    @property
+    def effective_sample_fraction(self) -> float:
+        return (
+            self.effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "proposal": "core_initial_response_claim_exact_density_v0",
+            "proposal_density": (
+                "uniform_setup_prior_conditioned_on_required_initial_hand_tiles"
+            ),
+            "proposal_density_ratio": "prior_over_proposal_equals_condition_probability",
+            "proposed_particles": self.proposed_particles,
+            "initialized_particles": self.initialized_particles,
+            "accepted_particles": self.accepted_particles,
+            "acceptance_rate": self.acceptance_rate,
+            "condition_probability": self.condition_probability,
+            "effective_sample_size": self.effective_sample_size,
+            "effective_sample_fraction": self.effective_sample_fraction,
+            "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
+            "rejection_counts": dict(self.rejection_counts),
+            "warning": (
+                "Exact-density setup-claim audit only; it covers neither "
+                "later draws nor a full public-history posterior and is not "
+                "authorized for collection."
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class _SequentialHistoryBeliefAudit:
     """Safe aggregate diagnostics for an exact-base-proposal SMC audit.
 
@@ -1628,6 +1682,99 @@ def _frozen_behavior_action_likelihood(
 _ACTOR_DRAW_RESERVATION = -1
 
 
+@dataclass(frozen=True)
+class _SetupReplayProposal:
+    """One private setup proposal plus its explicit prior/proposal ratio.
+
+    The game object is private collector memory.  The density values are
+    deliberately retained only long enough for a belief audit; neither the
+    world nor the ratio is a trajectory feature or JSONL field.
+    """
+
+    game: XiamenMahjongGame
+    prior_over_proposal: float
+    condition_probability: float
+
+
+def _sample_multivariate_hand_given_required_tiles(
+    pool: Counter[int],
+    *,
+    hand_size: int,
+    required_tiles: Sequence[int],
+    rng: random.Random,
+) -> tuple[list[int], float] | None:
+    """Draw an exact multivariate-hypergeometric hand under a tile constraint.
+
+    Let ``H`` be an unordered hand drawn without replacement from ``pool``.
+    This samples exactly from ``P(H | H contains required_tiles)`` and returns
+    ``P(H contains required_tiles)``.  Consequently a full setup proposal
+    using this hand has the explicit importance ratio ``p / q`` equal to that
+    returned probability.  Duplicate physical tiles are counted
+    combinatorially; this is not a heuristic repair or a tile swap.
+    """
+
+    if hand_size < 0:
+        raise ValueError("hand_size 不能为负数")
+    positive_pool = Counter({tile: count for tile, count in pool.items() if count > 0})
+    total = sum(positive_pool.values())
+    if hand_size > total:
+        return None
+    required = Counter(required_tiles)
+    if any(positive_pool[tile] < count for tile, count in required.items()):
+        return None
+    if sum(required.values()) > hand_size:
+        return None
+    tile_values = tuple(sorted(positive_pool))
+    suffix_capacity = [0] * (len(tile_values) + 1)
+    for index in range(len(tile_values) - 1, -1, -1):
+        suffix_capacity[index] = suffix_capacity[index + 1] + positive_pool[
+            tile_values[index]
+        ]
+    cache: dict[tuple[int, int], int] = {}
+
+    def constrained_ways(index: int, remaining: int) -> int:
+        key = (index, remaining)
+        if key in cache:
+            return cache[key]
+        if remaining < 0 or remaining > suffix_capacity[index]:
+            return 0
+        if index == len(tile_values):
+            return int(remaining == 0)
+        tile = tile_values[index]
+        lower = required[tile]
+        upper = min(positive_pool[tile], remaining)
+        total_ways = sum(
+            math.comb(positive_pool[tile], count)
+            * constrained_ways(index + 1, remaining - count)
+            for count in range(lower, upper + 1)
+        )
+        cache[key] = total_ways
+        return total_ways
+
+    valid_ways = constrained_ways(0, hand_size)
+    if valid_ways <= 0:
+        return None
+    all_ways = math.comb(total, hand_size)
+    selected: list[int] = []
+    remaining = hand_size
+    for index, tile in enumerate(tile_values):
+        options = [
+            (
+                count,
+                math.comb(positive_pool[tile], count)
+                * constrained_ways(index + 1, remaining - count),
+            )
+            for count in range(required[tile], min(positive_pool[tile], remaining) + 1)
+        ]
+        options = [(count, weight) for count, weight in options if weight > 0]
+        count = _weighted_choice(options, rng)
+        selected.extend([tile] * count)
+        remaining -= count
+    if remaining != 0:  # pragma: no cover - protected by constrained_ways
+        raise RuntimeError("条件手牌采样没有填满目标槽位")
+    return selected, valid_ways / all_ways
+
+
 def _sample_replay_setup_for_actor(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
@@ -1648,11 +1795,45 @@ def _sample_replay_setup_for_actor(
     prefix before treating this as an accepted belief particle.
     """
 
+    proposal = _sample_replay_setup_for_actor_with_initial_hand_constraint(
+        snapshot,
+        rng=rng,
+    )
+    return proposal.game if proposal is not None else None
+
+
+def _sample_replay_setup_for_actor_with_initial_hand_constraint(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    rng: random.Random,
+    recipient_seat: int | None = None,
+    required_tiles: Sequence[int] = (),
+) -> _SetupReplayProposal | None:
+    """Sample a core setup, optionally conditional on one opponent setup hand.
+
+    The supported constraint is intentionally narrow: it must concern a
+    non-actor's *initial* concealed base-tile hand.  That is enough for the
+    first-discard response-claim audit below, where no opponent draw precedes
+    the claim.  All other opponent hands and wall slots remain an exact
+    uniform allocation conditional on this one event.
+
+    This helper is audit-only.  Later action-conditioned transitions require
+    their own density derivation and must not reuse this setup ratio.
+    """
+
     trace = snapshot.actor_trace
     source = snapshot.initial_game
     if source.rules.profile != "core":
         return None
     if any(seat != trace.actor_seat for seat in source.opening_wait_seats):
+        return None
+    if recipient_seat is not None and (
+        not 0 <= recipient_seat < source.rules.player_count
+        or recipient_seat == trace.actor_seat
+        or not all(is_base_tile(tile) for tile in required_tiles)
+    ):
+        return None
+    if recipient_seat is None and required_tiles:
         return None
     sampled = copy.deepcopy(source)
     pool = Counter(base_wall())
@@ -1697,6 +1878,27 @@ def _sample_replay_setup_for_actor(
         if not is_base_tile(tile)
         for _ in range(count)
     ]
+    condition_probability = 1.0
+    conditioned_hand: list[int] | None = None
+    if recipient_seat is not None:
+        conditioned = _sample_multivariate_hand_given_required_tiles(
+            Counter(base_tiles),
+            hand_size=len(sampled.players[recipient_seat].hand),
+            required_tiles=required_tiles,
+            rng=rng,
+        )
+        if conditioned is None:
+            return None
+        conditioned_hand, condition_probability = conditioned
+        remaining_counts = Counter(base_tiles)
+        remaining_counts.subtract(Counter(conditioned_hand))
+        if any(count < 0 for count in remaining_counts.values()):
+            return None
+        base_tiles = [
+            tile
+            for tile, count in remaining_counts.items()
+            for _ in range(count)
+        ]
     rng.shuffle(base_tiles)
     rng.shuffle(flower_tiles)
     base_offset = 0
@@ -1706,14 +1908,20 @@ def _sample_replay_setup_for_actor(
             continue
         hand_count = len(player.hand)
         flower_count = len(player.flowers)
+        sampled_base_count = 0 if player.seat == recipient_seat else hand_count
         if (
-            base_offset + hand_count > len(base_tiles)
+            base_offset + sampled_base_count > len(base_tiles)
             or flower_offset + flower_count > len(flower_tiles)
         ):
             return None
-        player.hand = sorted(base_tiles[base_offset : base_offset + hand_count])
+        if player.seat == recipient_seat:
+            if conditioned_hand is None or len(conditioned_hand) != hand_count:
+                return None
+            player.hand = sorted(conditioned_hand)
+        else:
+            player.hand = sorted(base_tiles[base_offset : base_offset + hand_count])
+            base_offset += hand_count
         player.flowers = sorted(flower_tiles[flower_offset : flower_offset + flower_count])
-        base_offset += hand_count
         flower_offset += flower_count
     unknown_wall = [
         *base_tiles[base_offset:],
@@ -1730,7 +1938,11 @@ def _sample_replay_setup_for_actor(
         if seat != trace.actor_seat:
             sampled.last_drawn_tiles[seat] = None
     sampled.random = random.Random(rng.randrange(2**63))
-    return sampled
+    return _SetupReplayProposal(
+        sampled,
+        prior_over_proposal=condition_probability,
+        condition_probability=condition_probability,
+    )
 
 
 def _transfer_unknown_tile_to_opponent_hand(
@@ -2575,6 +2787,145 @@ def _audit_constraint_repaired_history_prefix(
         mean_constraint_repairs=(
             sum(accepted_repairs) / len(accepted_repairs)
             if accepted_repairs
+            else None
+        ),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+    )
+
+
+def _initial_setup_response_claim_constraint(
+    snapshot: _CounterfactualDecisionSnapshot,
+) -> tuple[int, int, tuple[int, ...]] | None:
+    """Recognize the one response transition covered by the exact proposal.
+
+    Only the actor's first discard immediately followed by a non-actor
+    pong/chi/ming-kan is supported.  Such a claimant has not drawn since the
+    deal, so the public claim's consumed tiles are a direct constraint on its
+    initial concealed hand.  Requiring this exact shape keeps the density
+    calculation honest instead of silently applying a setup formula after a
+    hidden draw.
+    """
+
+    source = snapshot.initial_game
+    trace = snapshot.actor_trace
+    setup_count = len(source.public_actions)
+    events = snapshot.game.public_actions
+    if (
+        source.rules.profile != "core"
+        or source.phase != "discard"
+        or source.current_player != trace.actor_seat
+        or len(events) < setup_count + 2
+    ):
+        return None
+    discard = events[setup_count]
+    claim = events[setup_count + 1]
+    claimant = claim.get("seat")
+    tiles = claim.get("tiles")
+    expected_count = 2 if claim.get("kind") in {"pong", "chi"} else 3
+    if (
+        discard.get("kind") != "discard"
+        or discard.get("seat") != trace.actor_seat
+        or claim.get("kind") not in {"pong", "chi", "ming_kan"}
+        or not isinstance(claimant, int)
+        or claimant == trace.actor_seat
+        or not isinstance(tiles, (list, tuple))
+        or len(tiles) != expected_count
+        or not all(isinstance(tile, int) and is_base_tile(tile) for tile in tiles)
+    ):
+        return None
+    if not any(
+        action.phase == "discard"
+        and action.before_public_action_count == setup_count
+        and action.action.kind == "discard"
+        and action.action.tile == discard.get("tile")
+        for action in trace.actions
+    ):
+        return None
+    return setup_count + 2, claimant, tuple(int(tile) for tile in tiles)
+
+
+def _audit_initial_setup_response_claim_density(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+) -> _InitialClaimDensityAudit:
+    """Audit an exact-density setup proposal for the first response claim.
+
+    The proposal is ``q(world) = p(world | claimant initial hand contains the
+    public consumed tiles)``.  Its correction therefore is the closed-form
+    multivariate-hypergeometric condition probability.  The replay still
+    applies frozen-policy likelihoods for the observed discard/claim; the
+    resulting ESS is reported separately rather than disguised as a property
+    of the structural proposal.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    constraint = _initial_setup_response_claim_constraint(snapshot)
+    if constraint is None:
+        return _InitialClaimDensityAudit(
+            proposed_particles=particle_count,
+            initialized_particles=0,
+            accepted_particles=0,
+            condition_probability=None,
+            effective_sample_size=0.0,
+            mean_accepted_log_likelihood=None,
+            rejection_counts={"unsupported_initial_claim_prefix": particle_count},
+        )
+    target_public_action_count, claimant, required_tiles = constraint
+    accepted_log_likelihoods: list[float] = []
+    importance_weights: list[float] = []
+    condition_probabilities: list[float] = []
+    initialized = 0
+    rejection_counts: Counter[str] = Counter()
+    for _ in range(particle_count):
+        proposal = _sample_replay_setup_for_actor_with_initial_hand_constraint(
+            snapshot,
+            rng=rng,
+            recipient_seat=claimant,
+            required_tiles=required_tiles,
+        )
+        if proposal is None:
+            rejection_counts["setup_proposal"] += 1
+            continue
+        initialized += 1
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=proposal.game,
+            condition_actor_draws=True,
+            target_public_action_count=target_public_action_count,
+        )
+        if not result.accepted:
+            rejection_counts[result.rejection_reason or "unknown"] += 1
+            continue
+        accepted_log_likelihoods.append(result.log_likelihood)
+        condition_probabilities.append(proposal.condition_probability)
+        importance_weights.append(proposal.prior_over_proposal * result.likelihood)
+    normalizer = sum(importance_weights)
+    effective_sample_size = (
+        normalizer * normalizer / sum(weight * weight for weight in importance_weights)
+        if normalizer > 0.0
+        else 0.0
+    )
+    unique_probabilities = {round(value, 15) for value in condition_probabilities}
+    return _InitialClaimDensityAudit(
+        proposed_particles=particle_count,
+        initialized_particles=initialized,
+        accepted_particles=len(accepted_log_likelihoods),
+        condition_probability=(
+            condition_probabilities[0] if len(unique_probabilities) == 1 else None
+        ),
+        effective_sample_size=effective_sample_size,
+        mean_accepted_log_likelihood=(
+            sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
+            if accepted_log_likelihoods
             else None
         ),
         rejection_counts=dict(sorted(rejection_counts.items())),
