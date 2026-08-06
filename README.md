@@ -56,6 +56,21 @@ python3 scripts/audit_human_trajectories.py \
 平均分差、标准误、正态近似 95% 区间、胡率和流局率。即使结构审计通过，也只表示可以进行人工质量评审；
 这些描述性统计不等同于人类强度结论。要声称对人类变强，仍须使用从未用于训练或调参的真人对局留出集。
 
+即使把人类 JSONL 直接传给训练器，它也会默认拒绝。人工确认记录者、对手身份、规则档位和独立留出集后，才可
+在按完整牌局分开的 train/validation/test 文件上显式启用；训练报告只记录聚合审计与
+`<local_human_data>` 占位符，不会写入你的本地路径：
+
+```bash
+.venv/bin/python scripts/train_policy_value.py \
+  --train local_human_data/train.trajectories.jsonl \
+  --validation local_human_data/validation.trajectories.jsonl \
+  --test local_human_data/test.trajectories.jsonl \
+  --allow-local-human-data --human-minimum-hands 100 --human-weight 1.0 \
+  --output-dir artifacts/human-reviewed-policy-experiment
+```
+
+此开关只授权行为模仿，**不**证明这些记录代表强人类，且不会让 checkpoint 自动成为网页默认或“胜过人类”的证据。
+
 牌桌默认展开三位 AI 的调试手牌，右上角的 **隐藏 AI 手牌（调试）** 可切回
 正常暗牌视图。点击 **规则与胡牌教学** 可进入 `/guide.html`，查看牌局流程、
 五组一对、金牌限制、游金体系、特殊胡法、响应优先级和结算说明。

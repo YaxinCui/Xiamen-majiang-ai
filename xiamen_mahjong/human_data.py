@@ -81,6 +81,8 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
             issues.append("human_choice_not_executed_action")
         if decision.executed_probability is not None:
             issues.append("human_propensity_must_be_unknown")
+        if decision.action_values is not None:
+            issues.append("human_record_must_not_have_action_value_targets")
         private_paths = _private_key_paths(decision.state)
         if private_paths:
             issues.append("private_state_key:" + ",".join(sorted(private_paths)))
@@ -198,4 +200,39 @@ def audit_local_human_trajectories(
             "does not establish human skill or authorize training/promotion; use "
             "independent held-out human matches before any strength claim."
         ),
+    }
+
+
+def require_local_human_training_approval(
+    paths: Iterable[str | Path],
+    *,
+    manually_approved: bool,
+    minimum_hands: int = 100,
+) -> dict[str, Any]:
+    """Return a safe audit only after an explicit human-data training gate.
+
+    Local records are intentionally excluded from ordinary model training:
+    structural validation cannot establish a player's skill, consent beyond
+    the local recorder, or that a held-out human benchmark remains untouched.
+    A trainer must therefore opt in *and* the source must pass the existing
+    privacy, duplication, rule-profile, and opponent-identity checks.
+
+    The returned aggregate contains no local paths or decision state, so it
+    may safely be embedded in a checkpoint training report as provenance.
+    """
+
+    if not manually_approved:
+        raise ValueError(
+            "本地人类轨迹默认禁止训练；完成审计和人工质量复核后，"
+            "请显式传入 --allow-local-human-data"
+        )
+    audit = audit_local_human_trajectories(paths, minimum_hands=minimum_hands)
+    if not audit["ready_for_manual_review"]:
+        reasons = ", ".join(str(item) for item in audit["gate_reasons"])
+        raise ValueError("本地人类轨迹未通过训练前结构门槛：" + reasons)
+    return {
+        "source": "local_human_opt_in",
+        "manual_training_approval": True,
+        "training_scope": "behavioral_imitation_only; not_human_strength_evidence",
+        "audit": audit,
     }

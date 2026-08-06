@@ -589,3 +589,15 @@ Teacher 筛选的两段 40 墙（合计 **80** 墙）为 **+0.7406 ± 1.7495** �
 任何模型的 Teacher、不替换网页默认。完整逐局分数和配对统计见
 `artifacts/evaluation-one-ply-lookahead-teacher-pilot-202608401.json`；CLI 仅保留
 `--one-ply-lookahead-teacher-candidate` 以便复核。
+
+## 2026-08-07：人类数据训练闸门（基础设施，不是强度实验）
+
+本地工作区当前没有 `local_human_data/` 对局，因而没有任何真人强度或人类监督结论。审查训练入口发现：尽管网页
+记录带有 `training_default=excluded_until_separate_quality_review`，手工把该 JSONL 传入旧训练 CLI 时仍会被当作
+普通 hard-label 样本读取。现已修正为 fail-closed：检测到 `collector=local_human_opt_in` 默认报错；操作者必须显式
+传 `--allow-local-human-data`，并让所有人类输入共同通过现有隐私/重复/规则档位/对手身份/最小局数审计。混合人类和
+其他来源的同一文件也会拒绝，checkpoint report 仅留下无路径的聚合审计和人工授权标志。
+
+这只建立将来经过人工复核的人类**行为**安全地用于 policy imitation 的路径；人类终局分数尚未用于 value regression，
+也没有任何模型因该基础设施而变强或获得“击败人类”主张。下一步仍需要独立、足量且多来源的真人留出对局，或在
+不依赖伪人类标签的自博弈联赛中取得可复现优势。

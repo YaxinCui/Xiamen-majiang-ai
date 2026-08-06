@@ -2,11 +2,15 @@ import json
 from pathlib import Path
 import tempfile
 import threading
+from types import SimpleNamespace
 import unittest
 from urllib.request import Request, urlopen
 
 from xiamen_mahjong.agents import HeuristicTeacherAgent
-from xiamen_mahjong.human_data import audit_local_human_trajectories
+from xiamen_mahjong.human_data import (
+    audit_local_human_trajectories,
+    require_local_human_training_approval,
+)
 from xiamen_mahjong.web import GameStore, make_handler
 from http.server import ThreadingHTTPServer
 
@@ -168,6 +172,38 @@ class WebTests(unittest.TestCase):
             self.assertIsNone(summary["human_score_delta_stderr"])
             self.assertEqual(summary["human_win_rate"], 0.0)
             self.assertEqual(summary["draw_rate"], 1.0)
+            with self.assertRaisesRegex(ValueError, "默认禁止训练"):
+                require_local_human_training_approval(
+                    [output], manually_approved=False, minimum_hands=1
+                )
+            # The trainer itself must fail closed too; a caller cannot bypass
+            # the recorder's metadata boundary merely by naming this file as
+            # an additional training input.
+            from scripts.train_policy_value import load_examples
+
+            with self.assertRaisesRegex(ValueError, "默认禁止训练"):
+                load_examples(
+                    output, SimpleNamespace(allow_local_human_data=False)
+                )
+            approved = require_local_human_training_approval(
+                [output], manually_approved=True, minimum_hands=1
+            )
+            self.assertTrue(approved["manual_training_approval"])
+            self.assertEqual(approved["audit"]["valid_hands"], 1)
+            tampered = Path(directory) / "human-with-q.jsonl"
+            tampered_record = json.loads(json.dumps(record))
+            tampered_record["decisions"][0]["action_values"] = [
+                0.0 for _ in tampered_record["decisions"][0]["legal_actions"]
+            ]
+            tampered.write_text(json.dumps(tampered_record) + "\n", encoding="utf-8")
+            tampered_audit = audit_local_human_trajectories(
+                [tampered], minimum_hands=1
+            )
+            self.assertFalse(tampered_audit["ready_for_manual_review"])
+            self.assertEqual(
+                tampered_audit["issues"],
+                {"human_record_must_not_have_action_value_targets": 1},
+            )
             duplicate_audit = audit_local_human_trajectories(
                 [output, output], minimum_hands=1
             )

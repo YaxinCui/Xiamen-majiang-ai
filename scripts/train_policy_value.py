@@ -35,6 +35,7 @@ from xiamen_mahjong.torch_policy import (
     ResidualPublicSequencePolicyValueNetwork,
     TorchPolicyValueAgent,
 )
+from xiamen_mahjong.human_data import require_local_human_training_approval
 from xiamen_mahjong.training import (
     NEURAL_FEATURE_DIMS,
     PUBLIC_ACTION_SEQUENCE_DIM,
@@ -115,6 +116,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--value-scale", type=float, default=80.0)
     parser.add_argument("--exploration-weight", type=float, default=0.35)
     parser.add_argument("--synthetic-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--allow-local-human-data",
+        action="store_true",
+        help=(
+            "显式确认已完成人类数据质量复核；否则 local_human_opt_in "
+            "轨迹会被拒绝，不能意外混入训练。"
+        ),
+    )
+    parser.add_argument(
+        "--human-minimum-hands",
+        type=int,
+        default=100,
+        help="启用本地人类数据时，训练前结构审计要求的最少完整牌局数",
+    )
+    parser.add_argument(
+        "--human-weight",
+        type=float,
+        default=1.0,
+        help="通过人工复核的 local_human_opt_in 行为模仿样本权重",
+    )
     parser.add_argument(
         "--action-value-weight",
         type=float,
@@ -243,6 +264,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def source_weight(source: str, args: argparse.Namespace) -> float:
+    if source == "local_human_opt_in":
+        return args.human_weight
     if source == "random_legal_teacher_labeled":
         return args.exploration_weight
     if source in {"physical_response_pass_search", "engine_validated_tour_curriculum"}:
@@ -269,6 +292,13 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
     examples: list[Example] = []
     for trajectory in read_trajectory_jsonl(path):
         source = str(trajectory.source_metadata.get("collector", "legacy"))
+        if source == "local_human_opt_in" and not getattr(
+            args, "allow_local_human_data", False
+        ):
+            raise ValueError(
+                "检测到 local_human_opt_in 轨迹；默认禁止训练。"
+                "请先完成独立审计/人工复核，并显式传入 --allow-local-human-data"
+            )
         synthetic = bool(trajectory.outcome.get("synthetic"))
         scores = trajectory.outcome.get("scores", [])
         for decision in trajectory.decisions:
@@ -325,6 +355,32 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
                 )
             )
     return examples
+
+
+def local_human_input_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
+    """Find human-only inputs and reject a file that mixes provenance classes."""
+
+    human_paths: list[Path] = []
+    for path in paths:
+        sources = {
+            str(trajectory.source_metadata.get("collector", "legacy"))
+            for trajectory in read_trajectory_jsonl(path)
+        }
+        if "local_human_opt_in" not in sources:
+            continue
+        if sources != {"local_human_opt_in"}:
+            raise ValueError(
+                "人类训练输入必须每文件只包含 local_human_opt_in 轨迹；"
+                f"{path} 混入了其他来源"
+            )
+        human_paths.append(path)
+    return tuple(human_paths)
+
+
+def report_input_path(path: Path, human_paths: set[Path]) -> str:
+    """Avoid persisting a local human-log pathname inside published reports."""
+
+    return "<local_human_data>" if path in human_paths else str(path)
 
 
 def class_weights(examples: Iterable[Example], maximum: float) -> dict[str, float]:
@@ -928,6 +984,8 @@ def main() -> None:
         or args.value_scale <= 0
         or args.exploration_weight <= 0
         or args.synthetic_weight <= 0
+        or args.human_minimum_hands <= 0
+        or args.human_weight <= 0
         or args.action_value_weight < 0
         or args.action_value_regression_weight < 0
         or args.action_value_regression_sample_weight < 0
@@ -956,6 +1014,50 @@ def main() -> None:
     if device.type == "cuda" and not torch.cuda.is_available():
         raise RuntimeError("请求 CUDA 但当前 PyTorch 无可用 GPU")
     feature_dim = NEURAL_FEATURE_DIMS[args.feature_version]
+    input_paths_by_split = {
+        "train": (args.train, *args.additional_train),
+        "validation": (args.validation, *args.additional_validation),
+        "test": (args.test, *args.additional_test),
+    }
+    human_paths_by_split = {
+        split: local_human_input_paths(paths)
+        for split, paths in input_paths_by_split.items()
+    }
+    human_paths = tuple(
+        path for paths in human_paths_by_split.values() for path in paths
+    )
+    if args.allow_local_human_data and not human_paths:
+        raise ValueError(
+            "--allow-local-human-data 已指定，但 train/validation/test 中没有 "
+            "local_human_opt_in 轨迹"
+        )
+    if human_paths:
+        missing_human_splits = [
+            split for split, paths in human_paths_by_split.items() if not paths
+        ]
+        if missing_human_splits:
+            raise ValueError(
+                "人类行为数据必须按完整牌局独立覆盖 train、validation、test；"
+                "缺少 " + ", ".join(missing_human_splits)
+            )
+    human_training_provenance = (
+        require_local_human_training_approval(
+            human_paths,
+            manually_approved=args.allow_local_human_data,
+            minimum_hands=args.human_minimum_hands,
+        )
+        if human_paths
+        else None
+    )
+    human_path_set = set(human_paths)
+    if human_training_provenance is not None:
+        human_training_provenance = {
+            **human_training_provenance,
+            "split_file_counts": {
+                split: len(paths)
+                for split, paths in human_paths_by_split.items()
+            },
+        }
     train = load_examples(args.train, args)
     for path in args.additional_train:
         train.extend(load_examples(path, args))
@@ -1279,19 +1381,32 @@ def main() -> None:
         "action_value_margin_scale": args.action_value_margin_scale,
         "base_learning_rate_scale": args.base_learning_rate_scale,
         "inputs": {
-            "train": [str(args.train), *(str(path) for path in args.additional_train)],
-            "validation": [
-                str(args.validation),
-                *(str(path) for path in args.additional_validation),
+            "train": [
+                report_input_path(args.train, human_path_set),
+                *(
+                    report_input_path(path, human_path_set)
+                    for path in args.additional_train
+                ),
             ],
-            "test": str(args.test),
-            "additional_test": [str(path) for path in args.additional_test],
+            "validation": [
+                report_input_path(args.validation, human_path_set),
+                *(
+                    report_input_path(path, human_path_set)
+                    for path in args.additional_validation
+                ),
+            ],
+            "test": report_input_path(args.test, human_path_set),
+            "additional_test": [
+                report_input_path(path, human_path_set) for path in args.additional_test
+            ],
             "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
         },
+        "local_human_data": human_training_provenance,
         "class_weights": weights,
         "source_weights": {
             "teacher_self_play": 1.0,
             "candidate_vs_teacher_dagger": 1.0,
+            "local_human_opt_in": args.human_weight,
             "random_legal_teacher_labeled": args.exploration_weight,
             "physical_response_pass_search": args.synthetic_weight,
             "engine_validated_tour_curriculum": args.synthetic_weight,
@@ -1299,6 +1414,7 @@ def main() -> None:
         },
         "policy_targets": {
             "teacher_and_curriculum": "hard_teacher_action",
+            "local_human_opt_in": "hard_executed_human_action_after_manual_review",
             "counterfactual_action_value_rollout": (
                 "softmax(conservative_action_value_preference / temperature)"
             ),
