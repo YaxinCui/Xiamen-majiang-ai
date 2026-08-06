@@ -200,6 +200,10 @@ cython_debug/
 # Reproducible local training data, reports, and model checkpoints
 artifacts/
 
+# Explicitly opt-in local human-play records. These may reflect a person's
+# private decisions and are never part of the repository or default training.
+local_human_data/
+
 # Visual Studio Code
 #   Visual Studio Code specific template is maintained in a separate VisualStudioCode.gitignore 
 #   that can be found at https://github.com/github/gitignore/blob/main/Global/VisualStudioCode.gitignore

@@ -16,6 +16,33 @@ python3 scripts/serve_web_game.py --host 127.0.0.1 --port 8765
 浏览器打开 `http://127.0.0.1:8765`。局域网体验可将 `--host` 改为对应
 内网地址或 `0.0.0.0`；该版本没有账号与公网访问控制，不应直接暴露到互联网。
 
+### 可选：本地人类对局数据
+
+当前模型还没有“击败人类”的验证证据，因此可在自己试玩时显式开启本地记录，为后续独立的人类行为
+评审提供数据：
+
+```bash
+python3 scripts/serve_web_game.py \
+  --human-log local_human_data/my-play.jsonl
+```
+
+仅在一局结束后记录：玩家本人可见的手牌与公开状态、当时全部合法动作、实际选择和最终公开结算。
+不保存牌墙顺序、三家暗手、随机种子、账号或网络标识；`local_human_data/` 默认被 Git 忽略，也不会自动
+混入 Teacher/DAgger 训练。人类数据必须先按牌局切分、检查规则档位和质量，并在独立人类留出局上验证，才可
+作为新的训练来源。
+
+若要让人类玩家与某个实验 checkpoint 对局，必须显式指定它；没有该参数时仍是 Teacher。网页会显示
+“EXPLICIT EXPERIMENTAL CHECKPOINT”，避免把未通过离线门槛的模型误认为默认版本：
+
+```bash
+.venv/bin/python scripts/serve_web_game.py \
+  --ai-checkpoint artifacts/policy-value-classic-v1-run4-dagger/policy-value.pt \
+  --ai-device cpu \
+  --human-log local_human_data/run4-vs-human.jsonl
+```
+
+这只是受控试玩和数据采集路径，不构成该 checkpoint 胜过人类的证据。
+
 牌桌默认展开三位 AI 的调试手牌，右上角的 **隐藏 AI 手牌（调试）** 可切回
 正常暗牌视图。点击 **规则与胡牌教学** 可进入 `/guide.html`，查看牌局流程、
 五组一对、金牌限制、游金体系、特殊胡法、响应优先级和结算说明。

@@ -11,23 +11,158 @@ import threading
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
+from .agents import GameAction
 from .game import GameError, XiamenMahjongGame
 from .rules import XiamenRules
+from .training import (
+    TeacherDecision,
+    _perspective_state,
+    _trajectory_from_game,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = ROOT / "web_game_static"
 
 
 class GameStore:
-    def __init__(self) -> None:
+    """Own one browser table and an optional local-only human data recorder.
+
+    Recording is deliberately disabled unless the command-line caller supplies
+    a path.  The writer only appends a completed hand after the human has made
+    at least one decision, and the safe trajectory payload excludes replay
+    seeds, wall order, and opponents' concealed hands.
+    """
+
+    def __init__(
+        self,
+        *,
+        human_log: str | Path | None = None,
+        ai_agent: Any | None = None,
+        ai_profile: str = "heuristic_teacher",
+    ) -> None:
         self.lock = threading.Lock()
         self.rules_profile = "classic"
-        self.game = XiamenMahjongGame(rules=XiamenRules.from_profile(self.rules_profile))
+        self._ai_agent = ai_agent
+        self._ai_profile = ai_profile
+        self._human_log = Path(human_log) if human_log is not None else None
+        self._human_decisions: list[TeacherDecision] = []
+        self._human_hand_written = False
+        self._human_log_error = False
+        self.game = XiamenMahjongGame(
+            rules=XiamenRules.from_profile(self.rules_profile),
+            agents=self._ai_agents(),
+        )
+        self._human_score_start = tuple(player.score for player in self.game.players)
+
+    def _ai_agents(self) -> dict[int, Any] | None:
+        if self._ai_agent is None:
+            return None
+        return {
+            seat: self._ai_agent
+            for seat in range(XiamenRules().player_count)
+            if seat != 0
+        }
 
     def _public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
         state = self.game.public_state(reveal_ai_hands=reveal_ai_hands)
         state["rule_profiles"] = XiamenRules.available_profiles()
+        state["ai_profile"] = self._ai_profile
+        state["local_human_recording"] = {
+            "enabled": self._human_log is not None,
+            "pending_decisions": len(self._human_decisions),
+            "completed_hand_written": self._human_hand_written,
+            "write_failed": self._human_log_error,
+            "scope": (
+                "completed_hand_actor_visible_only"
+                if self._human_log is not None
+                else "disabled"
+            ),
+        }
         return state
+
+    def _capture_human_decision(self, payload: dict[str, Any]) -> TeacherDecision:
+        """Create an actor-visible snapshot before the engine mutates state."""
+
+        legal = tuple(
+            GameAction(
+                str(item["kind"]),
+                item.get("tile"),
+                tuple(item.get("tiles", [])),
+            )
+            for item in self.game.human_actions()
+        )
+        action = GameAction(
+            str(payload.get("kind", "")),
+            payload.get("tile"),
+            tuple(payload.get("tiles", [])),
+        )
+        if action not in legal:
+            raise GameError("该动作不是当前可执行的操作")
+        action_index = legal.index(action)
+        return TeacherDecision(
+            profile=self.game.rules.profile,
+            seed=None,
+            seat=self.game.human_seat,
+            state=_perspective_state(self.game, self.game.human_seat),
+            legal_actions=legal,
+            # For an opt-in human record, the chosen and executed action are
+            # intentionally identical.  There is no synthetic Teacher label.
+            chosen_index=action_index,
+            executed_index=action_index,
+            executed_probability=None,
+        )
+
+    def _write_completed_human_hand(self) -> None:
+        """Append one safe, complete opt-in human trajectory exactly once."""
+
+        if (
+            self._human_log is None
+            or self._human_hand_written
+            or self.game.phase != "over"
+            or not self._human_decisions
+        ):
+            return
+        trajectory = _trajectory_from_game(
+            self.game,
+            self._human_decisions,
+            agent_profiles=(
+                "local_human_opt_in",
+                *("heuristic_teacher" for _ in range(self.game.rules.player_count - 1)),
+            ),
+            source_metadata={
+                "collector": "local_human_opt_in",
+                "recording_scope": "actor_visible_state_and_public_outcome_only",
+                "behavior_label": "executed_human_action",
+                "training_default": "excluded_until_separate_quality_review",
+            },
+        )
+        payload = trajectory.payload()
+        # A browser match may carry scores across hands because of dealer
+        # continuation. Training outcomes must instead retain the reward of
+        # this hand alone, never an earlier hand's accumulated result.
+        payload["outcome"]["scores"] = [
+            player.score - self._human_score_start[index]
+            for index, player in enumerate(self.game.players)
+        ]
+        payload["outcome"]["score_semantics"] = "single_hand_delta"
+        try:
+            self._human_log.parent.mkdir(parents=True, exist_ok=True)
+            with self._human_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+        except OSError:
+            # A completed game remains playable/reviewable even if its optional
+            # local export path becomes unavailable.  Expose only a boolean to
+            # the browser, never a local filesystem path or OS error detail.
+            self._human_log_error = True
+            return
+        self._human_hand_written = True
+
+    def _reset_human_recorder(self) -> None:
+        self._human_decisions = []
+        self._human_hand_written = False
+        self._human_log_error = False
+        self._human_score_start = tuple(player.score for player in self.game.players)
 
     def state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
         with self.lock:
@@ -75,12 +210,22 @@ class GameStore:
                 dealer_streak=dealer_streak,
                 scores=scores,
                 hand_number=hand_number,
+                agents=self._ai_agents(),
             )
+            self._reset_human_recorder()
             return self._public_state()
 
     def action(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
+            decision = (
+                self._capture_human_decision(payload)
+                if self._human_log is not None
+                else None
+            )
             self.game.apply_human_action(payload)
+            if decision is not None:
+                self._human_decisions.append(decision)
+            self._write_completed_human_hand()
             return self._public_state()
 
 
@@ -171,8 +316,19 @@ def make_handler(store: GameStore):
     return GameHandler
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
-    store = GameStore()
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    human_log: str | Path | None = None,
+    ai_agent: Any | None = None,
+    ai_profile: str = "heuristic_teacher",
+) -> None:
+    store = GameStore(
+        human_log=human_log,
+        ai_agent=ai_agent,
+        ai_profile=ai_profile,
+    )
     server = ThreadingHTTPServer((host, port), make_handler(store))
     print(f"厦门麻将已启动：http://{host}:{port}")
     try:

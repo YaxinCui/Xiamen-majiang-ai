@@ -250,8 +250,22 @@ function renderResult() {
 
 function render() {
   if (!state) return;
+  $('#ai-profile-note').textContent = state.ai_profile === 'heuristic_teacher'
+    ? 'LOCAL TABLE · TEACHER PLAY'
+    : 'LOCAL TABLE · EXPLICIT EXPERIMENTAL CHECKPOINT';
   $('#message').textContent = state.message;
   $('#turn-detail').textContent = state.phase === 'over' ? '本局已结束' : `当前：${state.players[state.current_player].name}`;
+  const recording = state.local_human_recording;
+  const recordingNote = $('#recording-note');
+  if (!recording?.enabled) {
+    recordingNote.textContent = '';
+  } else if (recording.write_failed) {
+    recordingNote.textContent = '本地对局记录写入失败；本局不会上传。';
+  } else if (recording.completed_hand_written) {
+    recordingNote.textContent = '本局玩家记录已保存在本地。';
+  } else {
+    recordingNote.textContent = `本地记录已开启 · 已记录 ${recording.pending_decisions} 次你的选择`;
+  }
   $('#wall-count').textContent = state.wall_remaining;
   $('#turn-count').textContent = state.turn_count;
   $('#hand-number').textContent = state.hand_number || 1;

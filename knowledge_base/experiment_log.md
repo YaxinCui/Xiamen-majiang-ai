@@ -427,3 +427,15 @@ Q 训练或实战评测门槛；run4 和网页默认策略不变。下一步应�
 真实后验中 `P(01|弃1)=16/19`。把只生成合法暗手的刻意偏置 proposal（`q(01)=3/4,q(11)=1/4`）连同每粒子
 `p/q` 输入后，过滤器精确恢复 `16/19`。这仅是 proposal-density API 的校准，不是厦门麻将 belief 或训练样本；
 真实全历史方案必须先满足同类枚举测试，才有资格替代当前 audit-only repair。
+
+## 2026-08-07：人类对局评测与数据采集入口（默认关闭）
+
+“胜过人类”不能由 Teacher 配对分数替代。网页现在支持显式 `--human-log local_human_data/*.jsonl`：只在
+玩家完成一局且至少行动一次后，追加玩家可见状态、合法动作、实际人类选择、公开 action 历史和本局分差。
+牌墙顺序、AI 暗手、随机种子、账号、网络标识和时间戳都不写入；本地目录被 Git 忽略。记录来源固定为
+`local_human_opt_in`，默认不进入 Teacher/DAgger 训练，须单独质量审查与按完整牌局留出评测。
+
+为进行受控试玩，`serve_web_game.py --ai-checkpoint <policy-value.pt>` 会将三名 AI 显式替换为该 checkpoint，
+网页标识为 `EXPLICIT EXPERIMENTAL CHECKPOINT`；没有参数时仍是 Teacher。run4 checkpoint 已通过“加载、响应、
+人类一手、AI 自动推进”的规则引擎冒烟检查。该路径仅提供未来人类 A/B 与数据采集能力，**不构成** run4
+战胜人类的结论。
