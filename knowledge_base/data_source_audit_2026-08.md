@@ -16,6 +16,7 @@
 | [`cyntc_1061451899/poker-majiang`](https://gitee.com/cyntc_1061451899/poker-majiang)，commit `c717ee0cbf44f616e2c062d2aa2d94fa4530298d` | 根目录为 Mulan PSL v2；包含名为 `xmmajiang` 的游戏服务、事件 recorder 与固定启发式机器人，没有神经网络训练器、专家牌谱或公开数据发布说明。其 recorder 的事件结构可包含行动者完整手牌。 | **不导入**代码、记录或机器人。它不是干净的 actor-visible 训练集；若未来有获得明确授权的记录，也必须重新脱敏、规则重放和审计。 |
 | [`YaxinCui/fuzhou-mahjong-ai`](https://github.com/YaxinCui/fuzhou-mahjong-ai)，commit `53f73d2495c4a49790ab2af7c064906cd5d9fd2b` | 实际为江西抚州／南城玩法，规则与厦门 classic 不同，且本次审计未发现明确许可。 | **不可复用**规则、代码、权重、轨迹和标签；详见 [外部项目迁移审计](external_transfer_audit_2026-08.md)。 |
 | [Kanachan](https://github.com/Cryolite/kanachan) | 日麻（Riichi）训练框架，README 明确要求用户自行准备雀魂牌谱；不随仓库发布训练数据。 | 仅作架构研究。日麻牌谱、动作与奖励都不能作为厦门动作监督。 |
+| [MahjongLM Dataset](https://huggingface.co/datasets/mitsutani/mahjonglm-dataset) 与 [MahjongLM 100M](https://huggingface.co/mitsutani/mahjonglm-100M) | 为 Tenhou 日麻 2011–2024 牌谱的处理衍生物。数据卡标为 `source-data-terms-apply`，访问前还要求接受条件；模型卡标为 `other`，并要求下游使用者核验原始数据条款。数据令牌流还包含日麻规则、选项／决议与（某些视图中的）完整牌墙。 | **不下载、不初始化、不蒸馏**。即使只计划抽取公开弃牌／副露事件，仍须先取得与目标用途相容的原始数据授权，并证明过滤器不会读取动作、牌墙、暗手、结算或玩家标识。 |
 | 厦门规则说明网页 | 公开资料可交叉核对 144 张、花牌、翻金等规则事实，但不提供可复放、可授权的逐动作对局数据。 | 仅用于规则调研，不能生成监督标签。 |
 
 ## 未来数据准入契约
@@ -44,3 +45,10 @@
 2. 一个独立牌墙和固定异质对手阵容上通过门槛的、公开信息安全的新 Teacher。
 
 因此本项目不会为了扩大样本量而混用其它麻将变体、未知来源的线上记录或旧 rejected checkpoint。
+
+### 已否决的跨变体预训练捷径
+
+本次还专门核验了「仅以公开弃牌／副露序列表征预训练，再在厦门数据上微调」这一方向。它在方法上可能
+值得日后研究，但当前没有一个同时具备**原始来源授权可核验、可过滤为 actor-visible 事件、且不含日麻
+动作／价值监督**的候选语料。因此它不是当前训练实验的起点；待获得书面授权的来源后，必须先实现一个
+fail-closed 转换器和逐牌局审计，再单独预注册表征迁移对厦门留出集的增益检验。
