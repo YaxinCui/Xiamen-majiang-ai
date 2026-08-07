@@ -12,7 +12,7 @@ import math
 from pathlib import Path
 import random
 import sys
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,6 +71,14 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         help="可重复指定；追加在线 DAgger 等训练轨迹",
+    )
+    parser.add_argument(
+        "--stream-train-shards",
+        action="store_true",
+        help=(
+            "逐个读取、打乱并释放 train JSONL 分片；适用于大规模 v4 语料。"
+            "验证与测试仍完整载入，以保持 checkpoint 选择可复现。"
+        ),
     )
     parser.add_argument(
         "--validation", type=Path, default=base / "validation.trajectories.jsonl"
@@ -361,6 +369,36 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
     return examples
 
 
+def summarize_training_examples(
+    paths: Sequence[Path], args: argparse.Namespace
+) -> tuple[int, Counter[str], bool]:
+    """Read only labels/provenance needed before streaming large train shards.
+
+    The rich JSON trajectory objects are intentionally not retained.  This lets
+    class balancing and Q-head compatibility checks cover *all* shards without
+    making the memory requirement scale with the full corpus.
+    """
+
+    decision_count = 0
+    action_counts: Counter[str] = Counter()
+    has_action_value_targets = False
+    for path in paths:
+        for trajectory in read_trajectory_jsonl(path):
+            source = str(trajectory.source_metadata.get("collector", "legacy"))
+            if source == "local_human_opt_in" and not getattr(
+                args, "allow_local_human_data", False
+            ):
+                raise ValueError(
+                    "检测到 local_human_opt_in 轨迹；默认禁止训练。"
+                    "请先完成独立审计/人工复核，并显式传入 --allow-local-human-data"
+                )
+            for decision in trajectory.decisions:
+                decision_count += 1
+                action_counts[decision.chosen_action.kind] += 1
+                has_action_value_targets |= decision.action_values is not None
+    return decision_count, action_counts, has_action_value_targets
+
+
 def local_human_input_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
     """Find human-only inputs and reject a file that mixes provenance classes."""
 
@@ -387,15 +425,65 @@ def report_input_path(path: Path, human_paths: set[Path]) -> str:
     return "<local_human_data>" if path in human_paths else str(path)
 
 
-def class_weights(examples: Iterable[Example], maximum: float) -> dict[str, float]:
+def class_weights_from_counts(
+    counts: Mapping[str, int], maximum: float
+) -> dict[str, float]:
     if maximum <= 0:
         raise ValueError("max-class-weight 必须为正数")
-    counts = Counter(example.action_kind for example in examples)
+    if not counts:
+        raise ValueError("至少需要一个训练决策来计算类别权重")
     largest = max(counts.values())
     return {
         kind: min(maximum, math.sqrt(largest / count))
         for kind, count in sorted(counts.items())
     }
+
+
+def class_weights(examples: Iterable[Example], maximum: float) -> dict[str, float]:
+    return class_weights_from_counts(
+        Counter(example.action_kind for example in examples), maximum
+    )
+
+
+def iter_training_batches(
+    *,
+    paths: Sequence[Path],
+    args: argparse.Namespace,
+    epoch: int,
+    batch_size: int,
+    stream_shards: bool,
+    in_memory_examples: list[Example] | None,
+) -> Iterable[list[Example]]:
+    """Yield deterministic shuffled batches without retaining all train shards.
+
+    Shard order and within-shard order change each epoch.  A streaming epoch
+    intentionally uses each decision once, exactly like the in-memory path;
+    only the shuffle domain is one JSONL shard so that large v4 corpora do not
+    expand into tens of gigabytes of Python objects.
+    """
+
+    if batch_size <= 0:
+        raise ValueError("batch_size 必须为正数")
+    if not stream_shards:
+        if in_memory_examples is None:
+            raise ValueError("非流式训练需要已加载的 train examples")
+        indices = list(range(len(in_memory_examples)))
+        random.Random(args.seed + epoch).shuffle(indices)
+        for start in range(0, len(indices), batch_size):
+            yield [
+                in_memory_examples[index]
+                for index in indices[start : start + batch_size]
+            ]
+        return
+
+    shard_order = list(enumerate(paths))
+    random.Random(args.seed + epoch).shuffle(shard_order)
+    for source_index, path in shard_order:
+        examples = load_examples(path, args)
+        indices = list(range(len(examples)))
+        random.Random(args.seed + epoch * 1_000_003 + source_index).shuffle(indices)
+        for start in range(0, len(indices), batch_size):
+            yield [examples[index] for index in indices[start : start + batch_size]]
 
 
 def tensors(
@@ -1062,23 +1150,38 @@ def main() -> None:
                 for split, paths in human_paths_by_split.items()
             },
         }
-    train = load_examples(args.train, args)
-    for path in args.additional_train:
-        train.extend(load_examples(path, args))
+    train_paths = input_paths_by_split["train"]
+    if args.stream_train_shards:
+        train_decisions, train_action_counts, train_has_action_value_targets = (
+            summarize_training_examples(train_paths, args)
+        )
+        train: list[Example] | None = None
+    else:
+        train = load_examples(args.train, args)
+        for path in args.additional_train:
+            train.extend(load_examples(path, args))
+        train_decisions = len(train)
+        train_action_counts = Counter(example.action_kind for example in train)
+        train_has_action_value_targets = any(
+            example.action_values is not None for example in train
+        )
     validation = load_examples(args.validation, args)
     for path in args.additional_validation:
         validation.extend(load_examples(path, args))
     test = load_examples(args.test, args)
     for path in args.additional_test:
         test.extend(load_examples(path, args))
-    if not train or not validation or not test:
+    if not train_decisions or not validation or not test:
         raise ValueError("train、validation 和 test 都必须含有决策")
-    has_action_value_targets = any(
-        example.action_values is not None
-        for examples in (train, validation, test)
-        for example in examples
+    has_action_value_targets = (
+        train_has_action_value_targets
+        or any(
+            example.action_values is not None
+            for examples in (validation, test)
+            for example in examples
+        )
     )
-    weights = class_weights(train, args.max_class_weight)
+    weights = class_weights_from_counts(train_action_counts, args.max_class_weight)
     if args.init_checkpoint:
         initial_agent = TorchPolicyValueAgent.load(
             args.init_checkpoint, device=str(device)
@@ -1182,17 +1285,21 @@ def main() -> None:
     best_epoch: int | None = None
     best_validation: dict[str, float] | None = None
     best_state: dict[str, torch.Tensor] | None = None
-    indices = list(range(len(train)))
     for epoch in range(1, args.epochs + 1):
-        random.Random(args.seed + epoch).shuffle(indices)
         network.train()
         policy_total = 0.0
         value_total = 0.0
         action_value_total = 0.0
         action_value_rank_total = 0.0
         batches = 0
-        for start in range(0, len(indices), args.batch_size):
-            rows = [train[index] for index in indices[start : start + args.batch_size]]
+        for rows in iter_training_batches(
+            paths=train_paths,
+            args=args,
+            epoch=epoch,
+            batch_size=args.batch_size,
+            stream_shards=args.stream_train_shards,
+            in_memory_examples=train,
+        ):
             (
                 candidates,
                 mask,
@@ -1384,6 +1491,12 @@ def main() -> None:
         "action_value_pairwise_confidence_z": args.action_value_pairwise_confidence_z,
         "action_value_margin_scale": args.action_value_margin_scale,
         "base_learning_rate_scale": args.base_learning_rate_scale,
+        "stream_train_shards": args.stream_train_shards,
+        "dataset_decisions": {
+            "train": train_decisions,
+            "validation": len(validation),
+            "test": len(test),
+        },
         "inputs": {
             "train": [
                 report_input_path(args.train, human_path_set),

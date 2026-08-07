@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
     import torch
@@ -10,6 +12,46 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(torch is None, "PyTorch 仅在项目 .venv 中安装")
 class CheckpointSelectionTests(unittest.TestCase):
+    def test_streamed_training_shards_cover_each_example_once(self):
+        from scripts.train_policy_value import Example, iter_training_batches
+
+        first = Path("first.trajectories.jsonl")
+        second = Path("second.trajectories.jsonl")
+
+        def example(index: int) -> Example:
+            return Example(
+                candidates=((0.0,) * 145,),
+                public_events=(),
+                chosen_index=index,
+                action_kind="discard",
+                source="teacher_self_play",
+                action_values=None,
+                action_value_stderrs=None,
+                action_value_gap_stderrs=None,
+                value_target=None,
+                sample_weight=1.0,
+            )
+
+        examples_by_path = {first: [example(0), example(1)], second: [example(2)]}
+        args = SimpleNamespace(seed=37)
+        with patch(
+            "scripts.train_policy_value.load_examples",
+            side_effect=lambda path, _args: examples_by_path[path],
+        ) as loader:
+            batches = list(
+                iter_training_batches(
+                    paths=(first, second),
+                    args=args,
+                    epoch=2,
+                    batch_size=1,
+                    stream_shards=True,
+                    in_memory_examples=None,
+                )
+            )
+        flattened = [row.chosen_index for batch in batches for row in batch]
+        self.assertCountEqual(flattened, [0, 1, 2])
+        self.assertEqual(loader.call_count, 2)
+
     def test_lowest_validation_policy_loss_wins_then_accuracy_breaks_ties(self):
         from scripts.train_policy_value import better_validation_checkpoint
 

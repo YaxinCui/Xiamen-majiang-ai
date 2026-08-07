@@ -257,6 +257,10 @@ python3 scripts/collect_training_trajectories.py \
   --device cuda --output-dir artifacts/policy-value-classic-v1
 ```
 
+当 v4 语料被切成多个大分片时，把后续训练分片通过重复的 `--additional-train` 传入，并开启
+`--stream-train-shards`。它会逐分片打乱、训练并释放 Python 对象；验证与测试仍完整读取，确保 checkpoint
+选择只由固定留出集决定。
+
 离线数据无法完全覆盖模型犯错后的状态，因此下一轮可用“候选一席 vs 三个冻结 Teacher”
 的 DAgger 采集器。每副牌墙轮换候选四座，四个轮换被强制置于同一数据切分；候选实际访问
 到的状态由 Teacher 标注，终局净分则是该候选行为分布下的 value 标签。
