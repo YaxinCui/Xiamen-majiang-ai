@@ -1,0 +1,66 @@
+{
+  "status": "selection_and_terminal_groups_created",
+  "input": "artifacts/teacher-response-intervention-classic-v2/test.trajectories.jsonl",
+  "input_sha256": "1143f9d26f61810a08d2a59d62bfaf7d558ab09dc9f6569cbdfa02ecb12f1373",
+  "selection_fraction": 0.5,
+  "split_salt": "teacher-response-v2-selector-terminal-v1",
+  "group_overlap": 0,
+  "protocol": "selection may choose only a pre-registered candidate; terminal must remain unopened until that choice is recorded and is final-OPE only",
+  "partitions": {
+    "selection": {
+      "file": "selection.trajectories.jsonl",
+      "hands": 852,
+      "wall_groups": 213,
+      "sha256": "aa27598e2c38978d3ec7601b531468f47e1f5dc9e71e38fffe4f9bcba6458915",
+      "manifest": {
+        "version": "xiamen-training-trajectory-v3",
+        "hands": 852,
+        "decisions": 9191,
+        "rules_versions": {
+          "xiamen-classic-full-v2": 852
+        },
+        "agent_profiles": {
+          "candidate_policy": 852,
+          "heuristic_teacher": 2556
+        },
+        "action_counts": {
+          "add_kan": 17,
+          "an_kan": 13,
+          "chi": 1162,
+          "discard": 6871,
+          "hu": 202,
+          "ming_kan": 62,
+          "pass": 3,
+          "pong": 861
+        },
+        "phase_counts": {
+          "discard": 7040,
+          "response": 2151
+        },
+        "outcome_counts": {
+          "discard": 258,
+          "opening_gold": 4,
+          "self_draw": 578,
+          "three_gold": 4,
+          "three_gold_open": 8
+        },
+        "score_mean": 0.0,
+        "score_min": -76,
+        "score_max": 228,
+        "action_value_decisions": 0,
+        "mean_action_value_span": null,
+        "action_value_stderr_observations": 0,
+        "mean_action_value_stderr": null,
+        "action_value_gap_stderr_observations": 0,
+        "mean_action_value_gap_stderr": null
+      }
+    },
+    "terminal": {
+      "file": "terminal.trajectories.jsonl",
+      "hands": 836,
+      "wall_groups": 209,
+      "sha256": "12ec74325811ac96457fbcc4ac03ec7f6b055d1ff3563ea57f7bfd11614a144f",
+      "manifest_omitted": "terminal outcome/action summaries stay unread until final OPE"
+    }
+  }
+}

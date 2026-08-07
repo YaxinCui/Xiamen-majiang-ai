@@ -140,6 +140,13 @@ run4-based response outcome ensemble 已被全新实战否决，不能再把 run
 66.1/218.7，双下界均不为正，`ready_for_single_override_game_screen=false`。该 test 组已消耗，禁止再用它调 LCB
 阈值、挑 ensemble 成员或重试 selector。下一轮必须预注册新候选，并使用新的 selector 与终检墙组。
 
+第二轮预注册了四层墙组：1600 个全新物理墙先分 train/validation/held-out，再把 held-out 按完整墙组分为 selection
+与 terminal；五个 outcome 成员训练时均显式 `--skip-test`，报告亦写 `terminal_test_read=false`。预先固定的
+LCB 最小优势网格 `{0, 12, 24, 36}` 只在 200 个 selection 墙组（522 个随机 response）上筛选：0 分阈值的
+IPS/DR 95% 下界为 −7.7110/−7.5706（override 35.63%）；12 分为 −1.5236/−1.1817（override 3.45%）；24 与
+36 分均退化成无 override、下界 0。所有候选失败，选择器状态为 `selection_rejected_terminal_unread`，terminal
+墙组从未读取。不得基于这一 selector 再新增阈值或改模型后重试；下一条路径须是新的历史表示／候选定义及全新四层墙组。
+
 ## 实验记录模板
 
 每个实验目录应保存 `config.json`、`metrics.json`、`checkpoint`、`git_commit`、

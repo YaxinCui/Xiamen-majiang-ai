@@ -379,6 +379,25 @@ response 按已知概率采样。它是数据收集入口，不是部署 selecto
 IPS、DR 的 95% 下界为正和两侧 ESS 达标。即使通过，它也只解锁「每局**最多一次** response override、随后回到
 Teacher」的全新 200 墙四座轮换筛选；不解锁完整策略、400 墙终检、网页替换或任何对人类强度的声明。
 
+若要从一个有限阈值网格中选择候选，不能把同一 test 墙同时用于选择和终检。先把未读 held-out 池按完整物理墙分成
+`selection` 与 `terminal`，训练时传 `--skip-test`，再使用选择器；它在 selector 全部失败时不读取 terminal：
+
+```bash
+.venv/bin/python scripts/split_heldout_trajectory_groups.py \
+  --input artifacts/teacher-response-intervention-v2/test.trajectories.jsonl \
+  --output-dir artifacts/teacher-response-intervention-v2-heldout \
+  --selection-fraction .5 --split-salt teacher-response-v2-selector-terminal-v1
+
+.venv/bin/python scripts/select_teacher_response_override.py \
+  --outcome-checkpoint artifacts/policy-value-teacher-response-outcome-v2-seed1/policy-value.pt \
+  --outcome-checkpoint artifacts/policy-value-teacher-response-outcome-v2-seed2/policy-value.pt \
+  --selection-data artifacts/teacher-response-intervention-v2-heldout/selection.trajectories.jsonl \
+  --terminal-data artifacts/teacher-response-intervention-v2-heldout/terminal.trajectories.jsonl \
+  --minimum-lcb-advantage 0 --minimum-lcb-advantage 12 \
+  --minimum-lcb-advantage 24 --minimum-lcb-advantage 36 \
+  --output artifacts/teacher-response-intervention-v2-heldout/selection-result.json
+```
+
 ### response 定向反事实 Q（离线门槛，尚不选牌）
 
 可显式只收集 response 的逐合法动作分支；每个分支的暗牌和牌墙只在规则 collector 内存中使用，导出的输入和

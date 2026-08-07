@@ -1,0 +1,1121 @@
+{
+  "model": "candidate_policy_value_afterstate_outcomes",
+  "status": "diagnostic_only_not_authorized_for_action_selection",
+  "initialization": {
+    "kind": "fresh_untrained_policy_anchor",
+    "seed": 202608490,
+    "hidden_size": 128
+  },
+  "feature_version": 3,
+  "feature_dim": 145,
+  "hidden_size": 128,
+  "device": "cuda",
+  "seed": 202608493,
+  "value_scale": 80.0,
+  "loss_weights": {
+    "score": 1.0,
+    "own_win": 0.25,
+    "opponent_win": 0.25
+  },
+  "behavior_boundary": {
+    "target": "only the logged executed_index action",
+    "excluded_default_source": "random_legal_teacher_labeled",
+    "reason": "its random continuation does not match deployment behavior",
+    "policy_encoder_frozen": true,
+    "outcome_encoder_trainable": true,
+    "known_propensity_required": true,
+    "only_randomized_actions": true,
+    "decision_phase": "response",
+    "terminal_test_read": false
+  },
+  "sources": [
+    "candidate_vs_teacher_dagger",
+    "teacher_self_play"
+  ],
+  "inputs": {
+    "train": [
+      "artifacts/teacher-response-intervention-classic-v2/train.trajectories.jsonl"
+    ],
+    "validation": [
+      "artifacts/teacher-response-intervention-classic-v2/validation.trajectories.jsonl"
+    ],
+    "test": []
+  },
+  "counts": {
+    "train": 2332,
+    "validation": 583,
+    "test": null,
+    "train_by_source": {
+      "candidate_vs_teacher_dagger": 2332
+    },
+    "validation_by_source": {
+      "candidate_vs_teacher_dagger": 583
+    },
+    "test_by_source": null,
+    "train_propensity": {
+      "known": 2332,
+      "unknown": 0,
+      "minimum": 0.1,
+      "mean": 0.6543481989708405,
+      "maximum": 0.8
+    },
+    "validation_propensity": {
+      "known": 583,
+      "unknown": 0,
+      "minimum": 0.1,
+      "mean": 0.6558490566037736,
+      "maximum": 0.8
+    },
+    "test_propensity": null
+  },
+  "checkpoint_selection": {
+    "split": "validation",
+    "metric": "lowest_weighted_outcome_loss",
+    "selected_epoch": 34,
+    "selected_validation": {
+      "decisions": 583.0,
+      "total_loss": 0.4074709695567398,
+      "score_huber_loss": 0.12755968132875795,
+      "own_win_bce": 0.5600859024921372,
+      "opponent_win_bce": 0.5595593063949925,
+      "score_mae": 0.3939723346899959,
+      "score_mae_points": 31.51778677519967,
+      "score_rmse_points": 40.80958763387355,
+      "zero_score_mae_points": 34.9708402708914,
+      "own_win_brier": 0.18667190806943393,
+      "opponent_win_brier": 0.1865718687787064,
+      "own_win_target_rate": 0.2830188679245283,
+      "opponent_win_target_rate": 0.7169811320754716,
+      "own_win_prediction_mean": 0.2745478778924173,
+      "opponent_win_prediction_mean": 0.7212447073201986
+    }
+  },
+  "validation": {
+    "decisions": 583.0,
+    "total_loss": 0.4074709695567398,
+    "score_huber_loss": 0.12755968132875795,
+    "own_win_bce": 0.5600859024921372,
+    "opponent_win_bce": 0.5595593063949925,
+    "score_mae": 0.3939723346899959,
+    "score_mae_points": 31.51778677519967,
+    "score_rmse_points": 40.80958763387355,
+    "zero_score_mae_points": 34.9708402708914,
+    "own_win_brier": 0.18667190806943393,
+    "opponent_win_brier": 0.1865718687787064,
+    "own_win_target_rate": 0.2830188679245283,
+    "opponent_win_target_rate": 0.7169811320754716,
+    "own_win_prediction_mean": 0.2745478778924173,
+    "opponent_win_prediction_mean": 0.7212447073201986
+  },
+  "test": null,
+  "history": [
+    {
+      "epoch": 1,
+      "train_total_loss": 0.4901107370853424,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.47644667948498737,
+        "score_huber_loss": 0.14536737346475365,
+        "own_win_bce": 0.6621448522366545,
+        "opponent_win_bce": 0.6621723420419579,
+        "score_mae": 0.445650931696949,
+        "score_mae_points": 35.65207453575592,
+        "score_rmse_points": 43.93372747881804,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.23452930221426752,
+        "opponent_win_brier": 0.23454293501315762,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.4608367147821914,
+        "opponent_win_prediction_mean": 0.5391244904663715
+      }
+    },
+    {
+      "epoch": 2,
+      "train_total_loss": 0.45353399217128754,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.44428130999642007,
+        "score_huber_loss": 0.14636858233201155,
+        "own_win_bce": 0.59584592566482,
+        "opponent_win_bce": 0.5958050147951365,
+        "score_mae": 0.41980169894969277,
+        "score_mae_points": 33.58413591597542,
+        "score_rmse_points": 44.29124985365441,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.20293200609001041,
+        "opponent_win_brier": 0.20291603081835685,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2701447390364946,
+        "opponent_win_prediction_mean": 0.7292303867241939
+      }
+    },
+    {
+      "epoch": 3,
+      "train_total_loss": 0.47041587233543397,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.44342917459497727,
+        "score_huber_loss": 0.14556316902308275,
+        "own_win_bce": 0.5959925414358568,
+        "opponent_win_bce": 0.5954714437905143,
+        "score_mae": 0.45761422472997965,
+        "score_mae_points": 36.60913797839837,
+        "score_rmse_points": 43.8483720599519,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.2029599407320366,
+        "opponent_win_brier": 0.2027596118724162,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.25657345622931294,
+        "opponent_win_prediction_mean": 0.7392178661418412
+      }
+    },
+    {
+      "epoch": 4,
+      "train_total_loss": 0.44293045699596406,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4451820082566341,
+        "score_huber_loss": 0.14477694191767054,
+        "own_win_bce": 0.6001924891823561,
+        "opponent_win_bce": 0.601427772544056,
+        "score_mae": 0.4326071272992352,
+        "score_mae_points": 34.60857018393882,
+        "score_rmse_points": 43.90360188785295,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.20480603337492378,
+        "opponent_win_brier": 0.20535487212611309,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.33619044125591296,
+        "opponent_win_prediction_mean": 0.6590181746572819
+      }
+    },
+    {
+      "epoch": 5,
+      "train_total_loss": 0.4376854509115219,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.44079300234698104,
+        "score_huber_loss": 0.14441342613504846,
+        "own_win_bce": 0.5926968618895136,
+        "opponent_win_bce": 0.5928213906124566,
+        "score_mae": 0.42910946540112765,
+        "score_mae_points": 34.32875723209021,
+        "score_rmse_points": 43.83642238171936,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.20157630815718636,
+        "opponent_win_brier": 0.20162911030685923,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.28418488935990766,
+        "opponent_win_prediction_mean": 0.7103373820335951
+      }
+    },
+    {
+      "epoch": 6,
+      "train_total_loss": 0.43738281428813935,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4408154045942513,
+        "score_huber_loss": 0.14347989389458815,
+        "own_win_bce": 0.595111703484177,
+        "opponent_win_bce": 0.5942303131415955,
+        "score_mae": 0.43697061424189937,
+        "score_mae_points": 34.95764913935195,
+        "score_rmse_points": 43.577982932211924,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.20232383014816363,
+        "opponent_win_brier": 0.20201664232676067,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2498708106641295,
+        "opponent_win_prediction_mean": 0.7450321256398745
+      }
+    },
+    {
+      "epoch": 7,
+      "train_total_loss": 0.43602019250392915,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.43909700513908423,
+        "score_huber_loss": 0.1430434911650818,
+        "own_win_bce": 0.5920762379827875,
+        "opponent_win_bce": 0.5921377881108999,
+        "score_mae": 0.4330911587278389,
+        "score_mae_points": 34.64729269822711,
+        "score_rmse_points": 43.44137320267489,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.20116918082916102,
+        "opponent_win_brier": 0.20121429469532254,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.28778723950655954,
+        "opponent_win_prediction_mean": 0.7083012235716727
+      }
+    },
+    {
+      "epoch": 8,
+      "train_total_loss": 0.43482122719287875,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4392623959131552,
+        "score_huber_loss": 0.14294635069973474,
+        "own_win_bce": 0.5927027437331133,
+        "opponent_win_bce": 0.5925614596640062,
+        "score_mae": 0.44711952144040457,
+        "score_mae_points": 35.76956171523236,
+        "score_rmse_points": 43.21708193803089,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.2012032104806262,
+        "opponent_win_brier": 0.20119287219301096,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2818078291354826,
+        "opponent_win_prediction_mean": 0.7141635103045769
+      }
+    },
+    {
+      "epoch": 9,
+      "train_total_loss": 0.43410749435424806,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4376353087290278,
+        "score_huber_loss": 0.14216171836362285,
+        "own_win_bce": 0.5909824762908713,
+        "opponent_win_bce": 0.5909118924296332,
+        "score_mae": 0.43534252369587867,
+        "score_mae_points": 34.82740189567029,
+        "score_rmse_points": 43.09599184583243,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.20037599861315145,
+        "opponent_win_brier": 0.20040176581354943,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.28443575641507757,
+        "opponent_win_prediction_mean": 0.7112353015722991
+      }
+    },
+    {
+      "epoch": 10,
+      "train_total_loss": 0.4367915838956833,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.44059562652434126,
+        "score_huber_loss": 0.14605184792705506,
+        "own_win_bce": 0.5888692805125005,
+        "opponent_win_bce": 0.5893058113332065,
+        "score_mae": 0.48125505202016944,
+        "score_mae_points": 38.50040416161355,
+        "score_rmse_points": 43.41693016002239,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19963522758941912,
+        "opponent_win_brier": 0.19985166258509326,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.30268294529072415,
+        "opponent_win_prediction_mean": 0.6927538523338671
+      }
+    },
+    {
+      "epoch": 11,
+      "train_total_loss": 0.42288040220737455,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4440519230545692,
+        "score_huber_loss": 0.15033754900634597,
+        "own_win_bce": 0.5876465358006198,
+        "opponent_win_bce": 0.5872109793062684,
+        "score_mae": 0.39514559292670587,
+        "score_mae_points": 31.61164743413647,
+        "score_rmse_points": 44.70919934829123,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19872571837227299,
+        "opponent_win_brier": 0.1986079175108293,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2634463727371975,
+        "opponent_win_prediction_mean": 0.7325851545121208
+      }
+    },
+    {
+      "epoch": 12,
+      "train_total_loss": 0.4218040704727173,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4334349458458902,
+        "score_huber_loss": 0.1408793723041361,
+        "own_win_bce": 0.5851534148023223,
+        "opponent_win_bce": 0.5850688866235788,
+        "score_mae": 0.4507776656240787,
+        "score_mae_points": 36.0622132499263,
+        "score_rmse_points": 42.75219470403932,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19766999108918126,
+        "opponent_win_brier": 0.19770632231828483,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.28147070281092545,
+        "opponent_win_prediction_mean": 0.7136310819491718
+      }
+    },
+    {
+      "epoch": 13,
+      "train_total_loss": 0.4162904113531113,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.43693100690432723,
+        "score_huber_loss": 0.14207707285420973,
+        "own_win_bce": 0.588950343442822,
+        "opponent_win_bce": 0.5904653963870904,
+        "score_mae": 0.4608631592058604,
+        "score_mae_points": 36.86905273646883,
+        "score_rmse_points": 42.88401881864373,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19986889088337867,
+        "opponent_win_brier": 0.20059449145151861,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.33720545825990966,
+        "opponent_win_prediction_mean": 0.6564042498685074
+      }
+    },
+    {
+      "epoch": 14,
+      "train_total_loss": 0.4125005602836609,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.42830875766420445,
+        "score_huber_loss": 0.13878451421933558,
+        "own_win_bce": 0.5789277805063369,
+        "opponent_win_bce": 0.5791692158165763,
+        "score_mae": 0.43974041816096365,
+        "score_mae_points": 35.17923345287709,
+        "score_rmse_points": 42.464202594143636,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19515772340228177,
+        "opponent_win_brier": 0.19535480518897239,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.29704050420692407,
+        "opponent_win_prediction_mean": 0.6974525451660156
+      }
+    },
+    {
+      "epoch": 15,
+      "train_total_loss": 0.40176583230495455,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.42874169620600616,
+        "score_huber_loss": 0.13904016383158405,
+        "own_win_bce": 0.5797938675864074,
+        "opponent_win_bce": 0.5790123178864834,
+        "score_mae": 0.410733352190021,
+        "score_mae_points": 32.85866817520168,
+        "score_rmse_points": 42.71503137670592,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19448739995678335,
+        "opponent_win_brier": 0.19433354268147646,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2607480207806386,
+        "opponent_win_prediction_mean": 0.7351723633335958
+      }
+    },
+    {
+      "epoch": 16,
+      "train_total_loss": 0.3974103331565857,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4202533037134959,
+        "score_huber_loss": 0.13508679820016972,
+        "own_win_bce": 0.5705394790880063,
+        "opponent_win_bce": 0.5701265655087362,
+        "score_mae": 0.41213858393412306,
+        "score_mae_points": 32.97108671472984,
+        "score_rmse_points": 42.0811278571078,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1913553175754449,
+        "opponent_win_brier": 0.19127849362931162,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.27112706938493314,
+        "opponent_win_prediction_mean": 0.7250561787783588
+      }
+    },
+    {
+      "epoch": 17,
+      "train_total_loss": 0.39307312965393065,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41996836723635167,
+        "score_huber_loss": 0.1346103245612892,
+        "own_win_bce": 0.571069719860934,
+        "opponent_win_bce": 0.5703624770121959,
+        "score_mae": 0.41221607528869736,
+        "score_mae_points": 32.977286023095786,
+        "score_rmse_points": 41.97323305587809,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19120034468112637,
+        "opponent_win_brier": 0.19105343957707976,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.26420008952171886,
+        "opponent_win_prediction_mean": 0.731358523229792
+      }
+    },
+    {
+      "epoch": 18,
+      "train_total_loss": 0.39991813004016874,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.42796005883715776,
+        "score_huber_loss": 0.1370893675022428,
+        "own_win_bce": 0.5810977599837563,
+        "opponent_win_bce": 0.5823850162442307,
+        "score_mae": 0.44794549173188253,
+        "score_mae_points": 35.8356393385506,
+        "score_rmse_points": 42.114983574717364,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.196897384028492,
+        "opponent_win_brier": 0.19751353288392057,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.34724476979486324,
+        "opponent_win_prediction_mean": 0.6479099659731621
+      }
+    },
+    {
+      "epoch": 19,
+      "train_total_loss": 0.4026831775903702,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4171562576682449,
+        "score_huber_loss": 0.13356273554866147,
+        "own_win_bce": 0.5671785757022288,
+        "opponent_win_bce": 0.5671955353195426,
+        "score_mae": 0.43376306563257966,
+        "score_mae_points": 34.70104525060637,
+        "score_rmse_points": 41.60578983300412,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19008255004882812,
+        "opponent_win_brier": 0.19023344978869064,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2897526526737377,
+        "opponent_win_prediction_mean": 0.7036742902333699
+      }
+    },
+    {
+      "epoch": 20,
+      "train_total_loss": 0.38958326280117034,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4181331263193749,
+        "score_huber_loss": 0.13533931955260642,
+        "own_win_bce": 0.5662594429420157,
+        "opponent_win_bce": 0.5649157841250582,
+        "score_mae": 0.3881839405406605,
+        "score_mae_points": 31.054715243252843,
+        "score_rmse_points": 42.233516589908355,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18924219285235397,
+        "opponent_win_brier": 0.18886872711966826,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2508717433870554,
+        "opponent_win_prediction_mean": 0.7431820236389265
+      }
+    },
+    {
+      "epoch": 21,
+      "train_total_loss": 0.40182753205299376,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41260046732977773,
+        "score_huber_loss": 0.13051547358007415,
+        "own_win_bce": 0.5641604463600172,
+        "opponent_win_bce": 0.5641794762930371,
+        "score_mae": 0.417574043339358,
+        "score_mae_points": 33.40592346714864,
+        "score_rmse_points": 41.206491623598026,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1888425738692897,
+        "opponent_win_brier": 0.1889470102038637,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2900971597504657,
+        "opponent_win_prediction_mean": 0.7043606020369619
+      }
+    },
+    {
+      "epoch": 22,
+      "train_total_loss": 0.38817783296108244,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4137334345135435,
+        "score_huber_loss": 0.13076478145748224,
+        "own_win_bce": 0.5656700131210209,
+        "opponent_win_bce": 0.5662045991032242,
+        "score_mae": 0.4238524003462358,
+        "score_mae_points": 33.90819202769886,
+        "score_rmse_points": 41.22363189731164,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18964622196570474,
+        "opponent_win_brier": 0.18992707332656886,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.31301376709193757,
+        "opponent_win_prediction_mean": 0.6822949273713048
+      }
+    },
+    {
+      "epoch": 23,
+      "train_total_loss": 0.38214589059352877,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4198812052070788,
+        "score_huber_loss": 0.13319487900410876,
+        "own_win_bce": 0.573856253157758,
+        "opponent_win_bce": 0.5728890065672467,
+        "score_mae": 0.39869103014571383,
+        "score_mae_points": 31.895282411657107,
+        "score_rmse_points": 41.79218443146392,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19168276647760774,
+        "opponent_win_brier": 0.191460504744515,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2544210640071391,
+        "opponent_win_prediction_mean": 0.741880950142548
+      }
+    },
+    {
+      "epoch": 24,
+      "train_total_loss": 0.3732492595911026,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41574453515213106,
+        "score_huber_loss": 0.13115694902926733,
+        "own_win_bce": 0.56959850229898,
+        "opponent_win_bce": 0.5687518385630325,
+        "score_mae": 0.3987942756142461,
+        "score_mae_points": 31.903542049139688,
+        "score_rmse_points": 41.441391843086464,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19030486576348593,
+        "opponent_win_brier": 0.1901179325110303,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.26206837714638553,
+        "opponent_win_prediction_mean": 0.7338509142501072
+      }
+    },
+    {
+      "epoch": 25,
+      "train_total_loss": 0.3893157601356506,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.42274696074464513,
+        "score_huber_loss": 0.13479503278666868,
+        "own_win_bce": 0.5749661584047674,
+        "opponent_win_bce": 0.5768415796000185,
+        "score_mae": 0.4509269230157188,
+        "score_mae_points": 36.074153841257505,
+        "score_rmse_points": 41.71167021357199,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19397011261248057,
+        "opponent_win_brier": 0.19483722339976917,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.34939042904364714,
+        "opponent_win_prediction_mean": 0.6439916175593643
+      }
+    },
+    {
+      "epoch": 26,
+      "train_total_loss": 0.3886558264493942,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41366321400549155,
+        "score_huber_loss": 0.129856462492951,
+        "own_win_bce": 0.5676288592467791,
+        "opponent_win_bce": 0.5675981395444984,
+        "score_mae": 0.4109979207478911,
+        "score_mae_points": 32.87983365983129,
+        "score_rmse_points": 41.1042270515733,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18961508605328883,
+        "opponent_win_brier": 0.18975927408522644,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.29232025800806377,
+        "opponent_win_prediction_mean": 0.7009693950568014
+      }
+    },
+    {
+      "epoch": 27,
+      "train_total_loss": 0.3948004931211472,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4166132069574621,
+        "score_huber_loss": 0.13143353536086058,
+        "own_win_bce": 0.571061987206212,
+        "opponent_win_bce": 0.5696566955507517,
+        "score_mae": 0.39040855355369086,
+        "score_mae_points": 31.232684284295267,
+        "score_rmse_points": 41.50345738551294,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1902552517977628,
+        "opponent_win_brier": 0.18992134473745043,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.25191126474998826,
+        "opponent_win_prediction_mean": 0.7426497523208017
+      }
+    },
+    {
+      "epoch": 28,
+      "train_total_loss": 0.3808219522237778,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.40965525772722877,
+        "score_huber_loss": 0.12822321485440483,
+        "own_win_bce": 0.5629559196084483,
+        "opponent_win_bce": 0.5627722671674006,
+        "score_mae": 0.40944982433809834,
+        "score_mae_points": 32.75598594704787,
+        "score_rmse_points": 40.81235480013848,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18798716726679335,
+        "opponent_win_brier": 0.18801049875354275,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.285550940302592,
+        "opponent_win_prediction_mean": 0.7095756596193918
+      }
+    },
+    {
+      "epoch": 29,
+      "train_total_loss": 0.3828680902719498,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4116367215153284,
+        "score_huber_loss": 0.12967465631344305,
+        "own_win_bce": 0.5637013963319834,
+        "opponent_win_bce": 0.5641468193886824,
+        "score_mae": 0.4228873604566728,
+        "score_mae_points": 33.83098883653383,
+        "score_rmse_points": 40.979525356518465,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18842870375304444,
+        "opponent_win_brier": 0.18867824089874738,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.31176917794229236,
+        "opponent_win_prediction_mean": 0.6837756122569482
+      }
+    },
+    {
+      "epoch": 30,
+      "train_total_loss": 0.38272023797035215,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4195306402332378,
+        "score_huber_loss": 0.133755121974348,
+        "own_win_bce": 0.5712449230624308,
+        "opponent_win_bce": 0.5718571950600037,
+        "score_mae": 0.42680810696060417,
+        "score_mae_points": 34.14464855684833,
+        "score_rmse_points": 41.66556147248699,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19116382860605755,
+        "opponent_win_brier": 0.19152118493107947,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.322014018560969,
+        "opponent_win_prediction_mean": 0.6728181593618507
+      }
+    },
+    {
+      "epoch": 31,
+      "train_total_loss": 0.3851365566253662,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4188022762281408,
+        "score_huber_loss": 0.13318181232154677,
+        "own_win_bce": 0.5722177803618625,
+        "opponent_win_bce": 0.5702640490916335,
+        "score_mae": 0.38192592640479267,
+        "score_mae_points": 30.554074112383415,
+        "score_rmse_points": 41.8746477349914,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19011409654829964,
+        "opponent_win_brier": 0.18962283486158524,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.23700206030294377,
+        "opponent_win_prediction_mean": 0.7581084629274765
+      }
+    },
+    {
+      "epoch": 32,
+      "train_total_loss": 0.37040849924087527,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.40929607696844006,
+        "score_huber_loss": 0.1281657863542514,
+        "own_win_bce": 0.5621528058068421,
+        "opponent_win_bce": 0.5623683304770324,
+        "score_mae": 0.4236003031657041,
+        "score_mae_points": 33.888024253256326,
+        "score_rmse_points": 40.75879333420076,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1876611856817177,
+        "opponent_win_brier": 0.18782623677065605,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.3061877360270322,
+        "opponent_win_prediction_mean": 0.6893974421977179
+      }
+    },
+    {
+      "epoch": 33,
+      "train_total_loss": 0.3888053148984909,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4109158044613859,
+        "score_huber_loss": 0.12885346722439264,
+        "own_win_bce": 0.563905850078393,
+        "opponent_win_bce": 0.5643434537827049,
+        "score_mae": 0.41556810801066013,
+        "score_mae_points": 33.245448640852814,
+        "score_rmse_points": 40.9049972425668,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18860796344423375,
+        "opponent_win_brier": 0.18885690515691583,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.31955978759975007,
+        "opponent_win_prediction_mean": 0.6763602529954338
+      }
+    },
+    {
+      "epoch": 34,
+      "train_total_loss": 0.38252791166305544,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4074709695567398,
+        "score_huber_loss": 0.12755968132875795,
+        "own_win_bce": 0.5600859024921372,
+        "opponent_win_bce": 0.5595593063949925,
+        "score_mae": 0.3939723346899959,
+        "score_mae_points": 31.51778677519967,
+        "score_rmse_points": 40.80958763387355,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18667190806943393,
+        "opponent_win_brier": 0.1865718687787064,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2745478778924173,
+        "opponent_win_prediction_mean": 0.7212447073201986
+      }
+    },
+    {
+      "epoch": 35,
+      "train_total_loss": 0.36758820414543153,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41120295770990295,
+        "score_huber_loss": 0.12900514898128412,
+        "own_win_bce": 0.5648102332960885,
+        "opponent_win_bce": 0.563980975445507,
+        "score_mae": 0.3921717583213008,
+        "score_mae_points": 31.373740665704062,
+        "score_rmse_points": 41.063900085146365,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18801482055035915,
+        "opponent_win_brier": 0.1878380701840435,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2655236389788305,
+        "opponent_win_prediction_mean": 0.7303597203249792
+      }
+    },
+    {
+      "epoch": 36,
+      "train_total_loss": 0.36862944066524506,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4120754819382525,
+        "score_huber_loss": 0.12866227768399907,
+        "own_win_bce": 0.5670183372538453,
+        "opponent_win_bce": 0.5666345321089284,
+        "score_mae": 0.40130552419462906,
+        "score_mae_points": 32.10444193557032,
+        "score_rmse_points": 40.950358894150284,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1888549111106179,
+        "opponent_win_brier": 0.18884997097951062,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.28816463280705606,
+        "opponent_win_prediction_mean": 0.7074922852818798
+      }
+    },
+    {
+      "epoch": 37,
+      "train_total_loss": 0.3815840095281601,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4138301512798355,
+        "score_huber_loss": 0.12890651774805162,
+        "own_win_bce": 0.5695762328586284,
+        "opponent_win_bce": 0.5701182903801801,
+        "score_mae": 0.4199193558602963,
+        "score_mae_points": 33.5935484688237,
+        "score_rmse_points": 40.90498546940718,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19043310960406504,
+        "opponent_win_brier": 0.1907548691764295,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.32108379514507734,
+        "opponent_win_prediction_mean": 0.6740787041534895
+      }
+    },
+    {
+      "epoch": 38,
+      "train_total_loss": 0.367940878868103,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4094212187093077,
+        "score_huber_loss": 0.1276542051450875,
+        "own_win_bce": 0.5639673253684264,
+        "opponent_win_bce": 0.5631007514318921,
+        "score_mae": 0.39603919066859355,
+        "score_mae_points": 31.683135253487485,
+        "score_rmse_points": 40.84601791004758,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1877119365319175,
+        "opponent_win_brier": 0.18753212721024737,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.26605038127604724,
+        "opponent_win_prediction_mean": 0.7292650985063451
+      }
+    },
+    {
+      "epoch": 39,
+      "train_total_loss": 0.3694689005613327,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.415389955452744,
+        "score_huber_loss": 0.13138965679585013,
+        "own_win_bce": 0.5685632585661284,
+        "opponent_win_bce": 0.5674379288025622,
+        "score_mae": 0.39026391567537755,
+        "score_mae_points": 31.221113254030204,
+        "score_rmse_points": 41.512880416309756,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1890725304291138,
+        "opponent_win_brier": 0.1888412897623628,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2581962075078058,
+        "opponent_win_prediction_mean": 0.7373117738072704
+      }
+    },
+    {
+      "epoch": 40,
+      "train_total_loss": 0.3770540863275528,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41418240910737836,
+        "score_huber_loss": 0.12926277022419008,
+        "own_win_bce": 0.5695834020807649,
+        "opponent_win_bce": 0.5700951461931035,
+        "score_mae": 0.4172377610901821,
+        "score_mae_points": 33.37902088721457,
+        "score_rmse_points": 40.98911212743964,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19060958024772526,
+        "opponent_win_brier": 0.19090791836406518,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.3226237779620581,
+        "opponent_win_prediction_mean": 0.673040085754918
+      }
+    },
+    {
+      "epoch": 41,
+      "train_total_loss": 0.3755621999502182,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41457638195612007,
+        "score_huber_loss": 0.12927055987649266,
+        "own_win_bce": 0.5708778217358205,
+        "opponent_win_bce": 0.5703455189284493,
+        "score_mae": 0.4024518472661694,
+        "score_mae_points": 32.196147781293554,
+        "score_rmse_points": 41.11478036942834,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18986271748616396,
+        "opponent_win_brier": 0.18981888445531933,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2824025816614795,
+        "opponent_win_prediction_mean": 0.7131680313555291
+      }
+    },
+    {
+      "epoch": 42,
+      "train_total_loss": 0.37507517337799073,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4160190054932753,
+        "score_huber_loss": 0.12980105267840839,
+        "own_win_bce": 0.5726179093071363,
+        "opponent_win_bce": 0.5722538910640043,
+        "score_mae": 0.40112172841616806,
+        "score_mae_points": 32.08973827329344,
+        "score_rmse_points": 41.209089362474025,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19055293886371175,
+        "opponent_win_brier": 0.1905640885106082,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.28906676617944627,
+        "opponent_win_prediction_mean": 0.7067321332404789
+      }
+    },
+    {
+      "epoch": 43,
+      "train_total_loss": 0.368925204873085,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4170752174858368,
+        "score_huber_loss": 0.1306260956218067,
+        "own_win_bce": 0.5730498392217973,
+        "opponent_win_bce": 0.5727466591226502,
+        "score_mae": 0.40648503573435657,
+        "score_mae_points": 32.51880285874853,
+        "score_rmse_points": 41.284279652860164,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19065005660670495,
+        "opponent_win_brier": 0.19068418604227527,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2907561503389074,
+        "opponent_win_prediction_mean": 0.7051916498671674
+      }
+    },
+    {
+      "epoch": 44,
+      "train_total_loss": 0.37759734094142916,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41452350307696884,
+        "score_huber_loss": 0.12869118212835662,
+        "own_win_bce": 0.5717301173439157,
+        "opponent_win_bce": 0.5715991591916485,
+        "score_mae": 0.4025002212917007,
+        "score_mae_points": 32.20001770333606,
+        "score_rmse_points": 40.97395388352873,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19028441002193078,
+        "opponent_win_brier": 0.19037448889599862,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.30133643240298863,
+        "opponent_win_prediction_mean": 0.6947043273297632
+      }
+    },
+    {
+      "epoch": 45,
+      "train_total_loss": 0.369201248884201,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4118806788279303,
+        "score_huber_loss": 0.1282728515297021,
+        "own_win_bce": 0.5677733660562165,
+        "opponent_win_bce": 0.5666579242227008,
+        "score_mae": 0.39159846755693545,
+        "score_mae_points": 31.327877404554837,
+        "score_rmse_points": 40.99549363525995,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18815811052535042,
+        "opponent_win_brier": 0.18791915213059807,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2562762010158846,
+        "opponent_win_prediction_mean": 0.739543960597462
+      }
+    },
+    {
+      "epoch": 46,
+      "train_total_loss": 0.3631014972925186,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.4186785620849701,
+        "score_huber_loss": 0.13160871378246752,
+        "own_win_bce": 0.5740265367779478,
+        "opponent_win_bce": 0.5742528680871731,
+        "score_mae": 0.4120584687483249,
+        "score_mae_points": 32.96467749986599,
+        "score_rmse_points": 41.446560617259436,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.19124242249320342,
+        "opponent_win_brier": 0.19147517300797162,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.3176060704383392,
+        "opponent_win_prediction_mean": 0.6781380262423952
+      }
+    },
+    {
+      "epoch": 47,
+      "train_total_loss": 0.3752677410840988,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.414791445175943,
+        "score_huber_loss": 0.1293280290161766,
+        "own_win_bce": 0.5712663324783024,
+        "opponent_win_bce": 0.570587354704201,
+        "score_mae": 0.3976460255644129,
+        "score_mae_points": 31.811682045153034,
+        "score_rmse_points": 41.13843781807276,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.18943111360788753,
+        "opponent_win_brier": 0.1893714083611045,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2805952984922746,
+        "opponent_win_prediction_mean": 0.7149645509278181
+      }
+    },
+    {
+      "epoch": 48,
+      "train_total_loss": 0.3745119541883469,
+      "validation": {
+        "decisions": 583.0,
+        "total_loss": 0.41553789878177805,
+        "score_huber_loss": 0.12943642396051724,
+        "own_win_bce": 0.5725013068773325,
+        "opponent_win_bce": 0.5719046113217061,
+        "score_mae": 0.4023013761072175,
+        "score_mae_points": 32.1841100885774,
+        "score_rmse_points": 41.10803562450738,
+        "zero_score_mae_points": 34.9708402708914,
+        "own_win_brier": 0.1901458753320815,
+        "opponent_win_brier": 0.19015419994373878,
+        "own_win_target_rate": 0.2830188679245283,
+        "opponent_win_target_rate": 0.7169811320754716,
+        "own_win_prediction_mean": 0.2882600035103067,
+        "opponent_win_prediction_mean": 0.706420178683299
+      }
+    }
+  ]
+}

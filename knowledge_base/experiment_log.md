@@ -654,3 +654,21 @@ afterstate outcome 成员，分别只更新其独立的 afterstate encoder/score
 一次 override 候选产生 IPS **−1.6428 ± 4.4087**（95% CI **[−10.2839, +6.9983]**）与 DR
 **−0.7897 ± 4.6188**（**[−9.8425, +8.2632]**）。target/base ESS 为 **66.1/218.7**，支持度足够但两个下界均不为正。
 因此明确拒绝，不进行 200 墙、网页试用或任何强度主张；这个 test 墙组已冻结，不能用于事后调 LCB 阈值或选择成员。
+
+## 2026-08-07：四层盲态选择协议与第二轮 LCB 网格（否决）
+
+为避免把一份 test 既用于阈值搜索又用于强度结论，新增 `split_heldout_trajectory_groups.py`：强制按
+`split_group_id` 将已隔离的 held-out 池分成 `selection` 与 `terminal`，terminal manifest 不导出动作或终局统计。
+新增 `select_teacher_response_override.py`：它只在 selection 比较预注册网格；没有任何候选通过时，程序不读取
+terminal 文件并写入 `selection_rejected_terminal_unread`。训练器同时加入 `--skip-test`，使 outcome 模型的 epoch
+选择只接触 train/validation，report 显式保存 `terminal_test_read=false`。
+
+第二批 `teacher-response-intervention-classic-v2` 使用 1,600 个全新经典物理墙；训练/验证含 2,332/583 条随机
+response，selector 含 522 条、200 个墙组，且 Teacher 基线／propensity 契约均为零违规。五个全新随机 anchor
+outcome 成员在 validation 的 score MAE 为 31.52–32.40 分，零预测为 34.97 分。此改善仍只针对 logged action。
+
+在**打开 selector 结果前**固定 `{0, 12, 24, 36}` 分 LCB 优势网格。0 分候选 override 35.63%，IPS/DR 为
+−2.5208/−2.8229，95% 下界 **−7.7110/−7.5706**；12 分候选 override 3.45%，下界 **−1.5236/−1.1817**；24 和
+36 分不再偏离 Teacher，估计恰为 0，仍不满足严格正下界。所有候选均失败；terminal 209 个墙组（文件 SHA-256
+`12ec74325811ac96457fbcc4ac03ec7f6b055d1ff3563ea57f7bfd11614a144f`）未读取、不提交结果、不允许改阈值后重跑。
+结论是当前静态 afterstate score-LCB 候选族没有正向因果证据，而不是 Teacher 变弱或模型已经具备人类强度。

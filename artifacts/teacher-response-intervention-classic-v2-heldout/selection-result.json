@@ -1,0 +1,216 @@
+{
+  "status": "selection_rejected_terminal_unread",
+  "outcome_checkpoints": [
+    "artifacts/policy-value-teacher-response-outcome-classic-v2-seed491/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v2-seed492/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v2-seed493/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v2-seed494/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v2-seed495/policy-value.pt"
+  ],
+  "inference_device": "cuda",
+  "protocol": {
+    "base": "heuristic_teacher",
+    "policy": "one response override followed by Teacher suffix",
+    "score_lcb_z": 1.0,
+    "pre_registered_minimum_lcb_advantages": [
+      0.0,
+      12.0,
+      24.0,
+      36.0
+    ],
+    "selection_data": "artifacts/teacher-response-intervention-classic-v2-heldout/selection.trajectories.jsonl",
+    "terminal_data": "artifacts/teacher-response-intervention-classic-v2-heldout/terminal.trajectories.jsonl",
+    "terminal_read": false,
+    "selection_rule": "maximize min(IPS lower bound, DR lower bound); tie -> higher threshold"
+  },
+  "selection": [
+    {
+      "minimum_lcb_advantage": 0.0,
+      "scanned_candidate_decisions": 9191,
+      "randomized_response_interventions": 522,
+      "target_action_kinds": {
+        "chi": 179,
+        "hu": 13,
+        "pass": 150,
+        "pong": 180
+      },
+      "estimates": {
+        "ips": {
+          "groups": 200,
+          "observations": 522,
+          "mean": -2.5207688757321107,
+          "stderr": 2.6480972317910676,
+          "95pct_low": -7.711039450042604,
+          "95pct_high": 2.6695016985783817
+        },
+        "support": {
+          "target_matched_logged_action_count": 308,
+          "baseline_matched_logged_action_count": 418,
+          "target_effective_sample_size": 178.7161904298198,
+          "baseline_effective_sample_size": 417.4538506266259,
+          "target_override_rate": 0.3563218390804598,
+          "minimum_target_propensity": 0.08,
+          "minimum_baseline_propensity": 0.6799999999999999
+        },
+        "doubly_robust": {
+          "groups": 200,
+          "observations": 522,
+          "mean": -2.822905580427748,
+          "stderr": 2.4222985971519884,
+          "95pct_low": -7.570610830845645,
+          "95pct_high": 1.9247996699901488
+        }
+      },
+      "gate": {
+        "ips_95pct_low": -7.711039450042604,
+        "dr_95pct_low": -7.570610830845645,
+        "minimum_lower_bound": -7.711039450042604,
+        "target_effective_sample_size": 178.7161904298198,
+        "baseline_effective_sample_size": 417.4538506266259,
+        "passes": false
+      }
+    },
+    {
+      "minimum_lcb_advantage": 12.0,
+      "scanned_candidate_decisions": 9191,
+      "randomized_response_interventions": 522,
+      "target_action_kinds": {
+        "chi": 279,
+        "hu": 13,
+        "ming_kan": 11,
+        "pass": 8,
+        "pong": 211
+      },
+      "estimates": {
+        "ips": {
+          "groups": 200,
+          "observations": 522,
+          "mean": -0.677732683982684,
+          "stderr": 0.43158406831585366,
+          "95pct_low": -1.5236374578817573,
+          "95pct_high": 0.1681720899163891
+        },
+        "support": {
+          "target_matched_logged_action_count": 406,
+          "baseline_matched_logged_action_count": 418,
+          "target_effective_sample_size": 397.2067147863566,
+          "baseline_effective_sample_size": 417.4538506266259,
+          "target_override_rate": 0.034482758620689655,
+          "minimum_target_propensity": 0.1,
+          "minimum_baseline_propensity": 0.6799999999999999
+        },
+        "doubly_robust": {
+          "groups": 200,
+          "observations": 522,
+          "mean": -0.37591054510974303,
+          "stderr": 0.4110960207324371,
+          "95pct_low": -1.1816587457453198,
+          "95pct_high": 0.4298376555258337
+        }
+      },
+      "gate": {
+        "ips_95pct_low": -1.5236374578817573,
+        "dr_95pct_low": -1.1816587457453198,
+        "minimum_lower_bound": -1.5236374578817573,
+        "target_effective_sample_size": 397.2067147863566,
+        "baseline_effective_sample_size": 417.4538506266259,
+        "passes": false
+      }
+    },
+    {
+      "minimum_lcb_advantage": 24.0,
+      "scanned_candidate_decisions": 9191,
+      "randomized_response_interventions": 522,
+      "target_action_kinds": {
+        "chi": 283,
+        "hu": 13,
+        "ming_kan": 21,
+        "pong": 205
+      },
+      "estimates": {
+        "ips": {
+          "groups": 200,
+          "observations": 522,
+          "mean": 0.0,
+          "stderr": 0.0,
+          "95pct_low": 0.0,
+          "95pct_high": 0.0
+        },
+        "support": {
+          "target_matched_logged_action_count": 418,
+          "baseline_matched_logged_action_count": 418,
+          "target_effective_sample_size": 417.4538506266259,
+          "baseline_effective_sample_size": 417.4538506266259,
+          "target_override_rate": 0.0,
+          "minimum_target_propensity": 0.6799999999999999,
+          "minimum_baseline_propensity": 0.6799999999999999
+        },
+        "doubly_robust": {
+          "groups": 200,
+          "observations": 522,
+          "mean": 0.0,
+          "stderr": 0.0,
+          "95pct_low": 0.0,
+          "95pct_high": 0.0
+        }
+      },
+      "gate": {
+        "ips_95pct_low": 0.0,
+        "dr_95pct_low": 0.0,
+        "minimum_lower_bound": 0.0,
+        "target_effective_sample_size": 417.4538506266259,
+        "baseline_effective_sample_size": 417.4538506266259,
+        "passes": false
+      }
+    },
+    {
+      "minimum_lcb_advantage": 36.0,
+      "scanned_candidate_decisions": 9191,
+      "randomized_response_interventions": 522,
+      "target_action_kinds": {
+        "chi": 283,
+        "hu": 13,
+        "ming_kan": 21,
+        "pong": 205
+      },
+      "estimates": {
+        "ips": {
+          "groups": 200,
+          "observations": 522,
+          "mean": 0.0,
+          "stderr": 0.0,
+          "95pct_low": 0.0,
+          "95pct_high": 0.0
+        },
+        "support": {
+          "target_matched_logged_action_count": 418,
+          "baseline_matched_logged_action_count": 418,
+          "target_effective_sample_size": 417.4538506266259,
+          "baseline_effective_sample_size": 417.4538506266259,
+          "target_override_rate": 0.0,
+          "minimum_target_propensity": 0.6799999999999999,
+          "minimum_baseline_propensity": 0.6799999999999999
+        },
+        "doubly_robust": {
+          "groups": 200,
+          "observations": 522,
+          "mean": 0.0,
+          "stderr": 0.0,
+          "95pct_low": 0.0,
+          "95pct_high": 0.0
+        }
+      },
+      "gate": {
+        "ips_95pct_low": 0.0,
+        "dr_95pct_low": 0.0,
+        "minimum_lower_bound": 0.0,
+        "target_effective_sample_size": 417.4538506266259,
+        "baseline_effective_sample_size": 417.4538506266259,
+        "passes": false
+      }
+    }
+  ],
+  "chosen": null,
+  "terminal": null,
+  "warning": "No terminal result is complete-policy, browser, or human-strength evidence. The terminal corpus is read only if selection passes both grouped lower-bound gates."
+}
