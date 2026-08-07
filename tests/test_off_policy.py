@@ -1,4 +1,5 @@
 import unittest
+from pathlib import Path
 
 from xiamen_mahjong.agents import GameAction
 from xiamen_mahjong.off_policy import (
@@ -22,11 +23,45 @@ from scripts.train_afterstate_outcomes import initial_agent_for_outcome_training
 from scripts.train_afterstate_outcomes import parse_args as parse_afterstate_args
 from scripts.select_teacher_response_override import choose_candidate, gate_summary
 from scripts.select_teacher_relative_advantage_override import (
+    Candidate,
     choose_candidate as choose_relative_advantage_candidate,
 )
+from scripts.select_teacher_stochastic_relative_override import stochastic_probabilities
 
 
 class OffPolicyTests(unittest.TestCase):
+    def test_stochastic_residual_policy_is_normalized_and_teacher_anchored(self):
+        class _FixedRelativeAgent:
+            def relative_advantages(self, decision):
+                self.assert_decision = decision
+                return [-16.0, 0.0, 16.0]
+
+        decision = TeacherDecision(
+            profile="classic",
+            seed=None,
+            seat=0,
+            state={"phase": "discard"},
+            legal_actions=(
+                GameAction("discard", 0),
+                GameAction("discard", 1),
+                GameAction("discard", 2),
+            ),
+            chosen_index=1,
+        )
+        candidate = Candidate(
+            maximum_abs_correction=20.0,
+            agent=_FixedRelativeAgent(),
+            checkpoint=Path("candidate.pt"),
+            report=Path("candidate.report.json"),
+        )
+        probabilities = stochastic_probabilities(
+            decision, candidate, beta=0.1, temperature=8.0
+        )
+        self.assertAlmostEqual(sum(probabilities), 1.0)
+        self.assertGreater(probabilities[1], 0.9)
+        self.assertGreater(probabilities[0], 0.0)
+        self.assertGreater(probabilities[2], probabilities[0])
+
     def test_crossfit_advantage_export_omits_terminal_outcome(self):
         class _FixedDirectModel:
             def afterstate_outcomes(self, decision):
