@@ -863,3 +863,18 @@ selection 已执行且全部拒绝，状态 `selection_rejected_terminal_unread`
 实战筛选、不接入网页，也不把诊断模型参数上传为可用 AI。v4 selection 墙组已消耗，禁止在其上增加 beta/tau/C、换
 网络、direct member 或 OPE estimator 后重跑；terminal 保持封存。完整本地审计为
 `artifacts/teacher-stochastic-relative-classic-v4-heldout/selection-result.json`。
+
+## 2026-08-07：公开信息防守 Teacher v5（selection 拒绝，terminal 未读）
+
+为避免继续在已失败的 direct-score residual 与 OPE 家族中微调，v5 采用可直接四座对局验证的确定性规则候选：在
+`AvailabilityTeacherAgent` 的自家牌形／公开余牌听口得分上，扣除 `risk_weight × public_danger`。危险度只使用本家
+手牌、河牌、副露、翻金和公开回合数；不得读取牌墙、对手暗手、随机种子或未来事件。固定权重网格为
+`{0, 1, 2, 4, 8}`，并在 classic `seed=202611000` 起 160 个物理墙上四座轮换；每个候选均为 640 局，对手均为
+冻结的 `HeuristicTeacherAgent`。promotion gate 预先固定为按物理墙配对的 score delta 95% 下界严格大于零。
+
+五项均未通过，终局 `seed=202611500` 起 400 墙保持**未读**。`risk_weight=0`（仅公开余牌听口）相对 Teacher 的
+均值／95% 下界为 **−0.525 / −1.725** 分/局；`1` 为 **−3.422 / −5.949**，`2` 为 **−3.423 / −6.029**，`4` 为
+**−9.322 / −11.836**，`8` 为 **−17.033 / −19.022**。除 0 外每个权重的上界也为负，且随权重增大持续恶化，表明该
+公开危险代理与本规则及 frozen Teacher 的牌效率权衡不相容，不能解释为“防守增强”。因此整个固定族被拒绝：不重跑
+selection、不读取 terminal、不接入网页，也不将其作为训练教师或模型参数上传。审计汇总仅保留在本地
+`artifacts/risk-aware-teacher-v5/selection-result.json`；协议和实现为 commit `3ec99db`。
