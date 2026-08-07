@@ -5822,6 +5822,47 @@ def split_trajectories_by_hand(
     return partitions
 
 
+def split_heldout_trajectories_by_group(
+    trajectories: Iterable[TrainingTrajectory],
+    *,
+    selection_fraction: float = 0.5,
+    split_salt: str = "xiamen-heldout-selection-v1",
+) -> dict[str, list[TrainingTrajectory]]:
+    """Split an untouched held-out corpus into selector and terminal groups.
+
+    ``split_group_id`` is mandatory here: this utility is for an already
+    held-out evaluation pool where all seat rotations of one physical wall
+    must remain together.  The ``selection`` partition may choose a member or
+    a pre-registered threshold; ``terminal`` must not be opened until then.
+    """
+
+    if not 0.0 < selection_fraction < 1.0:
+        raise ValueError("selection_fraction 必须在 0 和 1 之间")
+    cutoff = int(selection_fraction * 10_000)
+    partitions: dict[str, list[TrainingTrajectory]] = {
+        "selection": [],
+        "terminal": [],
+    }
+    seen_trajectory_ids: set[str] = set()
+    for trajectory in trajectories:
+        if trajectory.trajectory_id in seen_trajectory_ids:
+            raise ValueError("训练轨迹包含重复 trajectory_id")
+        seen_trajectory_ids.add(trajectory.trajectory_id)
+        if not trajectory.split_group_id:
+            raise ValueError("held-out 分割要求 split_group_id")
+        digest = hashlib.blake2b(
+            f"{split_salt}|{trajectory.split_group_id}".encode("utf-8"),
+            digest_size=8,
+        ).digest()
+        partition = (
+            "selection"
+            if int.from_bytes(digest, "big") % 10_000 < cutoff
+            else "terminal"
+        )
+        partitions[partition].append(trajectory)
+    return partitions
+
+
 def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str, Any]:
     """Summarize coverage and outcomes for data-quality gates."""
 

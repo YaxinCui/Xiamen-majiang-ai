@@ -50,6 +50,7 @@ from xiamen_mahjong.training import (
     collect_tour_trajectories,
     read_trajectory_jsonl,
     read_jsonl,
+    split_heldout_trajectories_by_group,
     split_trajectories_by_hand,
     public_action_sequence_features,
     trajectory_manifest,
@@ -957,6 +958,21 @@ class TrainingTests(unittest.TestCase):
                         {
                             partition
                             for partition, records in safe_partitions.items()
+                            for trajectory in records
+                            if trajectory.split_group_id == group_id
+                        }
+                    ),
+                    1,
+                )
+            heldout = split_heldout_trajectories_by_group(
+                read_trajectory_jsonl(path), selection_fraction=0.5
+            )
+            for group_id in {trajectory.split_group_id for trajectory in trajectories}:
+                self.assertEqual(
+                    len(
+                        {
+                            partition
+                            for partition, records in heldout.items()
                             for trajectory in records
                             if trajectory.split_group_id == group_id
                         }
