@@ -42,7 +42,6 @@
       "terminal": 500
     },
     "train_and_validation_pass": true,
-    "train_and_validation_pass": true,
     "selection_and_terminal_pass": true
   },
   "privacy": {
