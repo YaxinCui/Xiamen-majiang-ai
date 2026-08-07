@@ -8,6 +8,8 @@
 
 - [麻将 AI 前沿与开源实现](mahjong_ai_frontier_2026.md)：论文、开源系统、
   许可证边界，以及它们对本项目的实际启示。
+- [研究知识库](research/README.md)：按论文、开源工程、强化学习技术、感悟和抚州麻将
+  分区维护的长期研究资料；常规评测约定为 100 副物理牌墙。
 - [前沿复盘与下一步](frontier_followup_2026-08.md)：补充调研后，将公开工作转换为
   可执行的 belief、数据、离线 RL 与规模化路线。
 - [不完全信息动作价值](imperfect_information_research.md)：信息集价值和历史条件化

@@ -14,7 +14,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from xiamen_mahjong.agents import HeuristicTeacherAgent, OnePlyLookaheadTeacherAgent
+from xiamen_mahjong.agents import (
+    ExactOneDrawTenpaiTieBreakTeacherAgent,
+    HeuristicTeacherAgent,
+    OnePlyLookaheadTeacherAgent,
+)
 from xiamen_mahjong.evaluation import (
     evaluate_against_opponent_roster,
     paired_score_comparison,
@@ -54,6 +58,11 @@ def parse_args() -> argparse.Namespace:
         "--one-ply-lookahead-teacher-candidate",
         action="store_true",
         help="以公开信息一步前瞻规则候选进行筛选；仅用于实验，绝不自动晋升网页 AI",
+    )
+    candidate_group.add_argument(
+        "--exact-one-draw-tenpai-teacher-candidate",
+        action="store_true",
+        help="以严格限域的一摸听牌平分裁决候选进行评测；绝不自动晋升网页 AI",
     )
     parser.add_argument("--profile", choices=("classic", "core"), default="classic")
     parser.add_argument(
@@ -148,12 +157,18 @@ def load_opponent_roster(args: argparse.Namespace):
 
 def main() -> None:
     args = parse_args()
-    rule_candidate = args.teacher_candidate or args.one_ply_lookahead_teacher_candidate
+    rule_candidate = (
+        args.teacher_candidate
+        or args.one_ply_lookahead_teacher_candidate
+        or args.exact_one_draw_tenpai_teacher_candidate
+    )
     if rule_candidate:
         if args.action_selection is not None:
             raise ValueError("规则候选不支持 action-selection")
         policy = (
-            OnePlyLookaheadTeacherAgent()
+            ExactOneDrawTenpaiTieBreakTeacherAgent()
+            if args.exact_one_draw_tenpai_teacher_candidate
+            else OnePlyLookaheadTeacherAgent()
             if args.one_ply_lookahead_teacher_candidate
             else HeuristicTeacherAgent()
         )
@@ -174,7 +189,9 @@ def main() -> None:
     )
     payload = result.payload(include_scores=args.include_scores)
     payload["candidate_kind"] = (
-        "one_ply_lookahead_teacher"
+        "exact_one_draw_tenpai_teacher"
+        if args.exact_one_draw_tenpai_teacher_candidate
+        else "one_ply_lookahead_teacher"
         if args.one_ply_lookahead_teacher_candidate
         else "heuristic_teacher"
         if args.teacher_candidate
