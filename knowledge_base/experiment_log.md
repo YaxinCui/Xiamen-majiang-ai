@@ -672,3 +672,15 @@ outcome 成员在 validation 的 score MAE 为 31.52–32.40 分，零预测为 
 36 分不再偏离 Teacher，估计恰为 0，仍不满足严格正下界。所有候选均失败；terminal 209 个墙组（文件 SHA-256
 `12ec74325811ac96457fbcc4ac03ec7f6b055d1ff3563ea57f7bfd11614a144f`）未读取、不提交结果、不允许改阈值后重跑。
 结论是当前静态 afterstate score-LCB 候选族没有正向因果证据，而不是 Teacher 变弱或模型已经具备人类强度。
+
+## 2026-08-07：Teacher 行为似然代理的 SMC smoke（否决）
+
+为检验全历史 SMC 的低 ESS 是否只是确定性 Teacher likelihood 太尖锐，独立训练 core Teacher 行为 MLP（100 训练局、
+40 独立验证局、16 隐层、4 epoch）。验证集 top-1 为 **76.84%**、交叉熵 **0.7254**，因此它足以作为“软概率是否缓解
+退化”的 audit-only 候选，但不是游戏策略。
+
+固定 core seed 202608503 的同一私有回放 snapshot、64 个 actor-visible setup 粒子、相同温度 1 与 uniform mixture
+0.02 下，确定性 Teacher sequential SMC 在 8 个请求公开事件中只条件到 3 个，最终 ESS **3.01**；行为代理同样只到
+3 个，最终 ESS **2.86**。两条路径都因后续事件在 proposal world 中结构不一致而全粒子失败。故软化行为 likelihood
+没有改善、也不能修复提议分布；不提交到 SMC collector/Q/网页。下一阶段必须先改进带已知密度、可枚举 toy posterior
+校准的结构 proposal，而不是继续训练代理或调温度。

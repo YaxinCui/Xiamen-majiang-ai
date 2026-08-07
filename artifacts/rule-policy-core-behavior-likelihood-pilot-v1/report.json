@@ -1,0 +1,86 @@
+{
+  "profile": "core",
+  "model": "mlp",
+  "hidden_size": 16,
+  "learning_rate": 0.012,
+  "seed": 202608502,
+  "train": {
+    "hands": 100,
+    "decisions": 3527,
+    "wins": 100,
+    "draws": 0,
+    "action_counts": {
+      "add_kan": 3,
+      "an_kan": 5,
+      "chi": 339,
+      "discard": 2816,
+      "hu": 102,
+      "ming_kan": 13,
+      "pong": 249
+    }
+  },
+  "validation": {
+    "hands": 40,
+    "decisions": 1494,
+    "wins": 40,
+    "draws": 0,
+    "action_counts": {
+      "add_kan": 3,
+      "an_kan": 1,
+      "chi": 145,
+      "discard": 1189,
+      "hu": 42,
+      "ming_kan": 7,
+      "pong": 107
+    }
+  },
+  "tour_curriculum_decisions": 0,
+  "tour_validation_decisions": 0,
+  "validation_before": {
+    "accuracy": 0.27242302543507363,
+    "loss": 1.9129494646392085,
+    "decisions": 1494.0
+  },
+  "validation_after": {
+    "accuracy": 0.7684069611780455,
+    "loss": 0.7253727007275309,
+    "decisions": 1494.0
+  },
+  "tour_validation_before": {
+    "accuracy": 0.0,
+    "loss": 0.0,
+    "decisions": 0.0
+  },
+  "tour_validation_after": {
+    "accuracy": 0.0,
+    "loss": 0.0,
+    "decisions": 0.0
+  },
+  "history": [
+    {
+      "epoch": 1.0,
+      "accuracy": 0.6614686702580096,
+      "loss": 1.0343287822894205,
+      "decisions": 3527.0
+    },
+    {
+      "epoch": 2.0,
+      "accuracy": 0.7638219449957471,
+      "loss": 0.7786976976512873,
+      "decisions": 3527.0
+    },
+    {
+      "epoch": 3.0,
+      "accuracy": 0.8403742557414233,
+      "loss": 0.670929524294797,
+      "decisions": 3527.0
+    },
+    {
+      "epoch": 4.0,
+      "accuracy": 0.7984122483697194,
+      "loss": 0.6484203119800788,
+      "decisions": 3527.0
+    }
+  ],
+  "checkpoint": "rule-policy.json"
+}

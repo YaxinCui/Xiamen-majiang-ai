@@ -120,6 +120,12 @@ per-particle `p/q` proposal，并在微型牌墙穷举校准。固定 core seed 
 collector/Q/网页。普通全历史重放继续拒绝未获专门授权的花牌 transition；补杠／明杠后的 replacement draw 也尚未
 形成公开 draw transition。这是保护正确性的限制，不是缺失事件可以忽略的许可。
 
+为排除“确定性 Teacher likelihood 过硬”这一捷径，另训练一个 core Teacher 概率代理（100 训练局、独立 40 局，
+top-1 76.84%、交叉熵 0.725）。在同一 64 粒子、8 个公开事件 sequential-SMC smoke 上，原 Teacher 的最终 ESS 为
+3.01，代理为 2.86；两者均只条件到第 3 个事件后就因结构不一致全体失败。故当前退化主要来自 proposal 未生成可行
+隐藏世界，而非行为概率温度；该代理不得接入 SMC、collector、Q 或网页。下一步仍须先完成有显式密度并通过 toy
+exact posterior 的结构 proposal，不能继续调 softmax 温度或扩大行为代理。
+
 ### Teacher 单点干预 response 数据（当前因果来源）
 
 run4-based response outcome ensemble 已被全新实战否决，不能再把 run4 作为改善 Teacher 的桥梁。collector 现支持
