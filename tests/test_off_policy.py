@@ -11,6 +11,7 @@ from scripts.audit_teacher_response_intervention_ope import (
     teacher_epsilon_propensities,
 )
 from scripts.train_afterstate_outcomes import initial_agent_for_outcome_training
+from scripts.select_teacher_response_override import choose_candidate, gate_summary
 
 
 class OffPolicyTests(unittest.TestCase):
@@ -120,6 +121,27 @@ class OffPolicyTests(unittest.TestCase):
         self.assertEqual(first_identity["kind"], "fresh_untrained_policy_anchor")
         for name, value in first.network.state_dict().items():
             self.assertTrue((value == second.network.state_dict()[name]).all(), name)
+
+    def test_selection_prefers_stronger_lower_bound_then_conservative_threshold(self):
+        def audit(threshold, ips, dr, target_ess=40.0, base_ess=45.0):
+            estimates = {
+                "ips": {"95pct_low": ips},
+                "doubly_robust": {"95pct_low": dr},
+                "support": {
+                    "target_effective_sample_size": target_ess,
+                    "baseline_effective_sample_size": base_ess,
+                },
+            }
+            return {
+                "minimum_lcb_advantage": threshold,
+                "gate": gate_summary(estimates, minimum_effective_sample_size=30.0),
+            }
+
+        chosen = choose_candidate((audit(0.0, 2.0, 2.0), audit(8.0, 1.0, 1.0)))
+        self.assertEqual(chosen["minimum_lcb_advantage"], 0.0)
+        tied = choose_candidate((audit(0.0, 1.0, 1.0), audit(8.0, 1.0, 1.0)))
+        self.assertEqual(tied["minimum_lcb_advantage"], 8.0)
+        self.assertIsNone(choose_candidate((audit(0.0, -1.0, 2.0),)))
 
 
 if __name__ == "__main__":
