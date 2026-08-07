@@ -15,8 +15,14 @@
           <h1>厦门麻将 <span>金牌桌</span></h1>
         </div>
         <div class="table-controls">
+          <label class="profile-picker" for="table-mode">牌桌模式
+            <select id="table-mode" aria-label="选择牌桌模式"></select>
+          </label>
           <label class="profile-picker" for="rules-profile">规则档位
             <select id="rules-profile" aria-label="选择规则档位"></select>
+          </label>
+          <label class="profile-picker" for="ai-delay">AI 出牌间隔
+            <select id="ai-delay" aria-label="选择 AI 出牌间隔"></select>
           </label>
           <a class="guide-link" href="/guide.html">规则与胡牌教学</a>
           <button id="toggle-debug" class="debug-button is-active" type="button" aria-pressed="true">隐藏 AI 手牌（调试）</button>

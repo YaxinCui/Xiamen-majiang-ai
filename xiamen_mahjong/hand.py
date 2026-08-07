@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from functools import lru_cache
+from collections.abc import Callable
 from typing import Iterable
 
 from .tiles import BASE_TILE_COUNT, is_suited
@@ -97,7 +98,40 @@ def wait_tiles(
 ) -> list[int]:
     """Return physical tile identities that complete the current hand."""
 
-    waits = []
+    wildcard_key = tuple(sorted(set(wildcard_tiles or ())))
+    return list(
+        _wait_tiles_cached(
+            tuple(sorted(tiles)),
+            gold_tile,
+            meld_count,
+            melds_required,
+            allow_seven_pairs,
+            wildcard_key,
+            proxy_tile,
+            proxy_as,
+        )
+    )
+
+
+@lru_cache(maxsize=200_000)
+def _wait_tiles_cached(
+    tiles: tuple[int, ...],
+    gold_tile: int | None,
+    meld_count: int,
+    melds_required: int,
+    allow_seven_pairs: bool,
+    wildcard_tiles: tuple[int, ...],
+    proxy_tile: int | None,
+    proxy_as: int | None,
+) -> tuple[int, ...]:
+    """Memoize semantic wait queries shared by exact one-draw routes.
+
+    Tile order is immaterial to hand completion.  Canonicalizing it at the
+    public boundary lets adjacent hypothetical discard routes reuse the same
+    exact answer without changing the rules API or exposing state.
+    """
+
+    waits: list[int] = []
     for tile in range(BASE_TILE_COUNT):
         if is_winning_hand(
             [*tiles, tile],
@@ -110,7 +144,113 @@ def wait_tiles(
             proxy_as=proxy_as,
         ):
             waits.append(tile)
-    return waits
+    return tuple(waits)
+
+
+def one_draw_tenpai_profile(
+    tiles: list[int],
+    gold_tile: int | None,
+    *,
+    meld_count: int = 0,
+    melds_required: int = 4,
+    allow_seven_pairs: bool = True,
+    wildcard_tiles: Iterable[int] | None = None,
+    proxy_tile: int | None = None,
+    proxy_as: int | None = None,
+    legal_discards: Callable[[list[int]], Iterable[int]] | None = None,
+) -> dict[int, tuple[int, ...]]:
+    """Return exact one-draw routes that can leave the hand in tenpai.
+
+    ``tiles`` is the concealed hand *after a normal discard*.  For every
+    physical base-tile face that might be drawn, this function enumerates the
+    following discard and retains the largest resulting set of winning waits.
+    It is a pure hand-structure oracle: it intentionally knows nothing about
+    the wall, opponents, claim priority or live-copy counts.  A caller may
+    provide ``legal_discards`` for a public local forced-discard rule; all
+    other public-rule and availability handling remains the caller's job.
+
+    This is not a terminal rollout or an estimated win probability.  It gives
+    an exact, auditable answer to the limited question: "which next draw can
+    create a tenpai hand after one legal-shaped discard?"
+    """
+
+    routes = one_draw_tenpai_routes(
+        tiles,
+        gold_tile,
+        meld_count=meld_count,
+        melds_required=melds_required,
+        allow_seven_pairs=allow_seven_pairs,
+        wildcard_tiles=wildcard_tiles,
+        proxy_tile=proxy_tile,
+        proxy_as=proxy_as,
+        legal_discards=legal_discards,
+    )
+    profile: dict[int, tuple[int, ...]] = {}
+    for drawn, choices in routes.items():
+        _discarded, best_waits = min(
+            choices,
+            key=lambda item: (-len(item[1]), item[1], item[0]),
+        )
+        profile[drawn] = best_waits
+    return profile
+
+
+def one_draw_tenpai_routes(
+    tiles: list[int],
+    gold_tile: int | None,
+    *,
+    meld_count: int = 0,
+    melds_required: int = 4,
+    allow_seven_pairs: bool = True,
+    wildcard_tiles: Iterable[int] | None = None,
+    proxy_tile: int | None = None,
+    proxy_as: int | None = None,
+    legal_discards: Callable[[list[int]], Iterable[int]] | None = None,
+) -> dict[int, tuple[tuple[int, tuple[int, ...]], ...]]:
+    """Return every legal one-draw route from a post-discard hand.
+
+    Each mapping entry is ``drawn_face -> ((follow_discard, waits), ...)``.
+    A caller may supply ``legal_discards`` to apply a public local rule to
+    the hypothetical hand after the draw, such as Xiamen classic's honor
+    follow rule.  The callback must return faces present in that hand; an
+    invalid face raises ``ValueError`` rather than silently evaluating an
+    impossible route.
+
+    This remains a hand-structure routine: draw availability, the value of a
+    wait, wall state and opponents are deliberately left to the caller.
+    """
+
+    routes: dict[int, tuple[tuple[int, tuple[int, ...]], ...]] = {}
+    for drawn in range(BASE_TILE_COUNT):
+        after_draw = [*tiles, drawn]
+        discard_faces = (
+            legal_discards(list(after_draw))
+            if legal_discards is not None
+            else set(after_draw)
+        )
+        choices: list[tuple[int, tuple[int, ...]]] = []
+        for discarded in sorted(set(discard_faces)):
+            if discarded not in after_draw:
+                raise ValueError("legal_discards 返回了不在手牌中的牌")
+            after_discard = list(after_draw)
+            after_discard.remove(discarded)
+            waits = tuple(
+                wait_tiles(
+                    after_discard,
+                    gold_tile,
+                    meld_count=meld_count,
+                    melds_required=melds_required,
+                    allow_seven_pairs=allow_seven_pairs,
+                    wildcard_tiles=wildcard_tiles,
+                    proxy_tile=proxy_tile,
+                    proxy_as=proxy_as,
+                )
+            )
+            if waits:
+                choices.append((discarded, waits))
+        if choices:
+            routes[drawn] = tuple(choices)
+    return routes
 
 
 def hand_quality(

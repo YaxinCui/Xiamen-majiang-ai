@@ -1,6 +1,12 @@
 import unittest
 
-from xiamen_mahjong.hand import is_winning_hand, wait_tiles, winning_pattern
+from xiamen_mahjong.hand import (
+    is_winning_hand,
+    one_draw_tenpai_profile,
+    one_draw_tenpai_routes,
+    wait_tiles,
+    winning_pattern,
+)
 from xiamen_mahjong.tiles import WHITE_DRAGON
 
 
@@ -22,6 +28,44 @@ class HandTests(unittest.TestCase):
     def test_wait_tiles_detects_completion(self):
         hand = [0, 1, 2, 3, 4, 5, 9, 10, 11, 18, 18, 18, 27]
         self.assertIn(27, wait_tiles(hand, gold_tile=33))
+
+    def test_one_draw_tenpai_profile_finds_a_real_progressing_draw(self):
+        # This 16-tile classic hand is one structural step behind the
+        # five-meld-plus-pair shape.  Drawing 3万 creates a real tenpai route;
+        # the helper may find a stronger wait than a hand-written route, but
+        # it must do so without looking at a wall or another player's hand.
+        hand = [
+            0, 1, 8, 3, 4, 5, 9, 10, 11, 18, 19, 20, 27, 27, 27, 31
+        ]
+        profile = one_draw_tenpai_profile(
+            hand,
+            gold_tile=33,
+            melds_required=5,
+            allow_seven_pairs=False,
+        )
+        self.assertIn(2, profile)
+        self.assertGreaterEqual(len(profile[2]), 1)
+
+    def test_one_draw_routes_honor_a_follow_discard_constraint(self):
+        hand = [
+            0, 1, 8, 3, 4, 5, 9, 10, 11, 18, 19, 20, 27, 27, 27, 31
+        ]
+        unconstrained = one_draw_tenpai_routes(
+            hand,
+            gold_tile=33,
+            melds_required=5,
+            allow_seven_pairs=False,
+        )
+        constrained = one_draw_tenpai_routes(
+            hand,
+            gold_tile=33,
+            melds_required=5,
+            allow_seven_pairs=False,
+            legal_discards=lambda after_draw: [31],
+        )
+        self.assertIn(2, unconstrained)
+        self.assertIn(2, constrained)
+        self.assertTrue(all(discarded == 31 for discarded, _waits in constrained[2]))
 
     def test_white_dragon_can_be_an_explicit_gold_proxy(self):
         hand = [0, 1, WHITE_DRAGON, 3, 4, 5, 9, 10, 11, 18, 18, 18, 27, 27]

@@ -3,6 +3,8 @@ let state = null;
 let sending = false;
 let debugAiHands = true;
 let selectedRulesProfile = null;
+let selectedTableMode = null;
+let aiAdvanceTimer = null;
 
 const MELD_LABELS = { chi: '吃', pong: '碰', ming_kan: '明杠', an_kan: '暗杠', add_kan: '补杠' };
 const CHINESE_NUMERALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
@@ -102,9 +104,12 @@ function renderSeat(player) {
 
   const meta = document.createElement('p');
   meta.className = 'seat-meta';
-  meta.textContent = player.seat === 0
-    ? `手牌 ${player.hand_count} 张`
-    : `${debugAiHands ? '调试手牌' : '暗牌'} ${player.hand_count} 张`;
+  const isViewer = player.seat === state.viewer_seat;
+  const isActionSeat = player.seat === state.action_seat;
+  const isManualSeat = state.manual_seats?.includes(player.seat);
+  meta.textContent = isViewer
+    ? `手牌 ${player.hand_count} 张${isActionSeat ? ' · 当前操作' : ''}`
+    : `${debugAiHands ? '调试手牌' : (isManualSeat ? '已隐藏手牌' : '暗牌')} ${player.hand_count} 张`;
   if (player.flowers.length) meta.textContent += ` · 花 ${player.flowers.map((tile) => tile.name).join(' ')}`;
   if (player.status?.length) meta.textContent += ` · ${player.status.join(' · ')}`;
   seat.append(meta);
@@ -120,9 +125,9 @@ function renderSeat(player) {
   });
   if (melds.children.length) seat.append(melds);
 
-  if ((player.seat === 0 || debugAiHands) && player.hand) {
+  if (player.hand) {
     const hand = document.createElement('div');
-    hand.className = player.seat === 0 ? 'hand-row' : 'hand-row ai-hand-row';
+    hand.className = isViewer ? 'hand-row' : 'hand-row ai-hand-row';
     const discardActions = new Map(state.actions
       .filter((action) => action.kind === 'discard')
       .map((action) => [action.tile, action]));
@@ -134,9 +139,9 @@ function renderSeat(player) {
       if (drawnIndex >= 0) [drawnTile] = handTiles.splice(drawnIndex, 1);
     }
     const appendHandTile = (tile, drawn = false) => hand.append(tileElement(tile, {
-      clickable: player.seat === 0 && discardActions.has(tile.id),
-      action: player.seat === 0 ? discardActions.get(tile.id) : null,
-      compact: player.seat !== 0,
+      clickable: isActionSeat && discardActions.has(tile.id),
+      action: isActionSeat ? discardActions.get(tile.id) : null,
+      compact: !isViewer,
       forced: forcedTiles.has(tile.id),
       drawn,
     }));
@@ -184,13 +189,21 @@ function renderActions() {
     return;
   }
   if (!state.actions.length) {
-    panel.innerHTML = '<p>AI 正在思考，或等待其他玩家响应…</p>';
+    if (state.awaiting_ai_action && state.ai_delay_seconds > 0) {
+      panel.innerHTML = `<p>AI 将在 ${state.ai_delay_seconds} 秒后进行下一步；可逐步查看其摸牌后的弃牌、吃碰杠与响应。</p>`;
+    } else if (state.table_mode === 'four_player_manual') {
+      panel.innerHTML = '<p>等待下一位手动玩家操作…</p>';
+    } else {
+      panel.innerHTML = '<p>AI 正在思考，或等待其他玩家响应…</p>';
+    }
     return;
   }
   const intro = document.createElement('p');
+  const actionPlayer = state.action_seat === null || state.action_seat === undefined
+    ? null : state.players[state.action_seat];
   intro.textContent = state.phase === 'response'
-    ? `响应 ${state.last_discard?.name || '上一张弃牌'}：`
-    : '轮到你：点击亮起的手牌出牌';
+    ? `${actionPlayer?.name || '当前玩家'}响应 ${state.last_discard?.name || '上一张弃牌'}：`
+    : `轮到${actionPlayer?.name || '当前玩家'}：点击亮起的手牌出牌`;
   panel.append(intro);
   if (state.forced_discards?.length) {
     const notice = document.createElement('span');
@@ -250,11 +263,17 @@ function renderResult() {
 
 function render() {
   if (!state) return;
-  $('#ai-profile-note').textContent = state.ai_profile === 'heuristic_teacher'
-    ? 'LOCAL TABLE · TEACHER PLAY'
-    : 'LOCAL TABLE · EXPLICIT EXPERIMENTAL CHECKPOINT';
+  $('#ai-profile-note').textContent = state.table_mode === 'four_player_manual'
+    ? 'LOCAL TABLE · FOUR PLAYER MANUAL RULE CHECK'
+    : state.ai_profile === 'heuristic_teacher'
+      ? 'LOCAL TABLE · TEACHER PLAY'
+      : 'LOCAL TABLE · EXPLICIT EXPERIMENTAL CHECKPOINT';
   $('#message').textContent = state.message;
-  $('#turn-detail').textContent = state.phase === 'over' ? '本局已结束' : `当前：${state.players[state.current_player].name}`;
+  const actionPlayer = state.action_seat === null || state.action_seat === undefined
+    ? null : state.players[state.action_seat];
+  $('#turn-detail').textContent = state.phase === 'over'
+    ? '本局已结束'
+    : `当前：${state.players[state.current_player].name}${actionPlayer ? ` · 操作：${actionPlayer.name}` : ''}`;
   const recording = state.local_human_recording;
   const recordingNote = $('#recording-note');
   if (!recording?.enabled) {
@@ -310,8 +329,11 @@ function render() {
   renderActions();
   renderResult();
   renderProfilePicker();
+  renderTableModePicker();
+  renderAiDelayPicker();
   renderDebugToggle();
   $('#new-game').textContent = state.phase === 'over' ? '下一局' : '新开一局';
+  scheduleAiAdvance();
 }
 
 function renderProfilePicker() {
@@ -328,12 +350,44 @@ function renderProfilePicker() {
   picker.value = selectedRulesProfile;
 }
 
+function renderTableModePicker() {
+  const picker = $('#table-mode');
+  if (!state?.table_modes) return;
+  if (!selectedTableMode) selectedTableMode = state.table_mode;
+  picker.replaceChildren(...state.table_modes.map((mode) => {
+    const option = document.createElement('option');
+    option.value = mode.id;
+    option.textContent = mode.name;
+    return option;
+  }));
+  picker.value = selectedTableMode;
+}
+
+function renderAiDelayPicker() {
+  const picker = $('#ai-delay');
+  if (!state?.ai_delay_options) return;
+  picker.replaceChildren(...state.ai_delay_options.map((seconds) => {
+    const option = document.createElement('option');
+    option.value = String(seconds);
+    option.textContent = seconds === 0 ? '即时' : `${seconds} 秒`;
+    return option;
+  }));
+  picker.value = String(state.ai_delay_seconds || 0);
+  picker.disabled = state.table_mode === 'four_player_manual';
+  picker.title = picker.disabled ? '四人手动模式没有 AI' : '每一步 AI 决策之间的等待时间';
+}
+
 function renderDebugToggle() {
   const toggle = $('#toggle-debug');
-  toggle.textContent = debugAiHands ? '隐藏 AI 手牌（调试）' : '显示 AI 手牌（调试）';
+  const manual = state?.table_mode === 'four_player_manual';
+  toggle.textContent = debugAiHands
+    ? (manual ? '隐藏所有手牌（规则调试）' : '隐藏 AI 手牌（调试）')
+    : (manual ? '显示所有手牌（规则调试）' : '显示 AI 手牌（调试）');
   toggle.setAttribute('aria-pressed', String(debugAiHands));
   toggle.classList.toggle('is-active', debugAiHands);
-  $('#debug-ribbon').classList.toggle('hidden', !debugAiHands);
+  const ribbon = $('#debug-ribbon');
+  ribbon.textContent = manual ? '四人手动 · 调试手牌已明牌' : 'AI 手牌已明牌 · 调试';
+  ribbon.classList.toggle('hidden', !debugAiHands);
 }
 
 async function request(path, body = null) {
@@ -349,6 +403,7 @@ async function request(path, body = null) {
 
 async function sendAction(action) {
   if (sending) return;
+  clearAiAdvanceTimer();
   sending = true;
   try {
     state = await request('/api/game/action', action);
@@ -367,17 +422,22 @@ async function newGame(resetMatch = false) {
     const question = resetMatch
       ? (state.phase === 'over' ? '清空当前积分并重新开始？' : '重置积分并放弃当前牌局？')
       : (state.phase === 'over' ? null : '放弃当前牌局并新开一局？');
-    if (question && !window.confirm(question)) return;
+    if (question && !window.confirm(question)) return false;
   }
+  clearAiAdvanceTimer();
   sending = true;
   try {
     state = await request('/api/game/new', {
       rules_profile: selectedRulesProfile || $('#rules-profile').value,
       reset_match: resetMatch,
+      table_mode: selectedTableMode || $('#table-mode').value,
+      ai_delay_seconds: Number($('#ai-delay').value),
     });
     selectedRulesProfile = state.rules.profile;
+    selectedTableMode = state.table_mode;
     if (debugAiHands) state = await requestGameState();
     render();
+    return true;
   } finally {
     sending = false;
   }
@@ -402,12 +462,80 @@ async function toggleDebugAiHands() {
   }
 }
 
+function clearAiAdvanceTimer() {
+  if (aiAdvanceTimer !== null) {
+    window.clearTimeout(aiAdvanceTimer);
+    aiAdvanceTimer = null;
+  }
+}
+
+function scheduleAiAdvance() {
+  clearAiAdvanceTimer();
+  if (
+    !state
+    || sending
+    || !state.awaiting_ai_action
+    || state.ai_delay_seconds <= 0
+    || state.table_mode !== 'solo_vs_ai'
+  ) return;
+  aiAdvanceTimer = window.setTimeout(() => advanceAi(), state.ai_delay_seconds * 1000);
+}
+
+async function advanceAi() {
+  if (sending || !state?.awaiting_ai_action) return;
+  sending = true;
+  try {
+    state = await request('/api/game/advance', {});
+    if (debugAiHands) state = await requestGameState();
+    render();
+  } catch (error) {
+    window.alert(error.message);
+  } finally {
+    sending = false;
+  }
+}
+
+async function updateAiDelay() {
+  if (sending || state?.table_mode === 'four_player_manual') return;
+  clearAiAdvanceTimer();
+  sending = true;
+  try {
+    state = await request('/api/game/settings', {
+      ai_delay_seconds: Number($('#ai-delay').value),
+    });
+    if (debugAiHands) state = await requestGameState();
+    render();
+  } catch (error) {
+    window.alert(error.message);
+    render();
+  } finally {
+    sending = false;
+  }
+}
+
+async function updateTableMode(event) {
+  const previous = state?.table_mode || selectedTableMode;
+  selectedTableMode = event.target.value;
+  const started = await newGame(false);
+  if (!started) {
+    selectedTableMode = previous;
+    render();
+  }
+}
+
 $('#new-game').addEventListener('click', () => newGame(false));
 $('#reset-match').addEventListener('click', () => newGame(true));
 $('#toggle-debug').addEventListener('click', toggleDebugAiHands);
 $('#rules-profile').addEventListener('change', (event) => {
   selectedRulesProfile = event.target.value;
 });
-requestGameState().then((data) => { state = data; selectedRulesProfile = data.rules.profile; render(); }).catch((error) => {
+$('#table-mode').addEventListener('change', updateTableMode);
+$('#ai-delay').addEventListener('change', updateAiDelay);
+requestGameState().then((data) => {
+  state = data;
+  selectedRulesProfile = data.rules.profile;
+  selectedTableMode = data.table_mode;
+  render();
+}).catch((error) => {
   $('#message').textContent = `无法连接服务：${error.message}`;
 });

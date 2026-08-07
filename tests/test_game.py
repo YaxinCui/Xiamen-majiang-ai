@@ -4,7 +4,10 @@ import unittest
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.agents import (
     AvailabilityTeacherAgent,
+    ExactOneDrawTenpaiTieBreakTeacherAgent,
     GameAction,
+    HeuristicTeacherAgent,
+    MeldContinuationTeacherAgent,
     OnePlyLookaheadTeacherAgent,
     RiskAwareTeacherAgent,
 )
@@ -55,6 +58,59 @@ class GameTests(unittest.TestCase):
         game.apply_human_action(action)
         self.assertIn(game.phase, {"discard", "response", "over"})
         self.assertNotEqual(game.phase, "setup")
+
+    def test_slow_mode_advances_exactly_until_a_manual_seat_is_needed(self):
+        game = XiamenMahjongGame(
+            seed=202608071,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=0,
+        )
+        steps = 0
+        while game.phase != "over" and game.manual_action_seat() is None:
+            self.assertTrue(game.awaiting_ai_action())
+            self.assertTrue(game.advance_one_ai())
+            steps += 1
+            self.assertLess(steps, 24)
+        self.assertGreater(steps, 0)
+        if game.phase != "over":
+            self.assertEqual(game.manual_action_seat(), 0)
+            self.assertTrue(game.human_actions())
+
+    def test_four_manual_seats_show_only_the_current_actor_hand(self):
+        game = XiamenMahjongGame(
+            seed=202608072,
+            rules=XiamenRules.classic(),
+            human_seats=range(4),
+        )
+        self.assertNotEqual(game.phase, "over")
+        actor = game.manual_action_seat()
+        self.assertIsNotNone(actor)
+        state = game.public_state()
+        self.assertEqual(state["viewer_seat"], actor)
+        self.assertEqual(state["action_seat"], actor)
+        self.assertEqual(
+            [player["seat"] for player in state["players"] if player["hand"] is not None],
+            [actor],
+        )
+        action = next(
+            (item for item in game.human_actions() if item["kind"] == "discard"),
+            game.human_actions()[0],
+        )
+        game.apply_human_action(action)
+        if game.phase != "over":
+            next_actor = game.manual_action_seat()
+            self.assertIsNotNone(next_actor)
+            next_state = game.public_state()
+            self.assertEqual(next_state["viewer_seat"], next_actor)
+            self.assertEqual(
+                [
+                    player["seat"]
+                    for player in next_state["players"]
+                    if player["hand"] is not None
+                ],
+                [next_actor],
+            )
 
     def test_game_can_run_until_end_with_first_legal_human_actions(self):
         game = XiamenMahjongGame(seed=41)
@@ -298,6 +354,48 @@ class GameTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AvailabilityTeacherAgent(wait_copy_value=-0.1)
 
+    def test_meld_continuation_teacher_can_decline_a_low_value_call(self):
+        game = XiamenMahjongGame(seed=79, rules=XiamenRules.classic())
+        game.gold_tile = 33
+        game.phase = "response"
+        game.discarder = 0
+        game.last_discard = 4
+        game.players[1].hand = [
+            0, 1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+        ]
+        options = [GameAction("pass"), GameAction("pong", 4, (4, 4))]
+        agent = MeldContinuationTeacherAgent(minimum_claim_gain=10_000)
+        self.assertEqual(agent.choose_response(game, 1, options), GameAction("pass"))
+        explanation = agent.explain_response(game, 1, options)
+        self.assertEqual(explanation[0]["kind"], "pong")
+        self.assertIn("post_call_discard", explanation[0])
+
+    def test_meld_continuation_teacher_rejects_negative_gain(self):
+        with self.assertRaises(ValueError):
+            MeldContinuationTeacherAgent(minimum_claim_gain=-0.1)
+
+    def test_meld_continuation_response_ignores_hidden_wall_and_other_hands(self):
+        game = XiamenMahjongGame(seed=81, rules=XiamenRules.classic())
+        game.gold_tile = 33
+        game.phase = "response"
+        game.discarder = 0
+        game.last_discard = 4
+        game.players[1].hand = [
+            0, 1, 2, 3, 4, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14
+        ]
+        options = [GameAction("pass"), GameAction("pong", 4, (4, 4))]
+        altered = copy.deepcopy(game)
+        altered.players[2].hand[0], altered.wall[0] = (
+            altered.wall[0],
+            altered.players[2].hand[0],
+        )
+        altered.players[2].hand.sort()
+        agent = MeldContinuationTeacherAgent(minimum_claim_gain=0)
+        self.assertEqual(
+            agent.choose_response(game, 1, options),
+            agent.choose_response(altered, 1, options),
+        )
+
     def test_risk_aware_teacher_uses_only_public_information(self):
         game = XiamenMahjongGame(
             seed=202611001,
@@ -363,6 +461,71 @@ class GameTests(unittest.TestCase):
         )
         if original.kind == "discard":
             self.assertIn(original.tile, game.players[player_id].hand)
+
+    def test_exact_one_draw_tiebreak_uses_only_public_information(self):
+        game = XiamenMahjongGame(
+            seed=202614200,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        altered = copy.deepcopy(game)
+        opponent = next(player for player in altered.players if player.seat != player_id)
+        wall_index = next(
+            index for index, tile in enumerate(altered.wall) if tile != opponent.hand[0]
+        )
+        opponent.hand[0], altered.wall[wall_index] = (
+            altered.wall[wall_index],
+            opponent.hand[0],
+        )
+        opponent.hand.sort()
+
+        agent = ExactOneDrawTenpaiTieBreakTeacherAgent()
+        self.assertEqual(
+            agent.choose_turn_action(game, player_id),
+            agent.choose_turn_action(altered, player_id),
+        )
+        # An unreachable threshold must exactly preserve the frozen Teacher.
+        strict = ExactOneDrawTenpaiTieBreakTeacherAgent(
+            minimum_live_advantage=1_000_000
+        )
+        self.assertEqual(
+            strict.choose_turn_action(game, player_id),
+            HeuristicTeacherAgent().choose_turn_action(game, player_id),
+        )
+
+    def test_exact_one_draw_tiebreak_reorders_only_after_a_strict_gate(self):
+        game = XiamenMahjongGame(
+            seed=202614200,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        frozen = HeuristicTeacherAgent().explain_discard(game, player_id)
+        self.assertFalse(frozen[0]["waits"])
+        self.assertEqual(float(frozen[0]["score"]), float(frozen[1]["score"]))
+        frozen_tile = int(frozen[0]["tile"])
+        selected_tile = int(frozen[1]["tile"])
+
+        agent = ExactOneDrawTenpaiTieBreakTeacherAgent()
+
+        def controlled_potential(_game, _player_id, hand_after_discard, _visible):
+            return 2 if selected_tile not in hand_after_discard else 0
+
+        agent._live_route_potential = controlled_potential  # type: ignore[method-assign]
+        ranked = agent.explain_discard(game, player_id)
+        self.assertEqual(int(ranked[0]["tile"]), selected_tile)
+        self.assertNotEqual(int(ranked[0]["tile"]), frozen_tile)
+        self.assertTrue(ranked[0]["selected_by_exact_one_draw_tiebreak"])
+        self.assertEqual(ranked[0]["teacher_score"], frozen[1]["score"])
+
+    def test_exact_one_draw_tiebreak_rejects_invalid_gates(self):
+        with self.assertRaises(ValueError):
+            ExactOneDrawTenpaiTieBreakTeacherAgent(score_margin=-0.1)
+        with self.assertRaises(ValueError):
+            ExactOneDrawTenpaiTieBreakTeacherAgent(minimum_live_advantage=0)
 
     def test_public_state_marks_the_current_drawn_tile(self):
         game = XiamenMahjongGame(seed=71, rules=XiamenRules.classic(), dealer=0)

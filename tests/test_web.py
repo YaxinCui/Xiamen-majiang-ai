@@ -106,6 +106,48 @@ class WebTests(unittest.TestCase):
         self.assertEqual(default_state["ai_profile"], "heuristic_teacher")
         self.assertEqual(checkpoint_state["ai_profile"], "explicit_test_checkpoint")
 
+    def test_slow_ai_mode_advances_one_server_authoritative_step(self):
+        store = GameStore()
+        state = None
+        for seed in range(40):
+            candidate = store.new_game(
+                seed=seed,
+                rules_profile="classic",
+                reset_match=True,
+                ai_delay_seconds=5,
+            )
+            if candidate["awaiting_ai_action"]:
+                state = candidate
+                break
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertEqual(state["ai_delay_seconds"], 5)
+        self.assertEqual(state["table_mode"], "solo_vs_ai")
+        next_state = store.advance_ai()
+        self.assertGreaterEqual(next_state["turn_count"], state["turn_count"])
+        self.assertNotEqual(next_state["phase"], "setup")
+
+    def test_four_player_manual_mode_rotates_the_private_view(self):
+        store = GameStore()
+        state = store.new_game(
+            seed=202608072,
+            rules_profile="classic",
+            reset_match=True,
+            table_mode="four_player_manual",
+            ai_delay_seconds=10,
+        )
+        self.assertEqual(state["table_mode"], "four_player_manual")
+        self.assertEqual(state["manual_seats"], [0, 1, 2, 3])
+        self.assertEqual(state["ai_profile"], "four_player_manual")
+        self.assertFalse(state["local_human_recording"]["enabled"])
+        self.assertTrue(state["actions"])
+        actor = state["action_seat"]
+        self.assertEqual(state["viewer_seat"], actor)
+        self.assertEqual(
+            [player["seat"] for player in state["players"] if player["hand"] is not None],
+            [actor],
+        )
+
     def test_opt_in_human_recording_writes_only_safe_completed_trajectory(self):
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "human.jsonl"

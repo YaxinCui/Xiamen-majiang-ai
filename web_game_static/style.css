@@ -14,6 +14,7 @@ button { font: inherit; }
 .table-controls { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 10px; }
 .profile-picker { display: grid; gap: 3px; color: #aac9bd; font-size: .72rem; font-weight: 700; }
 .profile-picker select { min-width: 116px; border: 1px solid rgba(235,246,240,.24); border-radius: 8px; padding: 7px 9px; background: #103f36; color: #edf8f2; font: inherit; }
+.profile-picker select:disabled { cursor: not-allowed; opacity: .52; }
 .guide-link, .debug-button { border: 1px solid rgba(235,246,240,.24); border-radius: 8px; padding: 9px 11px; background: #154c42; color: #eaf6ef; font: inherit; font-size: .78rem; font-weight: 800; text-decoration: none; cursor: pointer; }
 .guide-link:hover, .debug-button:hover { filter: brightness(1.14); }.debug-button.is-active { border-color: #8ebacb; background: #275365; color: #e9f7ff; }
 .eyebrow, .section-kicker { margin: 0 0 6px; color: #90d2bf; letter-spacing: .13em; font-size: .7rem; font-weight: 800; text-transform: uppercase; }

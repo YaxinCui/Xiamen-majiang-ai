@@ -34,6 +34,12 @@ class GameStore:
     seeds, wall order, and opponents' concealed hands.
     """
 
+    AI_DELAYS = (0, 5, 10, 15)
+    TABLE_MODES = {
+        "solo_vs_ai": "一人对三 AI",
+        "four_player_manual": "四人手动验规则",
+    }
+
     def __init__(
         self,
         *,
@@ -52,6 +58,8 @@ class GameStore:
             )
         self.lock = threading.Lock()
         self.rules_profile = "classic"
+        self.table_mode = "solo_vs_ai"
+        self.ai_delay_seconds = 0
         self._ai_agent = ai_agent
         self._ai_profile = ai_profile
         self._ai_identity = ai_identity or ai_profile
@@ -67,13 +75,14 @@ class GameStore:
         self._human_decisions: list[TeacherDecision] = []
         self._human_hand_written = False
         self._human_log_error = False
-        self.game = XiamenMahjongGame(
-            rules=XiamenRules.from_profile(self.rules_profile),
-            agents=self._ai_agents(),
+        self.game = self._new_engine_game(
+            rules=XiamenRules.from_profile(self.rules_profile)
         )
         self._human_score_start = tuple(player.score for player in self.game.players)
 
     def _ai_agents(self) -> dict[int, Any] | None:
+        if self.table_mode == "four_player_manual":
+            return None
         if self._ai_agent is None:
             return None
         return {
@@ -82,18 +91,60 @@ class GameStore:
             if seat != 0
         }
 
+    def _manual_seats(self) -> set[int]:
+        if self.table_mode == "four_player_manual":
+            return set(range(XiamenRules().player_count))
+        return {0}
+
+    def _new_engine_game(
+        self,
+        *,
+        rules: XiamenRules,
+        seed: int | None = None,
+        dealer: int | None = None,
+        dealer_streak: int = 0,
+        scores: list[int] | None = None,
+        hand_number: int = 1,
+    ) -> XiamenMahjongGame:
+        slow_ai = self.table_mode == "solo_vs_ai" and self.ai_delay_seconds > 0
+        return XiamenMahjongGame(
+            seed=seed,
+            rules=rules,
+            dealer=dealer,
+            dealer_streak=dealer_streak,
+            scores=scores,
+            hand_number=hand_number,
+            auto_advance=not slow_ai,
+            agents=self._ai_agents(),
+            human_seat=0,
+            human_seats=self._manual_seats(),
+        )
+
     def _public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
         state = self.game.public_state(reveal_ai_hands=reveal_ai_hands)
         state["rule_profiles"] = XiamenRules.available_profiles()
-        state["ai_profile"] = self._ai_profile
+        state["table_mode"] = self.table_mode
+        state["table_modes"] = [
+            {"id": mode, "name": name}
+            for mode, name in self.TABLE_MODES.items()
+        ]
+        state["ai_delay_seconds"] = self.ai_delay_seconds
+        state["ai_delay_options"] = list(self.AI_DELAYS)
+        state["ai_profile"] = (
+            "four_player_manual"
+            if self.table_mode == "four_player_manual"
+            else self._ai_profile
+        )
         state["local_human_recording"] = {
-            "enabled": self._human_log is not None,
+            "enabled": self._human_log is not None and self.table_mode == "solo_vs_ai",
             "purpose": self._human_recording_purpose,
             "pending_decisions": len(self._human_decisions),
             "completed_hand_written": self._human_hand_written,
             "write_failed": self._human_log_error,
             "scope": (
                 "completed_hand_actor_visible_only"
+                if self._human_log is not None and self.table_mode == "solo_vs_ai"
+                else "disabled_for_four_player_manual"
                 if self._human_log is not None
                 else "disabled"
             ),
@@ -137,6 +188,7 @@ class GameStore:
 
         if (
             self._human_log is None
+            or self.table_mode != "solo_vs_ai"
             or self._human_hand_written
             or self.game.phase != "over"
             or not self._human_decisions
@@ -201,6 +253,8 @@ class GameStore:
         rules_profile: str | None = None,
         *,
         reset_match: bool = False,
+        table_mode: str | None = None,
+        ai_delay_seconds: int | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             profile = rules_profile or self.rules_profile
@@ -208,6 +262,12 @@ class GameStore:
                 rules = XiamenRules.from_profile(profile)
             except ValueError as error:
                 raise GameError(str(error)) from error
+            mode = table_mode or self.table_mode
+            if mode not in self.TABLE_MODES:
+                raise GameError("未知牌桌模式")
+            delay = self.ai_delay_seconds if ai_delay_seconds is None else ai_delay_seconds
+            if isinstance(delay, bool) or delay not in self.AI_DELAYS:
+                raise GameError("AI 出牌间隔只能是即时、5、10 或 15 秒")
             dealer = None
             dealer_streak = 0
             scores = None
@@ -215,6 +275,7 @@ class GameStore:
             same_match = (
                 not reset_match
                 and profile == self.rules_profile
+                and mode == self.table_mode
                 and rules.enable_dealer_continuation
             )
             if same_match:
@@ -230,14 +291,15 @@ class GameStore:
                         dealer = (previous.dealer + 1) % rules.player_count
                         dealer_streak = 0
             self.rules_profile = profile
-            self.game = XiamenMahjongGame(
+            self.table_mode = mode
+            self.ai_delay_seconds = delay
+            self.game = self._new_engine_game(
                 seed=seed,
                 rules=rules,
                 dealer=dealer,
                 dealer_streak=dealer_streak,
                 scores=scores,
                 hand_number=hand_number,
-                agents=self._ai_agents(),
             )
             self._reset_human_recorder()
             return self._public_state()
@@ -246,13 +308,42 @@ class GameStore:
         with self.lock:
             decision = (
                 self._capture_human_decision(payload)
-                if self._human_log is not None
+                if self._human_log is not None and self.table_mode == "solo_vs_ai"
                 else None
             )
             self.game.apply_human_action(payload)
             if decision is not None:
                 self._human_decisions.append(decision)
             self._write_completed_human_hand()
+            return self._public_state()
+
+    def advance_ai(self) -> dict[str, Any]:
+        """Advance exactly one visible AI decision in slow mode."""
+
+        with self.lock:
+            if self.table_mode != "solo_vs_ai":
+                raise GameError("四人手动模式没有 AI 可推进")
+            if self.ai_delay_seconds == 0:
+                raise GameError("即时模式会自动推进 AI")
+            if not self.game.awaiting_ai_action():
+                raise GameError("当前没有等待中的 AI 操作")
+            self.game.advance_one_ai()
+            self._write_completed_human_hand()
+            return self._public_state()
+
+    def settings(self, *, ai_delay_seconds: int) -> dict[str, Any]:
+        """Change AI pacing without rebuilding the current hand."""
+
+        with self.lock:
+            if isinstance(ai_delay_seconds, bool) or ai_delay_seconds not in self.AI_DELAYS:
+                raise GameError("AI 出牌间隔只能是即时、5、10 或 15 秒")
+            self.ai_delay_seconds = ai_delay_seconds
+            if self.table_mode == "solo_vs_ai" and ai_delay_seconds == 0:
+                self.game.auto_advance = True
+                self.game.advance_ais()
+                self._write_completed_human_hand()
+            elif self.table_mode == "solo_vs_ai":
+                self.game.auto_advance = False
             return self._public_state()
 
 
@@ -284,13 +375,42 @@ def make_handler(store: GameStore):
                     reset_match = payload.get("reset_match", False)
                     if not isinstance(reset_match, bool):
                         raise GameError("reset_match 必须是布尔值")
+                    table_mode = payload.get("table_mode")
+                    if table_mode is not None and not isinstance(table_mode, str):
+                        raise GameError("table_mode 必须是字符串")
+                    ai_delay_seconds = payload.get("ai_delay_seconds")
+                    if ai_delay_seconds is not None and (
+                        isinstance(ai_delay_seconds, bool)
+                        or not isinstance(ai_delay_seconds, int)
+                    ):
+                        raise GameError("ai_delay_seconds 必须是整数")
                     self._send_json(
                         HTTPStatus.OK,
-                        store.new_game(seed, rules_profile, reset_match=reset_match),
+                        store.new_game(
+                            seed,
+                            rules_profile,
+                            reset_match=reset_match,
+                            table_mode=table_mode,
+                            ai_delay_seconds=ai_delay_seconds,
+                        ),
                     )
                     return
                 if self.path == "/api/game/action":
                     self._send_json(HTTPStatus.OK, store.action(payload))
+                    return
+                if self.path == "/api/game/advance":
+                    self._send_json(HTTPStatus.OK, store.advance_ai())
+                    return
+                if self.path == "/api/game/settings":
+                    ai_delay_seconds = payload.get("ai_delay_seconds")
+                    if isinstance(ai_delay_seconds, bool) or not isinstance(
+                        ai_delay_seconds, int
+                    ):
+                        raise GameError("ai_delay_seconds 必须是整数")
+                    self._send_json(
+                        HTTPStatus.OK,
+                        store.settings(ai_delay_seconds=ai_delay_seconds),
+                    )
                     return
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "接口不存在"})
             except GameError as error:

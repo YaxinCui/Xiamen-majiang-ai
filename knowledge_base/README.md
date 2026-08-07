@@ -15,6 +15,10 @@
 - [更强 AI 训练方案](training_program.md)：从现有规则 Teacher 基线到自博弈
   强化学习的分阶段训练和验收标准。
 - [训练实验日志](experiment_log.md)：已运行实验、独立评测与淘汰结论。
+- [吃碰后续牌效 Teacher 协议](meld_continuation_teacher_v1_protocol.md)：响应后强制弃牌的
+  专家规则候选、独立筛选与未通过结论。
+- [精确一摸听牌平分裁决 Teacher 协议](exact_one_draw_tenpai_teacher_v1_protocol.md)：只在 Teacher
+  原评分近似平分时介入的公开信息规则候选、其独立筛选门槛与边界。
 - [外部项目迁移审计](external_transfer_audit_2026-08.md)：对指定抚州／南城项目的
   规则、许可证和可迁移工程方法的边界结论。
 - [训练数据来源审计](data_source_audit_2026-08.md)：已核验来源、隐私／规则准入契约

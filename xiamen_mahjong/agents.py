@@ -6,9 +6,9 @@ from collections import Counter
 from dataclasses import dataclass
 from types import SimpleNamespace
 
-from .hand import hand_quality, is_winning_hand, wait_tiles
+from .hand import hand_quality, is_winning_hand, one_draw_tenpai_routes, wait_tiles
 from .scoring import classic_score
-from .tiles import BASE_TILE_COUNT, is_base_tile, tile_name
+from .tiles import BASE_TILE_COUNT, is_base_tile, is_honor, tile_name
 
 
 @dataclass(frozen=True)
@@ -174,6 +174,159 @@ class HeuristicTeacherAgent:
         if not ranked:
             raise RuntimeError("Teacher was asked to discard from an empty hand")
         return int(ranked[0]["tile"])
+
+
+class MeldContinuationTeacherAgent(HeuristicTeacherAgent):
+    """Response-only Teacher that evaluates the compulsory discard after a call.
+
+    The frozen Teacher compares a chi/pong hand immediately after consuming two
+    tiles.  In the actual rules that player must immediately discard one more
+    concealed tile, so the comparison is at a different hand size from the
+    pass branch.  This candidate changes *only* chi and pong responses: it
+    scores the best legal post-call discard with the same deterministic hand
+    shape and wait scoring used by the frozen Teacher, then requires a fixed
+    improvement over declining the call.  It reads only the actor's hand,
+    public discards/melds and public rules; it never samples or inspects the
+    wall or opponents' concealed hands.
+
+    Ming-kong, self-draw/discard win, gold-tour and ordinary turn decisions
+    remain exactly frozen.  The narrow scope makes this a directly testable
+    expert-rule correction rather than another global discard heuristic.
+    """
+
+    def __init__(self, *, minimum_claim_gain: float = 0.0):
+        if minimum_claim_gain < 0:
+            raise ValueError("minimum_claim_gain 不能为负数")
+        self.minimum_claim_gain = float(minimum_claim_gain)
+
+    @staticmethod
+    def _shape_score(game, player_id: int, hand: list[int], meld_count: int) -> float:
+        return hand_quality(
+            hand,
+            game.gold_tile,
+            meld_count=meld_count,
+            melds_required=game.rules.melds_required,
+            wildcard_tiles=game.wildcard_tiles,
+            proxy_tile=game.gold_proxy_tile,
+            proxy_as=game.gold_tile,
+        )
+
+    @staticmethod
+    def _forced_follow_for_hand(game, hand: list[int]) -> list[int]:
+        """Apply the public honor-follow rule to a hypothetical own hand."""
+
+        if not game.rules.enable_forced_honor_follow:
+            return []
+        appeared_honors = {
+            tile
+            for player in game.players
+            for tile in player.discards
+            if is_honor(tile) and tile not in {game.gold_tile, game.gold_proxy_tile}
+        }
+        return sorted(
+            tile
+            for tile in set(hand)
+            if is_honor(tile) and hand.count(tile) == 1 and tile in appeared_honors
+        )
+
+    def _post_claim_score(
+        self, game, player_id: int, action: GameAction
+    ) -> tuple[float, int]:
+        """Score the best *legal forced discard* after chi or pong.
+
+        ``action.tiles`` are the two concealed tiles consumed by the call;
+        the claimed discard becomes part of the exposed meld and therefore
+        does not enter the actor's concealed hand.  The returned hand after
+        discard has the exact size on which its next draw may complete it.
+        """
+
+        player = game.players[player_id]
+        after_claim = list(player.hand)
+        for tile in action.tiles:
+            after_claim.remove(tile)
+        meld_count = len(player.melds) + 1
+        forced = set(self._forced_follow_for_hand(game, after_claim))
+        candidates: list[tuple[float, int]] = []
+        for discarded in sorted(set(after_claim)):
+            if forced and discarded not in forced:
+                continue
+            after_discard = list(after_claim)
+            after_discard.remove(discarded)
+            waits = wait_tiles(
+                after_discard,
+                game.gold_tile,
+                meld_count=meld_count,
+                melds_required=game.rules.melds_required,
+                allow_seven_pairs=game.rules.allow_seven_pairs,
+                wildcard_tiles=game.wildcard_tiles,
+                proxy_tile=game.gold_proxy_tile,
+                proxy_as=game.gold_tile,
+            )
+            score = self._shape_score(game, player_id, after_discard, meld_count)
+            score += len(waits) * 18.0
+            if discarded == game.gold_tile:
+                score -= 7.0
+            candidates.append((score, discarded))
+        if not candidates:
+            raise RuntimeError("响应后没有合法弃牌")
+        return max(candidates, key=lambda item: (item[0], -item[1]))
+
+    def explain_response(
+        self, game, player_id: int, options: list[GameAction]
+    ) -> list[dict[str, object]]:
+        """Expose a compact, human-readable chi/pong continuation ranking."""
+
+        player = game.players[player_id]
+        before = self._shape_score(game, player_id, player.hand, len(player.melds))
+        rows = []
+        for action in options:
+            if action.kind not in {"chi", "pong"}:
+                continue
+            after_score, forced_discard = self._post_claim_score(game, player_id, action)
+            gain = after_score - before
+            rows.append(
+                {
+                    "kind": action.kind,
+                    "tiles": [tile_name(tile) for tile in action.tiles],
+                    "post_call_discard": tile_name(forced_discard),
+                    "post_call_score": round(after_score, 3),
+                    "gain_over_pass_shape": round(gain, 3),
+                    "meets_minimum_gain": gain >= self.minimum_claim_gain,
+                }
+            )
+        return sorted(
+            rows,
+            key=lambda row: (
+                -float(row["post_call_score"]),
+                str(row["kind"]),
+                tuple(str(tile) for tile in row["tiles"]),
+            ),
+        )
+
+    def choose_response(self, game, player_id: int, options: list[GameAction]) -> GameAction:
+        kinds = {option.kind: option for option in options}
+        if "hu" in kinds:
+            return kinds["hu"]
+        # Preserve the frozen Teacher's unconditional high-priority ming-kong
+        # behavior.  This candidate isolates chi/pong continuation quality.
+        if "ming_kan" in kinds and len(game.wall) > 18:
+            return kinds["ming_kan"]
+        player = game.players[player_id]
+        before = self._shape_score(game, player_id, player.hand, len(player.melds))
+        ranked: list[tuple[float, int, tuple[int, ...], GameAction]] = []
+        for action in options:
+            if action.kind not in {"chi", "pong"}:
+                continue
+            after_score, _forced_discard = self._post_claim_score(game, player_id, action)
+            gain = after_score - before
+            if gain >= self.minimum_claim_gain:
+                # Keep the frozen Teacher's pong-before-chi preference only
+                # as a deterministic tie-breaker, never as a score bonus.
+                priority = 1 if action.kind == "pong" else 0
+                ranked.append((after_score, priority, tuple(action.tiles), action))
+        if ranked:
+            return max(ranked, key=lambda item: (item[0], item[1], item[2]))[3]
+        return kinds["pass"]
 
 
 class AvailabilityTeacherAgent(HeuristicTeacherAgent):
@@ -499,3 +652,176 @@ class OnePlyLookaheadTeacherAgent(HeuristicTeacherAgent):
                 }
             )
         return sorted(candidates, key=lambda item: (-float(item["score"]), int(item["tile"])))
+
+
+class ExactOneDrawTenpaiTieBreakTeacherAgent(HeuristicTeacherAgent):
+    """A strictly gated exact-tenpai tiebreaker for the frozen Teacher.
+
+    The previously screened :class:`OnePlyLookaheadTeacherAgent` reranked all
+    discards using a cheap future shape value and was decisively rejected.
+    This candidate is deliberately not another global lookahead: it preserves
+    the frozen order unless (1) the frozen choice and an alternative are both
+    non-tenpai, (2) their frozen scores differ by at most ``score_margin``,
+    and (3) an exact legal one-draw-tenpai calculation gives an alternative a
+    strictly larger public live-route potential.
+
+    It consumes only the actor's hand, all exposed rivers/melds, the gold
+    indicator, and the public honor-follow rule.  It never reads a wall or an
+    opponent's concealed hand.  It is an experimental evaluation candidate;
+    passing a prespecified independent gate is required before it may affect
+    the browser Teacher or training labels.
+    """
+
+    def __init__(self, *, score_margin: float = 2.0, minimum_live_advantage: int = 1):
+        if score_margin < 0:
+            raise ValueError("score_margin 不能为负数")
+        if minimum_live_advantage < 1:
+            raise ValueError("minimum_live_advantage 至少为 1")
+        self.score_margin = float(score_margin)
+        self.minimum_live_advantage = int(minimum_live_advantage)
+
+    @staticmethod
+    def _public_visible_counts(game, player_id: int) -> Counter[int]:
+        """Count only the actor-known and publicly exposed base-tile faces."""
+
+        visible = Counter(
+            tile for tile in game.players[player_id].hand if is_base_tile(tile)
+        )
+        for player in game.players:
+            visible.update(tile for tile in player.discards if is_base_tile(tile))
+            visible.update(
+                tile
+                for meld in player.melds
+                for tile in meld["tiles"]
+                if is_base_tile(tile)
+            )
+        if game.gold_indicator is not None and is_base_tile(game.gold_indicator):
+            visible[game.gold_indicator] += 1
+        return visible
+
+    @staticmethod
+    def _allowed_discards(game, hand: list[int]) -> list[int]:
+        """Reapply classic's public honor-follow constraint after a draw."""
+
+        if not game.rules.enable_forced_honor_follow:
+            return sorted(set(hand))
+        appeared_honors = {
+            tile
+            for player in game.players
+            for tile in player.discards
+            if is_honor(tile) and tile not in {game.gold_tile, game.gold_proxy_tile}
+        }
+        forced = sorted(
+            tile
+            for tile in set(hand)
+            if is_honor(tile) and hand.count(tile) == 1 and tile in appeared_honors
+        )
+        return forced or sorted(set(hand))
+
+    def _live_route_potential(
+        self,
+        game,
+        player_id: int,
+        hand_after_discard: list[int],
+        visible: Counter[int],
+    ) -> int:
+        """Return public draw-copy × follow-up live-wait-copy potential.
+
+        For each still-publicly-possible draw face, the exact oracle enumerates
+        every legal immediate discard and picks the continuation with the most
+        live waits *after that draw*.  This is only a tiebreak statistic, not
+        a win probability or a substitute for the frozen hand-shape score.
+        """
+
+        player = game.players[player_id]
+        routes = one_draw_tenpai_routes(
+            hand_after_discard,
+            game.gold_tile,
+            meld_count=len(player.melds),
+            melds_required=game.rules.melds_required,
+            allow_seven_pairs=game.rules.allow_seven_pairs,
+            wildcard_tiles=game.wildcard_tiles,
+            proxy_tile=game.gold_proxy_tile,
+            proxy_as=game.gold_tile,
+            legal_discards=lambda after_draw: self._allowed_discards(game, after_draw),
+        )
+        potential = 0
+        for drawn, choices in routes.items():
+            draw_copies = max(0, 4 - visible[drawn])
+            if not draw_copies:
+                continue
+            best_live_waits = max(
+                sum(
+                    max(0, 4 - visible[wait] - (1 if wait == drawn else 0))
+                    for wait in waits
+                )
+                for _discarded, waits in choices
+            )
+            potential += draw_copies * best_live_waits
+        return potential
+
+    def explain_discard(self, game, player_id: int) -> list[dict[str, object]]:
+        frozen = super().explain_discard(game, player_id)
+        if not frozen or frozen[0]["waits"]:
+            return frozen
+
+        top_score = float(frozen[0]["score"])
+        eligible = [
+            row
+            for row in frozen
+            if not row["waits"]
+            and top_score - float(row["score"]) <= self.score_margin
+        ]
+        if len(eligible) < 2:
+            return frozen
+
+        player = game.players[player_id]
+        visible = self._public_visible_counts(game, player_id)
+        potentials: dict[int, int] = {}
+        for row in eligible:
+            tile = int(row["tile"])
+            after_discard = list(player.hand)
+            after_discard.remove(tile)
+            potentials[tile] = self._live_route_potential(
+                game, player_id, after_discard, visible
+            )
+
+        frozen_tile = int(frozen[0]["tile"])
+        frozen_potential = potentials[frozen_tile]
+        selected = max(
+            eligible,
+            key=lambda row: (
+                potentials[int(row["tile"])],
+                float(row["score"]),
+                -int(row["tile"]),
+            ),
+        )
+        selected_tile = int(selected["tile"])
+        if (
+            selected_tile == frozen_tile
+            or potentials[selected_tile] - frozen_potential
+            < self.minimum_live_advantage
+        ):
+            return frozen
+
+        enriched = []
+        for row in frozen:
+            tile = int(row["tile"])
+            if tile in potentials:
+                enriched.append(
+                    {
+                        **row,
+                        "teacher_score": row["score"],
+                        "one_draw_live_potential": potentials[tile],
+                        "selected_by_exact_one_draw_tiebreak": tile == selected_tile,
+                    }
+                )
+            else:
+                enriched.append(row)
+        # `_best_discard` intentionally takes the first explanation row.  In
+        # the exceptional gated state, selection order is the explicitly
+        # labelled exact tiebreak; every non-selected row keeps frozen order.
+        return [
+            next(row for row in enriched if int(row["tile"]) == selected_tile),
+            *(row for row in enriched if int(row["tile"]) != selected_tile),
+        ]
