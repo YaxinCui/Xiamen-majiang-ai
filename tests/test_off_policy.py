@@ -268,6 +268,29 @@ class OffPolicyTests(unittest.TestCase):
         self.assertTrue(args.skip_test)
         self.assertIsNone(args.test)
 
+    def test_outcome_trainer_accepts_fixed_epochs_without_validation(self):
+        import sys
+        from unittest.mock import patch
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "train_afterstate_outcomes.py",
+                "--train",
+                "train.jsonl",
+                "--skip-test",
+                "--fixed-epochs",
+                "--fresh-policy-anchor-seed",
+                "1",
+                "--output-dir",
+                "output",
+            ],
+        ):
+            args = parse_afterstate_args()
+        self.assertTrue(args.fixed_epochs)
+        self.assertIsNone(args.validation)
+
 
 if __name__ == "__main__":
     unittest.main()

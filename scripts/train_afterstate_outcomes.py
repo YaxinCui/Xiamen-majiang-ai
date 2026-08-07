@@ -59,13 +59,27 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="可重复指定；追加按物理牌墙独立的同分区干预数据。",
     )
-    parser.add_argument("--validation", type=Path, required=True)
+    parser.add_argument(
+        "--validation",
+        type=Path,
+        help=(
+            "按物理牌墙独立的验证集；默认用于逐 epoch 选择 checkpoint。"
+        ),
+    )
     parser.add_argument(
         "--additional-validation",
         type=Path,
         action="append",
         default=[],
         help="可重复指定；只能追加与训练墙组不重叠的验证数据。",
+    )
+    parser.add_argument(
+        "--fixed-epochs",
+        action="store_true",
+        help=(
+            "不读取 validation，严格训练 --epochs 次并保留末轮 checkpoint。"
+            "用于 cross-fitting：这样待预测墙组不会经由 early stopping 泄漏到 direct model。"
+        ),
     )
     test_group = parser.add_mutually_exclusive_group(required=True)
     test_group.add_argument("--test", type=Path)
@@ -484,6 +498,11 @@ def main() -> None:
         raise ValueError("outcome 损失权重不能为负数")
     if args.score_loss_weight + args.own_win_loss_weight + args.opponent_win_loss_weight <= 0:
         raise ValueError("至少保留一个正的 outcome 损失权重")
+    if args.fixed_epochs:
+        if args.validation is not None or args.additional_validation:
+            raise ValueError("--fixed-epochs 时不能指定 validation 数据")
+    elif args.validation is None:
+        raise ValueError("默认 checkpoint 选择需要 --validation；或显式使用 --fixed-epochs")
     torch.manual_seed(args.seed)
     if args.device == "auto":
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -500,14 +519,18 @@ def main() -> None:
         only_randomized_actions=args.only_randomized_actions,
         decision_phase=args.decision_phase,
     )
-    validation = load_partition(
-        (args.validation, *args.additional_validation),
-        feature_version=args.feature_version,
-        value_scale=args.value_scale,
-        sources=sources,
-        require_known_propensity=args.require_known_propensity,
-        only_randomized_actions=args.only_randomized_actions,
-        decision_phase=args.decision_phase,
+    validation = (
+        []
+        if args.fixed_epochs
+        else load_partition(
+            (args.validation, *args.additional_validation),
+            feature_version=args.feature_version,
+            value_scale=args.value_scale,
+            sources=sources,
+            require_known_propensity=args.require_known_propensity,
+            only_randomized_actions=args.only_randomized_actions,
+            decision_phase=args.decision_phase,
+        )
     )
     if args.skip_test and args.additional_test:
         raise ValueError("skip-test 时不能指定 additional-test")
@@ -578,6 +601,15 @@ def main() -> None:
             optimizer.step()
             epoch_total += float(loss.detach().cpu())
             batches += 1
+        if args.fixed_epochs:
+            history.append(
+                {
+                    "epoch": epoch,
+                    "train_total_loss": epoch_total / max(batches, 1),
+                    "validation": None,
+                }
+            )
+            continue
         validation_metrics = evaluate(
             network,
             validation,
@@ -600,19 +632,26 @@ def main() -> None:
             best_epoch = epoch
             best_validation = validation_metrics
             best_state = copy.deepcopy(network.state_dict())
-    if best_state is None or best_epoch is None or best_validation is None:
+    if args.fixed_epochs:
+        best_epoch = args.epochs
+        best_state = copy.deepcopy(network.state_dict())
+    if best_state is None or best_epoch is None:
         raise RuntimeError("没有可选择的 afterstate checkpoint")
     network.load_state_dict(best_state)
-    final_validation = evaluate(
-        network,
-        validation,
-        feature_dim=feature_dim,
-        device=device,
-        batch_size=args.batch_size,
-        value_scale=args.value_scale,
-        score_weight=args.score_loss_weight,
-        own_win_weight=args.own_win_loss_weight,
-        opponent_win_weight=args.opponent_win_loss_weight,
+    final_validation = (
+        None
+        if args.fixed_epochs
+        else evaluate(
+            network,
+            validation,
+            feature_dim=feature_dim,
+            device=device,
+            batch_size=args.batch_size,
+            value_scale=args.value_scale,
+            score_weight=args.score_loss_weight,
+            own_win_weight=args.own_win_loss_weight,
+            opponent_win_weight=args.opponent_win_loss_weight,
+        )
     )
     test_metrics = (
         None
@@ -653,15 +692,20 @@ def main() -> None:
             "known_propensity_required": args.require_known_propensity,
             "only_randomized_actions": args.only_randomized_actions,
             "decision_phase": args.decision_phase,
+            "fixed_epochs_without_validation": args.fixed_epochs,
             "terminal_test_read": not args.skip_test,
         },
         "sources": sorted(sources),
         "inputs": {
             "train": [str(args.train), *(str(path) for path in args.additional_train)],
-            "validation": [
-                str(args.validation),
-                *(str(path) for path in args.additional_validation),
-            ],
+            "validation": (
+                []
+                if args.fixed_epochs
+                else [
+                    str(args.validation),
+                    *(str(path) for path in args.additional_validation),
+                ]
+            ),
             "test": (
                 []
                 if args.skip_test
@@ -670,18 +714,24 @@ def main() -> None:
         },
         "counts": {
             "train": len(train),
-            "validation": len(validation),
+            "validation": None if args.fixed_epochs else len(validation),
             "test": None if args.skip_test else len(test),
             "train_by_source": source_counts(train),
-            "validation_by_source": source_counts(validation),
+            "validation_by_source": None if args.fixed_epochs else source_counts(validation),
             "test_by_source": None if args.skip_test else source_counts(test),
             "train_propensity": propensity_summary(train),
-            "validation_propensity": propensity_summary(validation),
+            "validation_propensity": (
+                None if args.fixed_epochs else propensity_summary(validation)
+            ),
             "test_propensity": None if args.skip_test else propensity_summary(test),
         },
         "checkpoint_selection": {
-            "split": "validation",
-            "metric": "lowest_weighted_outcome_loss",
+            "split": None if args.fixed_epochs else "validation",
+            "metric": (
+                "fixed_pre_registered_epoch"
+                if args.fixed_epochs
+                else "lowest_weighted_outcome_loss"
+            ),
             "selected_epoch": best_epoch,
             "selected_validation": best_validation,
         },
