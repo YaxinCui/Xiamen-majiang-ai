@@ -39,6 +39,8 @@ checkpoint 混合；不得共享梯度，也不得因为训练回报提升而晋
 | [Tjong](https://www.researchwithnj.com/en/publications/tjong-a-transformer-based-mahjong-ai-via-hierarchical-decision-ma/) | 将动作类别和牌目标分层，并以 Transformer 表示决策历史。 | 以后在候选动作排序器上增加“动作类别/目标牌”的辅助头；数据到达至少数十万条高质量决策前，不重试大 Transformer。规则引擎仍是最终合法性约束。 |
 | [History Filtering in Imperfect Information Games](https://arxiv.org/abs/2311.14651) | 用历史上的策略到达概率更新隐藏世界；一般情形下由公开状态直接重建历史很困难，建议采样/过滤。 | 这直接否定了“只按最近弃牌重洗未知牌”即可得到真实后验的想法。应先实现从发牌到当前的顺序粒子过滤，并在小玩具规则上做精确后验校验。 |
 | [ReBeL](https://arxiv.org/abs/2007.13544) / [Student of Games](https://arxiv.org/abs/2112.03178) | public belief、价值网络与搜索结合。 | 公共历史/信念状态的表示值得采用；两人零和的理论保证不能外推到四人一般和厦门麻将。不能据此宣称纳什收敛，也不应现在照搬 CFR。 |
+| [Progressive Hiding](https://arxiv.org/abs/2409.03875) | 先在更多信息可见的阶段学习游戏机制，再逐步增加信息约束；论文给出与 CFR/非完全记忆相关的理论与小型数值验证。 | 它提供了“不把尚未校准的完整 posterior 直接塞进 actor”的替代课程思路。仅可作为隔离的 core toy→训练期特权→可见 student 消融；不能把论文的小型交易博弈结果外推为四人厦门麻将保证。 |
+| [Mortal-Policy](https://github.com/Nitasurin/Mortal-Policy) / [Mortal](https://github.com/Equim-chan/Mortal) | 日麻工程采用 offline AWR、再 online policy-gradient/PPO 的分阶段流程；公开仓库为 AGPL。 | 再次说明“保守 offline→online”是可行编排，不提供厦门规则或可复用权重。当前本项目的 Q/ESS 门槛未满足，不能照搬其训练脚本或混入代码。 |
 | [OpenSpiel](https://github.com/google-deepmind/open_spiel) | 小型完全/不完全信息博弈与 CFR/Deep CFR 的验证平台。 | 可作为粒子过滤、信息集价值和评价器的玩具基准，不作为厦门规则引擎的替代。 |
 
 ## 推荐实施路径
@@ -107,6 +109,28 @@ Teacher/DAgger 的交叉熵必须保留，避免策略走出已有对手/规则�
 - 通过后，才尝试 league + KL anchor 的小步 PPO。
 
 所有门槛是工程决策，不是从论文得出的普适阈值；数据质量优先于层数和参数量。
+
+## 2026-08-07：belief proposal 连续反证后的路线更新
+
+本项目已经完成并否决三类短前缀 proposal：纯结构 tile factor、按公开弃牌同面额加权、以及用独立线性
+Teacher action-energy 转换出的精确 tile factor。最后一类在 selection 墙上提升 total ESS，但全新 terminal 的
+structural ESS 只有 15.5%，因此没有 collector 授权。这是有价值的反证：**在当前规则 Teacher 下，试图仅以
+初始暗手的按面额独立因子解释后续决策，既不够表达行为，也会制造过高的 p/q 方差。** 不应继续增加 factor、
+温度、clip 或同一组墙的调参。
+
+因此 public-belief search 暂时不再是下一项训练前置条件。下一条与既有实验实质不同、但仍有安全边界的研究路线是
+**progressive hiding curriculum**：
+
+1. 先建立仅在进程内使用的 full-state oracle observation，和现有 actor observation 做字段级差集审计；任何导出、
+   checkpoint actor、网页 payload 必须继续只含可见 observation。
+2. 在 core 的缩小 toy 规则上，训练/搜索时逐阶段遮蔽 oracle 字段，并验证最终全遮蔽 student 与从开始全遮蔽的
+   student 在同样数据预算下的离线值校准差异；这一步不进行经典实战、也不称为强度证据。
+3. 只有 privacy、字段遮蔽、玩具规则精确性和独立 core paired screen 都通过，才考虑 classic 与 league；任何阶段
+   的 full-state actor 都不得被网页加载。
+
+这不是重新开启已失败的“privileged critic PPO”：新实验的决策变量是**信息可见性课程与 student 蒸馏误差**，需要
+独立数据、独立初始化和新的评测墙。若 toy curriculum 不能改善最终可见 student 的校准或独立 core 筛选，则将其
+整体否决，而不是把特权信息留在部署模型中。
 
 ## 反面清单
 
