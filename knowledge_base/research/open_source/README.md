@@ -1,5 +1,8 @@
 # 开源工程代码区
 
+完整工程地图见 [`landscape_2026-08.md`](landscape_2026-08.md)。它按“可直接阅读接口、可作为对照、仅作论文复现参考”
+分级，并记录许可证/规则/隐藏信息需要单独审计的原因。
+
 ## RLCard
 
 仓库：[datamllab/rlcard](https://github.com/datamllab/rlcard)；论文：[RLCard: A Platform for Reinforcement Learning in Card Games](https://arxiv.org/abs/1910.04376)（A，访问：2026-08-07）。

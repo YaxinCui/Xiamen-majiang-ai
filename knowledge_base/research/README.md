@@ -14,6 +14,9 @@
 - [`data_and_evaluation/`](data_and_evaluation/)：数据来源、切分、指标、物理墙种子和统计解释。
 - [`experiments_and_reproduction/`](experiments_and_reproduction/)：预注册协议、命令、版本、失败实验和复现清单。
 
+各分区内的 `landscape_2026-08.md` 与 `technique_matrix_2026-08.md` 是本轮扩展后的横向索引；它们记录的是可核验资料池，
+不代表所有方法都已在厦门规则下复现或通过强度门槛。
+
 ## 研究记录规范
 
 每条新增知识尽量包含：来源、访问日期、问题设定、结论、适用边界、对厦门麻将的具体动作。来源等级分为：
