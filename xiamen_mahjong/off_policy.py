@@ -241,3 +241,123 @@ def intervention_estimates(
             (row.group_id, doubly_robust_delta(row)) for row in rows
         )
     return result
+
+
+@dataclass(frozen=True)
+class LoggedStochasticIntervention:
+    """One logged action with a stochastic target and baseline distribution.
+
+    The contract is still a one-action contextual-bandit intervention followed
+    by a frozen suffix policy.  Unlike :class:`LoggedIntervention`, both the
+    target and baseline may distribute mass over several legal actions.  This
+    is the appropriate form for a small Teacher-mixture policy and must not be
+    used to evaluate a multi-decision Mahjong policy.
+    """
+
+    group_id: str
+    logged_index: int
+    propensities: tuple[float, ...]
+    reward: float
+    baseline_probabilities: tuple[float, ...]
+    target_probabilities: tuple[float, ...]
+    direct_values: tuple[float, ...] | None = None
+
+    def __post_init__(self) -> None:
+        count = len(self.propensities)
+        if not self.group_id or count <= 0:
+            raise ValueError("stochastic intervention 需要非空 group 与合法动作")
+        if not 0 <= self.logged_index < count:
+            raise ValueError("logged_index 不属于合法动作")
+        if not all(math.isfinite(item) and item > 0.0 for item in self.propensities):
+            raise ValueError("行为 propensity 必须有限且为正")
+        if not math.isclose(sum(self.propensities), 1.0, abs_tol=1e-8):
+            raise ValueError("行为 propensity 必须归一化")
+        for name, probabilities in (
+            ("baseline", self.baseline_probabilities),
+            ("target", self.target_probabilities),
+        ):
+            if (
+                len(probabilities) != count
+                or not all(math.isfinite(item) and item >= 0.0 for item in probabilities)
+                or not math.isclose(sum(probabilities), 1.0, abs_tol=1e-8)
+            ):
+                raise ValueError(f"{name} policy probabilities 必须非负、有限、等长且归一化")
+        if not math.isfinite(self.reward):
+            raise ValueError("终局回报必须有限")
+        if self.direct_values is not None and (
+            len(self.direct_values) != count
+            or not all(math.isfinite(item) for item in self.direct_values)
+        ):
+            raise ValueError("direct_values 必须与合法动作等长且有限")
+
+
+def stochastic_ips_delta(observation: LoggedStochasticIntervention) -> float:
+    """IPS estimate of the stochastic target-minus-baseline return."""
+
+    index = observation.logged_index
+    return (
+        observation.reward
+        * (
+            observation.target_probabilities[index]
+            - observation.baseline_probabilities[index]
+        )
+        / observation.propensities[index]
+    )
+
+
+def stochastic_doubly_robust_delta(observation: LoggedStochasticIntervention) -> float:
+    """Unshrunk DR estimate for a stochastic one-intervention policy delta."""
+
+    if observation.direct_values is None:
+        raise ValueError("stochastic DR 需要 held-out direct_values")
+    direct_delta = sum(
+        (target - baseline) * value
+        for target, baseline, value in zip(
+            observation.target_probabilities,
+            observation.baseline_probabilities,
+            observation.direct_values,
+        )
+    )
+    index = observation.logged_index
+    residual = observation.reward - observation.direct_values[index]
+    return direct_delta + (
+        observation.target_probabilities[index]
+        - observation.baseline_probabilities[index]
+    ) * residual / observation.propensities[index]
+
+
+def stochastic_intervention_estimates(
+    observations: Iterable[LoggedStochasticIntervention],
+) -> dict[str, object]:
+    """Grouped IPS/DR and support diagnostics for stochastic interventions."""
+
+    rows = list(observations)
+    if not rows:
+        raise ValueError("没有可用于 stochastic OPE 的单点干预记录")
+    ips = grouped_mean_stderr((row.group_id, stochastic_ips_delta(row)) for row in rows)
+    target_weights = [
+        row.target_probabilities[row.logged_index] / row.propensities[row.logged_index]
+        for row in rows
+    ]
+    baseline_weights = [
+        row.baseline_probabilities[row.logged_index] / row.propensities[row.logged_index]
+        for row in rows
+    ]
+    result: dict[str, object] = {
+        "ips": ips,
+        "support": {
+            "target_effective_sample_size": effective_sample_size(target_weights),
+            "baseline_effective_sample_size": effective_sample_size(baseline_weights),
+            "minimum_target_probability": min(
+                min(row.target_probabilities) for row in rows
+            ),
+            "minimum_behavior_propensity": min(
+                min(row.propensities) for row in rows
+            ),
+        },
+    }
+    if all(row.direct_values is not None for row in rows):
+        result["doubly_robust"] = grouped_mean_stderr(
+            (row.group_id, stochastic_doubly_robust_delta(row)) for row in rows
+        )
+    return result

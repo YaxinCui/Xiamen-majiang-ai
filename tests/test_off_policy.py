@@ -3,11 +3,13 @@ import unittest
 from xiamen_mahjong.agents import GameAction
 from xiamen_mahjong.off_policy import (
     LoggedIntervention,
+    LoggedStochasticIntervention,
     doubly_robust_action_advantages,
     doubly_robust_delta,
     effective_sample_size,
     intervention_estimates,
     ips_delta,
+    stochastic_intervention_estimates,
     winsorized_doubly_robust_action_advantages,
 )
 from xiamen_mahjong.training import TeacherDecision, TrainingTrajectory
@@ -126,6 +128,51 @@ class OffPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(report["doubly_robust"]["mean"], 10.0)
         self.assertEqual(report["support"]["target_matched_logged_action_count"], 2)
         self.assertEqual(report["support"]["baseline_matched_logged_action_count"], 2)
+
+    def test_stochastic_ips_and_dr_recover_teacher_mixture_delta(self):
+        rows = (
+            LoggedStochasticIntervention(
+                group_id="wall-a",
+                logged_index=1,
+                propensities=(0.5, 0.5),
+                reward=10.0,
+                baseline_probabilities=(1.0, 0.0),
+                target_probabilities=(0.5, 0.5),
+                direct_values=(0.0, 10.0),
+            ),
+            LoggedStochasticIntervention(
+                group_id="wall-a",
+                logged_index=0,
+                propensities=(0.5, 0.5),
+                reward=0.0,
+                baseline_probabilities=(1.0, 0.0),
+                target_probabilities=(0.5, 0.5),
+                direct_values=(0.0, 10.0),
+            ),
+            LoggedStochasticIntervention(
+                group_id="wall-b",
+                logged_index=1,
+                propensities=(0.5, 0.5),
+                reward=12.0,
+                baseline_probabilities=(1.0, 0.0),
+                target_probabilities=(0.5, 0.5),
+                direct_values=(2.0, 12.0),
+            ),
+            LoggedStochasticIntervention(
+                group_id="wall-b",
+                logged_index=0,
+                propensities=(0.5, 0.5),
+                reward=2.0,
+                baseline_probabilities=(1.0, 0.0),
+                target_probabilities=(0.5, 0.5),
+                direct_values=(2.0, 12.0),
+            ),
+        )
+        estimates = stochastic_intervention_estimates(rows)
+        self.assertEqual(estimates["ips"]["mean"], 5.0)
+        self.assertEqual(estimates["doubly_robust"]["mean"], 5.0)
+        self.assertEqual(estimates["support"]["target_effective_sample_size"], 4.0)
+        self.assertEqual(estimates["support"]["baseline_effective_sample_size"], 2.0)
 
     def test_same_target_and_baseline_has_exact_zero_delta(self):
         row = LoggedIntervention(
