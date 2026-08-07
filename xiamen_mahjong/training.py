@@ -6645,14 +6645,22 @@ def split_trajectories_by_hand(
         if trajectory.trajectory_id in seen_trajectory_ids:
             raise ValueError("训练轨迹包含重复 trajectory_id")
         seen_trajectory_ids.add(trajectory.trajectory_id)
-        identity = trajectory.split_group_id or (
-            str(trajectory.seed)
-            if trajectory.seed is not None
-            else trajectory.trajectory_id
-        )
+        # A split group denotes one physical hand across seat rotations (and,
+        # for opt-in human logs, potentially several records of that hand).
+        # It must be the *entire* split identity.  Including ``hand_number``
+        # here would silently scatter a group whose records carry distinct
+        # local hand counters, leaking one hand between train/validation/test.
+        # Old ungrouped records retain the historical per-hand identity.
+        identity = trajectory.split_group_id
+        if identity is None:
+            identity = (
+                f"{trajectory.seed}|{trajectory.hand_number}"
+                if trajectory.seed is not None
+                else f"{trajectory.trajectory_id}|{trajectory.hand_number}"
+            )
         digest = hashlib.blake2b(
             f"{split_salt}|{trajectory.profile}|{trajectory.rules_version}|"
-            f"{identity}|{trajectory.hand_number}".encode("utf-8"),
+            f"{identity}".encode("utf-8"),
             digest_size=8,
         ).digest()
         bucket = int.from_bytes(digest, "big") % 10_000

@@ -1,4 +1,5 @@
 import tempfile
+from dataclasses import replace
 from types import SimpleNamespace
 import unittest
 from collections import Counter
@@ -1362,6 +1363,28 @@ class TrainingTests(unittest.TestCase):
                 ),
                 4,
             )
+        # ``split_group_id`` is the complete physical-hand identity.  A
+        # recorder may have different local hand counters for records in one
+        # group, so the counter must never scatter them across partitions.
+        same_group_different_counter = replace(
+            trajectories[0],
+            trajectory_id="same-group-different-hand-counter",
+            hand_number=trajectories[0].hand_number + 10_000,
+        )
+        grouped_partitions = split_trajectories_by_hand(
+            [trajectories[0], same_group_different_counter]
+        )
+        self.assertEqual(
+            len(
+                {
+                    partition
+                    for partition, records in grouped_partitions.items()
+                    for trajectory in records
+                    if trajectory.split_group_id == trajectories[0].split_group_id
+                }
+            ),
+            1,
+        )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "candidate-dagger.jsonl"
             write_trajectory_jsonl(trajectories, path)
