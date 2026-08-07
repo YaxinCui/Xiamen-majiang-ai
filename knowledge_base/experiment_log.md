@@ -735,3 +735,22 @@ belief world、不生成训练数据、不训练/部署任何选牌模型。
 墙组成的片段置零。对同一 actor-visible core 局面重采样不同未知世界：oracle 向量不同、visible 向量严格一致，且
 unknown stage 直接报错。actor `TeacherDecision`、轨迹、checkpoint、网页均未新增该向量；legacy privileged critic
 仍保持 oracle-only。没有进行 progressive-hiding 模型训练、PPO、数据导出或强度评测。
+
+## 2026-08-07：Progressive hiding critic 校准 smoke（拒绝，未训练策略）
+
+字段隔离本身不足以说明课程有用，因而先执行一个可证伪的最小校准实验，而不是恢复 privileged-critic PPO。
+core 固定 seed `202608560` 下，一个**全新随机**、未更新的合法动作 actor 对三名 Teacher 产生 64 个训练局
+（554 个本家决策）与不同牌墙的 32 个验证局（269 个本家决策）。隐藏向量仅驻留进程内；没有写出暗牌向量，
+没有 actor 或 critic checkpoint。两个 32 隐层 critic 从逐字节相同的初值出发、使用相同训练决策及相同按 epoch
+打乱序列：direct baseline 全程以 visible 输入训练 9 epoch；课程候选按 `oracle → hide_wall → visible` 各 3 epoch。
+
+唯一的预注册门槛是独立验证上的**最终 visible** Huber 与 MAE 均严格低于同预算 direct baseline。结果相反：
+direct 为 Huber **0.1707421**、MAE **0.4069980**；课程为 **0.1715056**、**0.4072743**，差值（课程−直接）为
+**+0.0007634**、**+0.0002763**。两项都变差，状态
+`rejected_before_policy_training`。完整无私有特征报告为
+`artifacts/progressive-hiding-core-smoke-v1.json`，生成脚本为
+`scripts/audit_progressive_hiding_critic.py`（source `b025af5`）。
+
+这否决的是该预注册的 core/9-epoch 课程作为进入策略训练的依据，并不把小样本差异解释为 progressive hiding 的一般
+定理。若日后重访，必须先建立真正缩小规则的独立基准和新的预注册 schedule／墙组；不得在本报告的训练或验证墙上
+调节阶段比例、学习率后声称通过，也不得以此报告为依据训练 PPO、导出模型或作任何强度主张。

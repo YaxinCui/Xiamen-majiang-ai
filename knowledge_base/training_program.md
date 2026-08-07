@@ -184,7 +184,13 @@ proposal 给出可计算密度与 toy exact posterior；不能对确定性 Teach
 
 core 固定局面通过从同一 actor-visible 信息集重采样未知世界验证：`oracle` 向量随暗手/墙变化，而 `visible` 向量
 严格相同，且后三家暗手与墙的连续片段全为零。单测同时确认未知 stage 被拒绝。此项只证明课程所需的字段隔离，不证明
-full-state oracle 有效、更不证明可见 student 更强；下一步须在缩小 toy 规则上比较逐步遮蔽与从开始全遮蔽的可见模型。
+full-state oracle 有效、更不证明可见 student 更强。
+
+随后执行了预注册 core 校准 smoke，仍未进行 actor/PPO：全新随机 actor 对 Teacher 的 64 个训练局和 32 个独立
+验证局只供两个同初值、训练期 critic 使用。equal-budget direct-visible（9 epoch）在最终 visible 验证的 Huber/MAE
+为 **0.1707421/0.4069980**，`oracle → hide_wall → visible`（各 3 epoch）为
+**0.1715056/0.4072743**，两项均更差。因此该 schedule 被拒绝，禁止据此接入策略训练、保存 actor 或声称改善；报告不含
+隐藏向量或任何权重。若重访，先建立真正缩小规则的独立基准，并用新墙组预注册 schedule，不能在这批墙上调参重跑。
 
 ### Teacher 单点干预 response 数据（当前因果来源）
 
