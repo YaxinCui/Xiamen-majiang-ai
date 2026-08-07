@@ -29,6 +29,7 @@ from scripts.audit_teacher_response_intervention_ope import (
 from xiamen_mahjong.off_policy import (
     LoggedIntervention,
     doubly_robust_action_advantages,
+    winsorized_doubly_robust_action_advantages,
 )
 from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
 from xiamen_mahjong.training import read_trajectory_jsonl
@@ -40,6 +41,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data", type=Path, action="append", required=True)
     parser.add_argument("--intervention-phase", choices=("discard", "response"), required=True)
     parser.add_argument("--value-scale", type=float, default=80.0)
+    parser.add_argument(
+        "--maximum-abs-correction",
+        type=float,
+        help=(
+            "可选：对每项 importance-weighted residual 作 winsorization。"
+            "仅用于有偏训练标签的尾部审计，不能替代未缩减 OPE。"
+        ),
+    )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
@@ -101,6 +110,11 @@ def main() -> None:
     args = parse_args()
     if len(args.outcome_checkpoint) < 2 or args.value_scale <= 0:
         raise ValueError("至少需要两个 outcome checkpoint，且 value-scale 必须为正数")
+    if (
+        args.maximum_abs_correction is not None
+        and args.maximum_abs_correction <= 0
+    ):
+        raise ValueError("maximum-abs-correction 必须为正数")
     agents = [
         TorchPolicyValueAgent.load(path, device=args.device)
         for path in args.outcome_checkpoint
@@ -138,7 +152,14 @@ def main() -> None:
             target_index=baseline,
             direct_values=direct_values,
         )
-        advantages = doubly_robust_action_advantages(observation)
+        advantages = (
+            doubly_robust_action_advantages(observation)
+            if args.maximum_abs_correction is None
+            else winsorized_doubly_robust_action_advantages(
+                observation,
+                maximum_abs_correction=args.maximum_abs_correction,
+            )
+        )
         logged.append(advantages[decision.executed_index])
         for index, advantage in enumerate(advantages):
             if index == baseline:
@@ -157,6 +178,14 @@ def main() -> None:
         "decisions": decision_count,
         "wall_groups": len(wall_groups),
         "direct_model_scope": "all listed outcome models must exclude every audited wall group",
+        "pseudo_label": {
+            "kind": (
+                "unshrunk_doubly_robust_advantage"
+                if args.maximum_abs_correction is None
+                else "winsorized_doubly_robust_advantage_explicitly_biased"
+            ),
+            "maximum_abs_correction": args.maximum_abs_correction,
+        },
         "pseudo_advantage_points": {
             "non_teacher_actions": summary(all_nonbaseline),
             "logged_actions": summary(logged),
@@ -165,7 +194,8 @@ def main() -> None:
         "non_teacher_propensity": summary(propensity_values),
         "warning": (
             "These are per-row DR pseudo-outcome diagnostics, not an OPE result. "
-            "They cannot select actions, train a deployable policy, or justify a strength claim."
+            "Winsorized labels are intentionally biased. Neither form can select actions "
+            "or justify a strength claim."
         ),
     }
     rendered = json.dumps(payload, ensure_ascii=False, indent=2)

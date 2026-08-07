@@ -809,3 +809,22 @@ seed `202608900` 起的 2,000 个物理墙、四座轮换。其余契约不变�
 3,500/800/700/700，因此 selection 少 **7** 条即失败。即使其余三项通过，也不允许事后降低门槛、改变 split salt、
 合并 v1 数据或开始 K-fold/direct/shrinkage learner；terminal 只作无结局的覆盖计数，不导出动作/得分汇总。该墙组
 整体拒绝，完整统计见 `artifacts/teacher-advantage-shrinkage-classic-v2/coverage.json`。下一份协议必须使用全新墙组。
+
+## 2026-08-07：Teacher 相对优势 shrinkage v3（训练完成，selection 待审计）
+
+v3 严格不复用 v1/v2 墙组：classic 从 seed `202609200` 起的 **2,400** 个新物理墙、四座轮换；行为为
+`0.8 × Uniform(legal) + 0.2 × Teacher` 的单次摸后 `discard` 干预、随后恢复 Teacher。只读取无标签的覆盖统计后，
+train/validation/selection/terminal 随机干预数分别为 **4,402 / 1,152 / 921 / 911**，超过预注册
+**3,500 / 800 / 700 / 700** 门槛；selection 与 terminal 的完整墙组无重叠。原始轨迹、fold 和 checkpoint 均只保留本地。
+
+train 按完整物理墙分成 K=3（482/487/464 墙组，重叠 0）。每一个 direct outcome 模型只学习另外两折的随机弃牌行动，
+固定 32 epoch 且读取 validation/selection/terminal 均为 false。validation 上三个 direct 模型的等权 logged-action
+score MAE 为 **28.96** 分；原始 DR 非 Teacher 伪优势仍有标准差 **162.09**、范围
+**[−1,060.83,+2,115.07]**，因此再次明确拒绝未缩减标签。预注册 winsor C=20/40/80 后对应标准差为
+**14.70 / 23.90 / 41.86** 分；这三个标签均显式标记为有偏，只能训练候选，不能 OPE。
+
+三个独立的 centered relative-advantage MLP 均只接收 OOF actor-visible 标签，Teacher 动作按构造输出严格为零，
+无终局结果进入标签文件或训练器。validation 的伪标签拟合 MAE 为 **8.02 / 14.43 / 24.67** 分，top-action 一致率为
+**50.17% / 45.66% / 40.71%**；这些仅为固定模型的诊断，未用于改变 C、阈值、架构或 epoch。下一步只能在 selection
+一次性比较 `(C,T)` 的九个预注册组合，要求未缩减 grouped IPS 与 DR 95% 下界都为正、两侧 ESS ≥75；若全失败，terminal
+必须保持未读。

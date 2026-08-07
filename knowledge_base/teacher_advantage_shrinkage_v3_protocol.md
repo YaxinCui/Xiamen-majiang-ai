@@ -34,6 +34,17 @@ size 128），训练 shuffle seeds 固定为 `202609310+i`。每个 outer-fold �
 direct model；validation 的 calibration/tail/gap 审计使用这三个模型的等权预测均值，且不反向选择
 epoch 或 hyperparameter。训练器需在报告中显式记为 `fixed_pre_registered_epoch`。
 
+### Relative-advantage learner（拟合前固定）
+
+三个 `C` 均使用独立的 `145 → 128 → 128 → 1` ReLU MLP，先对每个合法动作输出标量，再减去
+同一信息集 Teacher 动作的标量；故 Teacher 输出按构造严格为零。输入只允许 OOF 导出的 actor-visible
+state、legal actions、Teacher index 和带明确 bias 标记的 pseudo-advantage，禁止输出或读取终局分数。
+每个候选以 Huber delta `16`、batch `256`、AdamW learning rate `0.001`、weight decay `0.0001` 固定
+训练 32 epoch，不使用 validation 选 epoch；C=20/40/80 的 shuffle seed 分别为 202609420/421/422。
+validation 只能在训练后审计预测与标签的 gap/tail，不能改变网络、loss、epoch、C 或 threshold；selection
+仍只比较预注册的九个 `(C,T)`。候选只在最高预测相对优势严格大于 `T` 时替换 Teacher；selection
+同时通过时按最小的 IPS/DR 下界最大化，再依次选择更高 `T`、更小 `C`，避免事后按肉眼挑选。
+
 validation 只做 calibration/tail/gap 审计。selection 固定比较 `(C,T)` 的九个组合，
 `C∈{20,40,80}`、预测优势门槛 `T∈{0,8,16}`；最终仍以未缩减 grouped IPS 与 DR 的双正 95%
 下界及 target/base ESS ≥75 筛选。terminal 只在唯一 winner 后读取一次，随后仍必须通过相同门槛，
