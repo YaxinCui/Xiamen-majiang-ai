@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 
 from xiamen_mahjong.training import (
     collect_exploration_trajectories,
+    collect_gold_lock_trajectories,
     collect_response_pass_curriculum,
     collect_teacher_trajectories,
     collect_tour_trajectories,
@@ -49,6 +50,12 @@ def parse_args() -> argparse.Namespace:
         default=136,
         help="追加规则引擎验证、Teacher 标注的游金/双游课程数；设 0 关闭",
     )
+    parser.add_argument(
+        "--gold-lock-curriculum",
+        type=int,
+        default=64,
+        help="追加规则引擎验证的金牌弃置后仅自摸响应课程数；设 0 关闭",
+    )
     parser.add_argument("--train-fraction", type=float, default=0.8)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
     parser.add_argument("--split-salt", default="xiamen-trajectory-v2")
@@ -70,6 +77,7 @@ def main() -> None:
         or args.exploration_hands < 0
         or args.response_pass_curriculum < 0
         or args.tour_curriculum < 0
+        or args.gold_lock_curriculum < 0
     ):
         raise ValueError("hands 必须为正数，课程局数不能为负数")
     trajectories, summary = collect_teacher_trajectories(
@@ -97,6 +105,12 @@ def main() -> None:
             examples=args.tour_curriculum, seed=args.seed + 3_000_000
         )
         trajectories.extend(tour)
+    gold_lock = []
+    if args.profile == "classic" and args.gold_lock_curriculum:
+        gold_lock = collect_gold_lock_trajectories(
+            examples=args.gold_lock_curriculum, seed=args.seed + 4_000_000
+        )
+        trajectories.extend(gold_lock)
     partitions = split_trajectories_by_hand(
         trajectories,
         train_fraction=args.train_fraction,
@@ -120,12 +134,14 @@ def main() -> None:
         "exploration_hands_requested": args.exploration_hands,
         "response_pass_curriculum_requested": args.response_pass_curriculum,
         "tour_curriculum_requested": args.tour_curriculum,
+        "gold_lock_curriculum_requested": args.gold_lock_curriculum,
         "teacher_summary": summary.payload(),
         "exploration_summary": exploration_summary.payload()
         if exploration_summary
         else None,
         "response_pass_curriculum_hands": len(response_pass),
         "tour_curriculum_hands": len(tour),
+        "gold_lock_curriculum_hands": len(gold_lock),
         "split": {
             "train_fraction": args.train_fraction,
             "validation_fraction": args.validation_fraction,

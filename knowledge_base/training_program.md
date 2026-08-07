@@ -256,7 +256,7 @@ Git 忽略目录或对象存储；可发布检查点应小、可加载、并带�
    并按初始牌墙轮换候选座位。
 5. 已验证：批均值 REINFORCE 与 600 局线性 actor-critic 均未在独立配对评测中改善；
    不再继续调这两个候选。
-6. 已实现共享表征的 PyTorch policy-value 首版、安全轨迹 v3、候选一席对三 Teacher 的
+6. 已实现共享表征的 PyTorch policy-value 首版、安全轨迹 v4（完整公开事件流 + 决策历史游标）、候选一席对三 Teacher 的
    online DAgger、neural PPO、变长合法动作 batch、冻结 checkpoint 对手池，以及安全导出的
    反事实动作价值轨迹。首轮大规模 PPO 仍未在独立实战中胜出；当前优先让动作价值数据在
    独立牌墙上证明收益，而不是只扩大同一 Teacher 模仿样本。任何新依赖先在项目虚拟环境内

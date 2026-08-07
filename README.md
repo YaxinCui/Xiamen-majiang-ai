@@ -218,12 +218,28 @@ python3 scripts/train_reinforce_policy.py \
 价值基线只用于训练，不会进入网页推理。它是实验性 on-policy 阶段：必须在与训练种子
 隔离的换座配对评测中胜过或至少不劣于 Teacher，才可以发布检查点。
 
-## 轨迹 v3 与 GPU policy-value 候选
+## 轨迹 v4 与 GPU policy-value 候选
 
-研究用的 v3 轨迹将“模型可见数据”和“可复现牌墙”分开：训练 JSONL 只含本家手牌、
+研究用的 v4 轨迹将“模型可见数据”和“可复现牌墙”分开：训练 JSONL 只含本家手牌、
 公开状态、合法动作、Teacher 标签与终局分数，**不含**牌墙种子、随机行为种子、对手暗牌
 或牌墙顺序。完整 replay 种子只有显式指定 `--replay-index` 才会写入用户自行保护的私有
 文件，不能交给训练器或提交到仓库。
+
+完整公开历史只在每条完整牌局的 `public_actions` 中保存一次；每个决策保存
+`public_action_count`（当时可见的公开事件前缀长度）和 seat-relative 的最近 24 个事件。
+因此序列模型可以重建该决策之前的全部公开历史，默认轻量模型仍可使用短窗口，且不会读到未来事件。
+开始 GPU 训练前必须运行安全/覆盖审计：
+
+```bash
+.venv/bin/python scripts/audit_training_trajectories.py \
+  --input artifacts/trajectory-contract-audit-classic-v4/train.trajectories.jsonl \
+  --input artifacts/trajectory-contract-audit-classic-v4/validation.trajectories.jsonl \
+  --input artifacts/trajectory-contract-audit-classic-v4/test.trajectories.jsonl \
+  --minimum-teacher-selfplay-hands 1000 \
+  --minimum-decisions 40000
+```
+
+审计会拒绝重放种子、对手暗手、牌墙字段，以及“最近历史”与公开事件前缀不一致的样本；游金、金牌锁定等低频课程会在报告中单列。
 
 下面建立混合离线数据并训练 145 维公开候选特征的 policy-value 网络。PyTorch 只安装在
 项目 `.venv`，不会改变网页和规则引擎的零依赖运行方式。
@@ -231,13 +247,13 @@ python3 scripts/train_reinforce_policy.py \
 ```bash
 python3 scripts/collect_training_trajectories.py \
   --profile classic --hands 160 --exploration-hands 120 \
-  --response-pass-curriculum 80 --tour-curriculum 136 \
-  --output-dir artifacts/trajectory-balanced-classic-v3
+  --response-pass-curriculum 80 --tour-curriculum 136 --gold-lock-curriculum 64 \
+  --output-dir artifacts/trajectory-balanced-classic-v4
 
 .venv/bin/python scripts/train_policy_value.py \
-  --train artifacts/trajectory-balanced-classic-v3/train.trajectories.jsonl \
-  --validation artifacts/trajectory-balanced-classic-v3/validation.trajectories.jsonl \
-  --test artifacts/trajectory-balanced-classic-v3/test.trajectories.jsonl \
+  --train artifacts/trajectory-balanced-classic-v4/train.trajectories.jsonl \
+  --validation artifacts/trajectory-balanced-classic-v4/validation.trajectories.jsonl \
+  --test artifacts/trajectory-balanced-classic-v4/test.trajectories.jsonl \
   --device cuda --output-dir artifacts/policy-value-classic-v1
 ```
 

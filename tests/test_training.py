@@ -51,6 +51,7 @@ from xiamen_mahjong.training import (
     collect_counterfactual_action_value_trajectories,
     collect_dagger_decisions,
     collect_exploration_trajectories,
+    collect_gold_lock_trajectories,
     collect_policy_episodes,
     collect_response_pass_curriculum,
     collect_teacher_decisions,
@@ -64,6 +65,7 @@ from xiamen_mahjong.training import (
     split_trajectories_by_hand,
     public_action_sequence_features,
     trajectory_manifest,
+    trajectory_contract_audit,
     write_trajectory_replay_index,
     write_trajectory_jsonl,
     write_jsonl,
@@ -1203,6 +1205,8 @@ class TrainingTests(unittest.TestCase):
         decision = next(item for trajectory in trajectories for item in trajectory.decisions)
         self.assertIn("public_players", decision.state)
         self.assertIn("recent_public_actions", decision.state)
+        self.assertTrue(decision.state["public_history_complete"])
+        self.assertIsInstance(decision.state["public_action_count"], int)
         self.assertNotIn("wall", decision.state)
         self.assertNotIn("opponent_hands", decision.state)
         self.assertEqual(decision.state["public_players"][0]["relative_seat"], 0)
@@ -1217,6 +1221,16 @@ class TrainingTests(unittest.TestCase):
         manifest = trajectory_manifest(trajectories)
         self.assertEqual(manifest["hands"], 4)
         self.assertEqual(manifest["decisions"], summary.decisions)
+        self.assertEqual(manifest["history_contract"]["missing_cursor_decisions"], 0)
+        audit = trajectory_contract_audit(
+            [
+                replace(trajectory, seed=None)
+                for trajectory in trajectories
+            ],
+            require_safe_export=False,
+        )
+        self.assertTrue(audit["valid"], audit["violations"])
+        self.assertEqual(audit["complete_history_decisions"], summary.decisions)
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "trajectories.jsonl"
             self.assertEqual(write_trajectory_jsonl(trajectories, path), 4)
@@ -1233,6 +1247,7 @@ class TrainingTests(unittest.TestCase):
                     for decision in trajectory.decisions
                 )
             )
+            self.assertTrue(trajectory_contract_audit(loaded)["valid"])
             self.assertTrue(
                 all(
                     decision.executed_index == decision.chosen_index
@@ -1277,6 +1292,21 @@ class TrainingTests(unittest.TestCase):
                 trajectory.decisions[0].chosen_action.kind == "advance_tour"
                 for trajectory in trajectories
             )
+        )
+
+    def test_gold_lock_curriculum_exports_a_locked_response_without_hu(self):
+        trajectories = collect_gold_lock_trajectories(examples=4, seed=433)
+        self.assertEqual(len(trajectories), 4)
+        for trajectory in trajectories:
+            decision = trajectory.decisions[0]
+            self.assertTrue(decision.state["gold_locked"])
+            self.assertEqual({action.kind for action in decision.legal_actions}, {"pass", "pong"})
+            self.assertNotIn("hu", {action.kind for action in decision.legal_actions})
+        self.assertTrue(
+            trajectory_contract_audit(
+                [replace(trajectory, seed=None) for trajectory in trajectories],
+                require_safe_export=False,
+            )["valid"]
         )
 
     def test_jsonl_and_model_round_trip(self):

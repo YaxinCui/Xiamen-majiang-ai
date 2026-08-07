@@ -268,7 +268,11 @@ def source_weight(source: str, args: argparse.Namespace) -> float:
         return args.human_weight
     if source == "random_legal_teacher_labeled":
         return args.exploration_weight
-    if source in {"physical_response_pass_search", "engine_validated_tour_curriculum"}:
+    if source in {
+        "physical_response_pass_search",
+        "engine_validated_tour_curriculum",
+        "engine_validated_gold_lock_curriculum",
+    }:
         return args.synthetic_weight
     if source == "counterfactual_action_value_rollout":
         return args.action_value_weight
@@ -1410,6 +1414,7 @@ def main() -> None:
             "random_legal_teacher_labeled": args.exploration_weight,
             "physical_response_pass_search": args.synthetic_weight,
             "engine_validated_tour_curriculum": args.synthetic_weight,
+            "engine_validated_gold_lock_curriculum": args.synthetic_weight,
             "counterfactual_action_value_rollout": args.action_value_weight,
         },
         "policy_targets": {

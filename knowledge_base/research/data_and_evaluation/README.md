@@ -1,5 +1,7 @@
 # 数据与评测区
 
+训练轨迹字段、历史游标和审计命令见 [`training_trajectory_contract_v4.md`](training_trajectory_contract_v4.md)。
+
 ## 数据分层
 
 - `teacher_selfplay`：冻结规则 Teacher 生成，只能说明模仿能力。

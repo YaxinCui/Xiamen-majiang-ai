@@ -37,9 +37,10 @@ from .tiles import (
 
 
 DATASET_VERSION = "xiamen-rule-teacher-v1"
-TRAJECTORY_DATASET_VERSION = "xiamen-training-trajectory-v3"
+TRAJECTORY_DATASET_VERSION = "xiamen-training-trajectory-v4"
 _SUPPORTED_TRAJECTORY_DATASET_VERSIONS = {
     "xiamen-training-trajectory-v2",
+    "xiamen-training-trajectory-v3",
     TRAJECTORY_DATASET_VERSION,
 }
 ACTION_KINDS = (
@@ -6480,34 +6481,126 @@ def collect_tour_trajectories(
 
     decisions = collect_tour_curriculum(examples=examples, seed=seed)
     rules = XiamenRules.classic()
-    return [
-        TrainingTrajectory(
+    trajectories: list[TrainingTrajectory] = []
+    for decision in decisions:
+        # These deliberately constructed one-decision curriculum examples do
+        # not represent a complete physical hand.  Retain their available
+        # public window and say so explicitly instead of assigning the
+        # original game's longer history cursor to a truncated trajectory.
+        public_actions = tuple(
+            dict(action) for action in decision.state.get("recent_public_actions", [])
+        )
+        state = dict(decision.state)
+        state["public_history_complete"] = False
+        state["public_action_count"] = len(public_actions)
+        state["public_history_encoding"] = "windowed_synthetic_v1"
+        curriculum_decision = replace(decision, state=state)
+        trajectories.append(
+            TrainingTrajectory(
             profile=rules.profile,
             rules_version=rules.version,
             rules=asdict(rules),
-            seed=decision.seed,
+            seed=curriculum_decision.seed,
             hand_number=1,
             agent_profiles=("tour_curriculum",) * rules.player_count,
             source_metadata={
                 "collector": "engine_validated_tour_curriculum",
                 "synthetic": True,
+                "public_history_scope": "recent_window_only",
             },
-            decisions=(decision,),
+            decisions=(curriculum_decision,),
             outcome={
                 "winner": None,
                 "win_type": "synthetic_tour_curriculum",
                 "win_pattern": None,
                 "scores": [0] * rules.player_count,
                 "score_breakdown": None,
-                "turn_count": int(decision.state.get("turn_count", 0)),
+                "turn_count": int(curriculum_decision.state.get("turn_count", 0)),
                 "synthetic": True,
             },
-            public_actions=tuple(
-                dict(action) for action in decision.state.get("recent_public_actions", [])
-            ),
+            public_actions=public_actions,
         )
-        for decision in decisions
-    ]
+        )
+    return trajectories
+
+
+def collect_gold_lock_trajectories(
+    *, examples: int = 64, seed: int = 20261004
+) -> list[TrainingTrajectory]:
+    """Create engine-legal response states after a gold discard lock.
+
+    Natural Teacher self-play almost never leaves a visible decision while the
+    original gold discarder remains self-draw-only.  This curriculum builds a
+    legal response in which the actor could otherwise win from the discard,
+    while a competing pong remains available.  The absence of ``hu`` is thus a
+    rule-derived label, not a manually edited action list.
+    """
+
+    if examples <= 0:
+        raise ValueError("examples 必须为正数")
+    rules = XiamenRules.classic()
+    trajectories: list[TrainingTrajectory] = []
+    # Four complete triplets, one pair, and two copies of tile 0: a discarded
+    # 0 would make the fifth triplet and therefore a legal discard win without
+    # the lock.  The same two 0s also leave a real pong alternative.
+    locked_hand = sorted([0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5])
+    for index in range(examples):
+        hand_seed = seed + index
+        game = XiamenMahjongGame(seed=hand_seed, rules=rules, auto_advance=False)
+        actor_seat = index % rules.player_count
+        # Make the discarded tile non-adjacent to the actor, so the curriculum
+        # isolates the pong-versus-pass/blocked-hu response rather than chi.
+        discarder = (actor_seat + 2) % rules.player_count
+        game.gold_tile = 8
+        game.gold_indicator = 8
+        actor = game.players[actor_seat]
+        actor.hand = list(locked_hand)
+        actor.melds = []
+        game.players[discarder].discards.append(0)
+        game.phase = "response"
+        game.current_player = discarder
+        game.last_discard = 0
+        game.discarder = discarder
+        game.latest_discard = 0
+        game.latest_discard_seat = discarder
+        game.gold_discard_lock_seat = actor_seat
+        game._record_public_action("discard", seat=discarder, tile=0)
+        legal = tuple(game._response_actions(actor_seat))
+        if {action.kind for action in legal} != {"pass", "pong"}:
+            raise RuntimeError("金牌锁课程未得到预期的规则合法动作")
+        chosen = game.teacher.choose_response(game, actor_seat, list(legal))
+        decision = _decision(game, hand_seed, actor_seat, legal, chosen)
+        if not decision.state["gold_locked"] or any(
+            action.kind == "hu" for action in decision.legal_actions
+        ):
+            raise RuntimeError("金牌锁课程没有正确隔离抢胡动作")
+        trajectories.append(
+            TrainingTrajectory(
+                profile=rules.profile,
+                rules_version=rules.version,
+                rules=asdict(rules),
+                seed=hand_seed,
+                hand_number=1,
+                agent_profiles=("gold_lock_curriculum",) * rules.player_count,
+                source_metadata={
+                    "collector": "engine_validated_gold_lock_curriculum",
+                    "synthetic": True,
+                    "public_history_scope": "complete_constructed_prefix",
+                },
+                decisions=(decision,),
+                outcome={
+                    "winner": None,
+                    "win_type": "synthetic_gold_lock_curriculum",
+                    "win_pattern": None,
+                    "scores": [0] * rules.player_count,
+                    "score_breakdown": None,
+                    "turn_count": game.turn_count,
+                    "synthetic": True,
+                },
+                public_actions=tuple(dict(action) for action in game.public_actions),
+            )
+        )
+    return trajectories
 
 
 def write_jsonl(decisions: Iterable[TeacherDecision], path: str | Path) -> int:
@@ -6770,14 +6863,47 @@ def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str,
     action_value_spans: list[float] = []
     action_value_stderrs: list[float] = []
     action_value_gap_stderrs: list[float] = []
+    legal_action_counts: Counter[str] = Counter()
+    phase_action_counts: Counter[str] = Counter()
+    public_event_counts: Counter[str] = Counter()
+    collector_counts: Counter[str] = Counter()
+    history_complete_decisions = 0
+    history_windowed_decisions = 0
+    history_missing_cursor_decisions = 0
+    history_cursor_values: list[int] = []
+    tour_level_counts: Counter[str] = Counter()
+    gold_locked_decisions = 0
+    opening_wait_decisions = 0
     for trajectory in records:
         rules_versions[trajectory.rules_version] += 1
         agent_profiles.update(trajectory.agent_profiles)
+        collector_counts[str(trajectory.source_metadata.get("collector", "unknown"))] += 1
         outcome_counts[str(trajectory.outcome.get("win_type"))] += 1
         score_values.extend(int(value) for value in trajectory.outcome["scores"])
+        public_event_counts.update(
+            str(action.get("kind", "unknown")) for action in trajectory.public_actions
+        )
         for decision in trajectory.decisions:
             phase_counts[str(decision.state["phase"])] += 1
             action_counts[decision.chosen_action.kind] += 1
+            phase_action_counts[
+                f"{decision.state['phase']}:{decision.chosen_action.kind}"
+            ] += 1
+            legal_action_counts.update(action.kind for action in decision.legal_actions)
+            if decision.state.get("public_history_complete") is True:
+                history_complete_decisions += 1
+            else:
+                history_windowed_decisions += 1
+            raw_cursor = decision.state.get("public_action_count")
+            if isinstance(raw_cursor, int) and not isinstance(raw_cursor, bool):
+                history_cursor_values.append(raw_cursor)
+            else:
+                history_missing_cursor_decisions += 1
+            tour_level_counts[str(decision.state.get("tour_level", 0))] += 1
+            gold_locked_decisions += bool(decision.state.get("gold_locked", False))
+            opening_wait_decisions += bool(
+                decision.state.get("opening_wait_relative_seats", [])
+            )
             if decision.action_values is not None:
                 action_value_decisions += 1
                 action_value_spans.append(
@@ -6793,8 +6919,24 @@ def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str,
         "decisions": sum(len(trajectory.decisions) for trajectory in records),
         "rules_versions": dict(sorted(rules_versions.items())),
         "agent_profiles": dict(sorted(agent_profiles.items())),
+        "collectors": dict(sorted(collector_counts.items())),
         "action_counts": dict(sorted(action_counts.items())),
+        "legal_action_counts": dict(sorted(legal_action_counts.items())),
+        "phase_action_counts": dict(sorted(phase_action_counts.items())),
         "phase_counts": dict(sorted(phase_counts.items())),
+        "public_event_counts": dict(sorted(public_event_counts.items())),
+        "history_contract": {
+            "complete_history_decisions": history_complete_decisions,
+            "windowed_history_decisions": history_windowed_decisions,
+            "missing_cursor_decisions": history_missing_cursor_decisions,
+            "cursor_min": min(history_cursor_values) if history_cursor_values else None,
+            "cursor_max": max(history_cursor_values) if history_cursor_values else None,
+        },
+        "special_rule_context_counts": {
+            "tour_levels": dict(sorted(tour_level_counts.items())),
+            "gold_locked_decisions": gold_locked_decisions,
+            "opening_wait_decisions": opening_wait_decisions,
+        },
         "outcome_counts": dict(sorted(outcome_counts.items())),
         "score_mean": sum(score_values) / len(score_values) if score_values else 0.0,
         "score_min": min(score_values) if score_values else 0,
@@ -6817,6 +6959,108 @@ def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str,
             if action_value_gap_stderrs
             else None
         ),
+    }
+
+
+def _relative_public_history(
+    actions: Sequence[Mapping[str, Any]], *, actor_seat: int, player_count: int
+) -> list[dict[str, Any]]:
+    """Project a global public event prefix into one actor's seat-relative view."""
+
+    history: list[dict[str, Any]] = []
+    for action in actions:
+        event = dict(action)
+        raw_seat = event.pop("seat", None)
+        if raw_seat is not None:
+            event["relative_seat"] = (int(raw_seat) - actor_seat) % player_count
+        history.append(event)
+    return history
+
+
+def trajectory_contract_audit(
+    trajectories: Iterable[TrainingTrajectory],
+    *,
+    require_safe_export: bool = True,
+) -> dict[str, Any]:
+    """Validate history cursors and the no-hidden-state training boundary.
+
+    Full physical hands carry the complete public event stream once at the
+    trajectory level.  Each decision carries a cursor into that stream and a
+    short, seat-relative suffix for default models.  This is both smaller than
+    copying full history into every row and prevents a trainer from silently
+    reading events that occur after the decision.  Synthetic curriculum rows
+    may declare their deliberately limited public-history scope.
+    """
+
+    records = list(trajectories)
+    violations: Counter[str] = Counter()
+    checked_decisions = 0
+    complete_history_decisions = 0
+    windowed_history_decisions = 0
+    forbidden_state_keys = {
+        "wall",
+        "opponent_hands",
+        "seed",
+        "behavior_seed",
+        "random_state",
+    }
+
+    def contains_forbidden_key(value: Any) -> bool:
+        if isinstance(value, Mapping):
+            for key, nested in value.items():
+                if str(key).lower() in forbidden_state_keys:
+                    return True
+                if contains_forbidden_key(nested):
+                    return True
+        elif isinstance(value, (list, tuple)):
+            return any(contains_forbidden_key(item) for item in value)
+        return False
+
+    for trajectory in records:
+        if require_safe_export and trajectory.seed is not None:
+            violations["trajectory_replay_seed_present"] += 1
+        if require_safe_export and contains_forbidden_key(trajectory.source_metadata):
+            violations["source_metadata_replay_field_present"] += 1
+        player_count = len(trajectory.agent_profiles)
+        if player_count <= 0:
+            violations["missing_agent_profiles"] += 1
+            continue
+        for decision in trajectory.decisions:
+            checked_decisions += 1
+            if contains_forbidden_key(decision.state):
+                violations["decision_state_hidden_field_present"] += 1
+            if not 0 <= decision.chosen_index < len(decision.legal_actions):
+                violations["invalid_chosen_index"] += 1
+            complete = decision.state.get("public_history_complete") is True
+            raw_cursor = decision.state.get("public_action_count")
+            if isinstance(raw_cursor, bool) or not isinstance(raw_cursor, int):
+                violations["missing_or_invalid_public_history_cursor"] += 1
+                continue
+            if not 0 <= raw_cursor <= len(trajectory.public_actions):
+                violations["public_history_cursor_out_of_range"] += 1
+                continue
+            expected_recent = _relative_public_history(
+                trajectory.public_actions[:raw_cursor],
+                actor_seat=decision.seat,
+                player_count=player_count,
+            )[-PUBLIC_ACTION_SEQUENCE_LENGTH:]
+            if decision.state.get("recent_public_actions") != expected_recent:
+                violations["recent_history_not_matching_cursor_prefix"] += 1
+            if complete:
+                complete_history_decisions += 1
+            else:
+                windowed_history_decisions += 1
+                if trajectory.source_metadata.get("public_history_scope") != "recent_window_only":
+                    violations["undeclared_windowed_history"] += 1
+
+    return {
+        "version": TRAJECTORY_DATASET_VERSION,
+        "hands": len(records),
+        "checked_decisions": checked_decisions,
+        "complete_history_decisions": complete_history_decisions,
+        "windowed_history_decisions": windowed_history_decisions,
+        "violations": dict(sorted(violations.items())),
+        "valid": not violations,
     }
 
 
@@ -7695,6 +7939,13 @@ def _perspective_state(game: XiamenMahjongGame, player_id: int) -> dict[str, Any
             relative_seat(seat) for seat in sorted(game.opening_wait_seats)
         ],
         "public_players": public_players,
+        # The full append-only public event stream belongs to the enclosing
+        # trajectory.  This cursor tells a trainer exactly which prefix was
+        # visible at this decision, while the suffix below remains a compact
+        # default input for existing models.
+        "public_history_complete": True,
+        "public_history_encoding": "trajectory_prefix_v1",
+        "public_action_count": len(game.public_actions),
         "recent_public_actions": recent_public_actions,
     }
 
