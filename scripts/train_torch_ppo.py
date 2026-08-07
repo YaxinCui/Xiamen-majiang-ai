@@ -37,6 +37,9 @@ except ModuleNotFoundError as error:
 from xiamen_mahjong.agents import GameAction, HeuristicTeacherAgent
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.rules import XiamenRules
+from xiamen_mahjong.teacher_anchored import (
+    teacher_prior_logits as build_teacher_prior_logits,
+)
 from xiamen_mahjong.tiles import BASE_TILE_COUNT
 from xiamen_mahjong.torch_policy import (
     ARCHITECTURE_CANDIDATE_MLP,
@@ -61,6 +64,9 @@ class PpoStep:
     # Training-process-only oracle input.  It is never attached to a
     # TeacherDecision, trajectory, agent checkpoint or report payload.
     privileged_features: tuple[float, ...] | None = None
+    # Fixed public rule prior, retained so PPO recomputes the collection
+    # distribution exactly when a Teacher-anchored residual is enabled.
+    teacher_prior_logits: tuple[float, ...] | None = None
 
 
 # Relative player order makes the critic insensitive to the arbitrary absolute
@@ -208,7 +214,16 @@ class RolloutSummary:
 class _ActiveRollout:
     game: XiamenMahjongGame
     candidate_seat: int
-    steps: list[tuple[TeacherDecision, int, float, float, tuple[float, ...] | None]]
+    steps: list[
+        tuple[
+            TeacherDecision,
+            int,
+            float,
+            float,
+            tuple[float, ...] | None,
+            tuple[float, ...] | None,
+        ]
+    ]
     opponents: dict[int, tuple[str, Any]]
 
 
@@ -270,6 +285,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "每个非候选座位使用本轮更新前冻结的当前策略快照的概率；"
             "与 Teacher 概率之和不得超过 1"
+        ),
+    )
+    parser.add_argument(
+        "--teacher-prior-margin",
+        type=float,
+        default=0.0,
+        help=(
+            "大于零时把 Teacher 动作的固定 prior 加到 policy logits；"
+            "0 保持普通 PPO"
         ),
     )
     parser.add_argument(
@@ -357,6 +381,64 @@ def _sample_opponent(
     return opponents[rng.randrange(len(opponents))]
 
 
+def _teacher_prior_for_legal_actions(
+    teacher: HeuristicTeacherAgent,
+    game: XiamenMahjongGame,
+    player_id: int,
+    legal_actions: Sequence[GameAction],
+    *,
+    response: bool,
+    margin: float,
+) -> tuple[float, ...] | None:
+    """Build a fixed prior from the same live public/actor-visible state."""
+
+    if margin == 0.0:
+        return None
+    teacher_action = (
+        teacher.choose_response(game, player_id, list(legal_actions))
+        if response
+        else teacher.choose_turn_action(game, player_id)
+    )
+    return build_teacher_prior_logits(teacher_action, legal_actions, margin=margin)
+
+
+def _add_teacher_prior(
+    logits: Sequence[float], prior: Sequence[float] | None
+) -> list[float]:
+    if prior is None:
+        return [float(value) for value in logits]
+    if len(logits) != len(prior):
+        raise RuntimeError("Teacher prior 与 policy logits 长度不匹配")
+    return [float(logit) + float(offset) for logit, offset in zip(logits, prior)]
+
+
+def _teacher_anchored_policy_action(
+    policy: TorchPolicyValueAgent,
+    teacher: HeuristicTeacherAgent,
+    game: XiamenMahjongGame,
+    player_id: int,
+    legal_actions: Sequence[GameAction],
+    *,
+    response: bool,
+    margin: float,
+) -> GameAction:
+    """Choose a frozen residual opponent under the exact same rule prior."""
+
+    legal = tuple(legal_actions)
+    decision = _decision(game, game.seed or 0, player_id, legal, legal[0])
+    logits, _value = policy.policy_value(decision)
+    prior = _teacher_prior_for_legal_actions(
+        teacher, game, player_id, legal, response=response, margin=margin
+    )
+    combined_logits = _add_teacher_prior(logits, prior)
+    return legal[
+        max(
+            range(len(combined_logits)),
+            key=lambda index: (combined_logits[index], -index),
+        )
+    ]
+
+
 def collect_rollouts(
     policy: TorchPolicyValueAgent,
     *,
@@ -368,6 +450,7 @@ def collect_rollouts(
     teacher_opponent_probability: float = 1.0,
     self_play_snapshot: TorchPolicyValueAgent | None = None,
     self_play_opponent_probability: float = 0.0,
+    teacher_prior_margin: float = 0.0,
     privileged_critic: PrivilegedCritic | None = None,
 ) -> tuple[list[PpoStep], RolloutSummary]:
     """Sample candidate actions and attach final reward and old baseline.
@@ -383,6 +466,8 @@ def collect_rollouts(
         raise ValueError("teacher_opponent_probability 必须在 0 和 1 之间")
     if not 0.0 <= self_play_opponent_probability <= 1.0:
         raise ValueError("self_play_opponent_probability 必须在 0 和 1 之间")
+    if teacher_prior_margin < 0.0:
+        raise ValueError("Teacher prior margin 不能为负数")
     if teacher_opponent_probability + self_play_opponent_probability > 1.0:
         raise ValueError("Teacher 与 self-play 对手概率之和不能超过 1")
     if self_play_opponent_probability > 0.0 and self_play_snapshot is None:
@@ -421,7 +506,14 @@ def collect_rollouts(
             )
             opponent_profile_counts[opponent_by_seat[seat][0]] += 1
         episode_steps: list[
-            tuple[TeacherDecision, int, float, float, tuple[float, ...] | None]
+            tuple[
+                TeacherDecision,
+                int,
+                float,
+                float,
+                tuple[float, ...] | None,
+                tuple[float, ...] | None,
+            ]
         ] = []
         safety = 0
         while game.phase != "over":
@@ -434,6 +526,14 @@ def collect_rollouts(
                 if player_id == candidate_seat:
                     decision = _decision(game, hand_seed, player_id, legal, legal[0])
                     logits, value = policy.policy_value(decision)
+                    prior = _teacher_prior_for_legal_actions(
+                        teacher,
+                        game,
+                        player_id,
+                        legal,
+                        response=False,
+                        margin=teacher_prior_margin,
+                    )
                     oracle_features = (
                         privileged_critic_features(game, candidate_seat)
                         if privileged_critic is not None
@@ -453,7 +553,9 @@ def collect_rollouts(
                             )
                     else:
                         old_baseline = value
-                    action_index, old_log_probability = _sample_index(logits, rng)
+                    action_index, old_log_probability = _sample_index(
+                        _add_teacher_prior(logits, prior), rng
+                    )
                     action = legal[action_index]
                     episode_steps.append(
                         (
@@ -462,12 +564,25 @@ def collect_rollouts(
                             old_log_probability,
                             old_baseline,
                             oracle_features,
+                            prior,
                         )
                     )
                     action_counts[action.kind] += 1
                 else:
-                    action = opponent_by_seat[player_id][1].choose_turn_action(
-                        game, player_id
+                    opponent = opponent_by_seat[player_id][1]
+                    action = (
+                        _teacher_anchored_policy_action(
+                            opponent,
+                            teacher,
+                            game,
+                            player_id,
+                            legal,
+                            response=False,
+                            margin=teacher_prior_margin,
+                        )
+                        if teacher_prior_margin > 0.0
+                        and isinstance(opponent, TorchPolicyValueAgent)
+                        else opponent.choose_turn_action(game, player_id)
                     )
                 if action not in legal:
                     raise RuntimeError("PPO 策略选择了规则引擎未提供的摸牌后动作")
@@ -479,6 +594,14 @@ def collect_rollouts(
                     if player_id == candidate_seat:
                         decision = _decision(game, hand_seed, player_id, legal, legal[0])
                         logits, value = policy.policy_value(decision)
+                        prior = _teacher_prior_for_legal_actions(
+                            teacher,
+                            game,
+                            player_id,
+                            legal,
+                            response=True,
+                            margin=teacher_prior_margin,
+                        )
                         oracle_features = (
                             privileged_critic_features(game, candidate_seat)
                             if privileged_critic is not None
@@ -498,7 +621,9 @@ def collect_rollouts(
                                 )
                         else:
                             old_baseline = value
-                        action_index, old_log_probability = _sample_index(logits, rng)
+                        action_index, old_log_probability = _sample_index(
+                            _add_teacher_prior(logits, prior), rng
+                        )
                         action = legal[action_index]
                         episode_steps.append(
                             (
@@ -507,12 +632,25 @@ def collect_rollouts(
                                 old_log_probability,
                                 old_baseline,
                                 oracle_features,
+                                prior,
                             )
                         )
                         action_counts[action.kind] += 1
                     else:
-                        action = opponent_by_seat[player_id][1].choose_response(
-                            game, player_id, list(legal)
+                        opponent = opponent_by_seat[player_id][1]
+                        action = (
+                            _teacher_anchored_policy_action(
+                                opponent,
+                                teacher,
+                                game,
+                                player_id,
+                                legal,
+                                response=True,
+                                margin=teacher_prior_margin,
+                            )
+                            if teacher_prior_margin > 0.0
+                            and isinstance(opponent, TorchPolicyValueAgent)
+                            else opponent.choose_response(game, player_id, list(legal))
                         )
                     if action not in legal:
                         raise RuntimeError("PPO 策略选择了规则引擎未提供的响应动作")
@@ -530,8 +668,16 @@ def collect_rollouts(
                 old_value,
                 reward,
                 oracle_features,
+                teacher_prior,
             )
-            for decision, action_index, old_log_probability, old_value, oracle_features
+            for (
+                decision,
+                action_index,
+                old_log_probability,
+                old_value,
+                oracle_features,
+                teacher_prior,
+            )
             in episode_steps
         )
         if game.win_type == "draw":
@@ -567,6 +713,7 @@ def collect_rollouts_batched(
     teacher_opponent_probability: float = 1.0,
     self_play_snapshot: TorchPolicyValueAgent | None = None,
     self_play_opponent_probability: float = 0.0,
+    teacher_prior_margin: float = 0.0,
     rollout_batch_size: int = 1,
     privileged_critic: PrivilegedCritic | None = None,
 ) -> tuple[list[PpoStep], RolloutSummary]:
@@ -585,6 +732,7 @@ def collect_rollouts_batched(
             teacher_opponent_probability=teacher_opponent_probability,
             self_play_snapshot=self_play_snapshot,
             self_play_opponent_probability=self_play_opponent_probability,
+            teacher_prior_margin=teacher_prior_margin,
             privileged_critic=privileged_critic,
         )
     if episodes <= 0:
@@ -593,6 +741,8 @@ def collect_rollouts_batched(
         raise ValueError("teacher_opponent_probability 必须在 0 和 1 之间")
     if not 0.0 <= self_play_opponent_probability <= 1.0:
         raise ValueError("self_play_opponent_probability 必须在 0 和 1 之间")
+    if teacher_prior_margin < 0.0:
+        raise ValueError("Teacher prior margin 不能为负数")
     if teacher_opponent_probability + self_play_opponent_probability > 1.0:
         raise ValueError("Teacher 与 self-play 对手概率之和不能超过 1")
     if self_play_opponent_probability > 0.0 and self_play_snapshot is None:
@@ -645,8 +795,16 @@ def collect_rollouts_batched(
                 old_value,
                 reward,
                 oracle_features,
+                teacher_prior,
             )
-            for decision, action_index, old_log_probability, old_value, oracle_features
+            for (
+                decision,
+                action_index,
+                old_log_probability,
+                old_value,
+                oracle_features,
+                teacher_prior,
+            )
             in active.steps
         )
         if active.game.win_type == "draw":
@@ -785,7 +943,17 @@ def collect_rollouts_batched(
                 oracle_features,
                 old_baseline,
             ) in zip(candidate_jobs, predictions, oracle_feature_batch, old_baselines):
-                action_index, old_log_probability = _sample_index(logits, rng)
+                prior = _teacher_prior_for_legal_actions(
+                    teacher,
+                    episode.game,
+                    episode.candidate_seat,
+                    legal,
+                    response=response_player is not None,
+                    margin=teacher_prior_margin,
+                )
+                action_index, old_log_probability = _sample_index(
+                    _add_teacher_prior(logits, prior), rng
+                )
                 action = legal[action_index]
                 episode.steps.append(
                     (
@@ -794,6 +962,7 @@ def collect_rollouts_batched(
                         old_log_probability,
                         float(old_baseline),
                         oracle_features,
+                        prior,
                     )
                 )
                 action_counts[action.kind] += 1
@@ -814,8 +983,18 @@ def collect_rollouts_batched(
                     legal,
                     is_response,
                 ), (logits, _value) in zip(jobs, predictions):
+                    prior = _teacher_prior_for_legal_actions(
+                        teacher,
+                        episode.game,
+                        player_id,
+                        legal,
+                        response=is_response,
+                        margin=teacher_prior_margin,
+                    )
+                    combined_logits = _add_teacher_prior(logits, prior)
                     action_index = max(
-                        range(len(logits)), key=lambda index: (logits[index], -index)
+                        range(len(combined_logits)),
+                        key=lambda index: (combined_logits[index], -index),
                     )
                     action = legal[action_index]
                     if is_response:
@@ -853,7 +1032,15 @@ def tensors(
     *,
     feature_dim: int,
     device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     max_actions = max(len(step.decision.legal_actions) for step in steps)
     candidates = torch.zeros(
         (len(steps), max_actions, feature_dim), dtype=torch.float32, device=device
@@ -863,6 +1050,9 @@ def tensors(
     old_log_probabilities = torch.empty(len(steps), dtype=torch.float32, device=device)
     old_values = torch.empty(len(steps), dtype=torch.float32, device=device)
     rewards = torch.empty(len(steps), dtype=torch.float32, device=device)
+    teacher_priors = torch.zeros(
+        (len(steps), max_actions), dtype=torch.float32, device=device
+    )
     for row, step in enumerate(steps):
         vectors = [
             _dense_action_features(
@@ -878,7 +1068,21 @@ def tensors(
         old_log_probabilities[row] = step.old_log_probability
         old_values[row] = step.old_value
         rewards[row] = step.reward
-    return candidates, action_mask, actions, old_log_probabilities, old_values, rewards
+        if step.teacher_prior_logits is not None:
+            if len(step.teacher_prior_logits) != len(vectors):
+                raise ValueError("Teacher prior 与 PPO 合法动作长度不匹配")
+            teacher_priors[row, : len(vectors)] = torch.tensor(
+                step.teacher_prior_logits, dtype=torch.float32, device=device
+            )
+    return (
+        candidates,
+        action_mask,
+        actions,
+        old_log_probabilities,
+        old_values,
+        rewards,
+        teacher_priors,
+    )
 
 
 def _privileged_critic_training_tensors(
@@ -1044,9 +1248,15 @@ def ppo_update(
 ) -> dict[str, float]:
     if not steps:
         raise ValueError("PPO rollout 没有候选策略决策")
-    candidates, action_mask, actions, old_log_probabilities, old_values, rewards = tensors(
-        steps, feature_dim=network.feature_dim, device=device
-    )
+    (
+        candidates,
+        action_mask,
+        actions,
+        old_log_probabilities,
+        old_values,
+        rewards,
+        teacher_priors,
+    ) = tensors(steps, feature_dim=network.feature_dim, device=device)
     if privileged_critic_weight < 0:
         raise ValueError("privileged critic weight 不能为负数")
     privileged_inputs: torch.Tensor | None = None
@@ -1079,6 +1289,7 @@ def ppo_update(
         for start in range(0, len(indices), batch_size):
             row_indices = torch.tensor(indices[start : start + batch_size], device=device)
             logits, values = network(candidates[row_indices], action_mask[row_indices])
+            logits = logits + teacher_priors[row_indices]
             log_probabilities = F.log_softmax(logits, dim=1)
             chosen_log_probabilities = log_probabilities.gather(
                 1, actions[row_indices].unsqueeze(1)
@@ -1148,6 +1359,7 @@ def main() -> None:
         or args.reward_scale <= 0
         or args.privileged_critic_hidden_size <= 0
         or args.privileged_critic_weight < 0
+        or args.teacher_prior_margin < 0
         or not 0.0 <= args.teacher_opponent_probability <= 1.0
         or not 0.0 <= args.self_play_opponent_probability <= 1.0
         or args.teacher_opponent_probability + args.self_play_opponent_probability > 1.0
@@ -1207,6 +1419,7 @@ def main() -> None:
             "current_policy_snapshot_probability": args.self_play_opponent_probability,
             "current_policy_snapshot_refresh": "once_per_iteration_before_update",
             "frozen_checkpoints": [str(path) for path in args.opponent_checkpoint],
+            "teacher_prior_margin": args.teacher_prior_margin,
         },
         "iterations": [],
     }
@@ -1226,6 +1439,7 @@ def main() -> None:
             teacher_opponent_probability=args.teacher_opponent_probability,
             self_play_snapshot=self_play_snapshot,
             self_play_opponent_probability=args.self_play_opponent_probability,
+            teacher_prior_margin=args.teacher_prior_margin,
             rollout_batch_size=args.rollout_batch_size,
             privileged_critic=privileged_critic,
         )

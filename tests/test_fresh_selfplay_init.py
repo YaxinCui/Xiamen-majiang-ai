@@ -26,3 +26,16 @@ class FreshSelfPlayInitializationTests(unittest.TestCase):
         )
         self.assertEqual(first.architecture, "candidate_mlp")
         self.assertEqual(first.action_selection, "policy")
+
+    def test_zero_policy_head_is_an_explicit_teacher_residual_initialization(self):
+        from scripts.init_fresh_selfplay_policy import create_fresh_policy
+
+        policy = create_fresh_policy(
+            seed=202611701,
+            feature_version=3,
+            hidden_size=16,
+            device="cpu",
+            zero_policy_head=True,
+        )
+        self.assertTrue(torch.equal(policy.network.policy_head.weight, torch.zeros_like(policy.network.policy_head.weight)))
+        self.assertTrue(torch.equal(policy.network.policy_head.bias, torch.zeros_like(policy.network.policy_head.bias)))

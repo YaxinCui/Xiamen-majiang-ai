@@ -154,6 +154,54 @@ class TorchPpoTests(unittest.TestCase):
                 self_play_opponent_probability=1.0,
             )
 
+    def test_teacher_anchored_rollout_preserves_prior_through_ppo_update(self):
+        from scripts.init_fresh_selfplay_policy import create_fresh_policy
+        from scripts.train_torch_ppo import collect_rollouts_batched, ppo_update
+
+        policy = create_fresh_policy(
+            seed=860,
+            feature_version=3,
+            hidden_size=16,
+            device="cpu",
+            zero_policy_head=True,
+        )
+        snapshot = policy
+        steps, summary = collect_rollouts_batched(
+            policy,
+            episodes=8,
+            profile="core",
+            seed=861,
+            reward_scale=80.0,
+            teacher_opponent_probability=0.0,
+            self_play_snapshot=snapshot,
+            self_play_opponent_probability=1.0,
+            teacher_prior_margin=5.0,
+            rollout_batch_size=4,
+        )
+        self.assertEqual(summary.episodes, 8)
+        self.assertTrue(all(step.teacher_prior_logits is not None for step in steps))
+        self.assertTrue(
+            all(
+                max(step.teacher_prior_logits or ()) == 0.0
+                and min(step.teacher_prior_logits or ()) <= -5.0
+                for step in steps
+                if len(step.teacher_prior_logits or ()) > 1
+            )
+        )
+        metrics = ppo_update(
+            policy.network,
+            steps,
+            device=policy.device,
+            batch_size=32,
+            epochs=1,
+            learning_rate=0.0001,
+            clip_ratio=0.15,
+            value_weight=0.25,
+            entropy_weight=0.002,
+            seed=862,
+        )
+        self.assertGreater(metrics["updates"], 0)
+
     def test_training_only_privileged_critic_never_enters_actor_observations(self):
         from scripts.train_torch_ppo import (
             PRIVILEGED_CRITIC_FEATURE_DIM,

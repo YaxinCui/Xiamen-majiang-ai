@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
 
 from xiamen_mahjong.agents import HeuristicTeacherAgent
 from xiamen_mahjong.evaluation import evaluate_against_teacher, paired_score_comparison
+from xiamen_mahjong.teacher_anchored import TeacherAnchoredPolicyAgent
 from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
 
 
@@ -40,7 +41,7 @@ def positive_lower_bound(audit: dict[str, float]) -> bool:
 
 
 def audit_candidate(
-    candidate: TorchPolicyValueAgent,
+    candidate: Any,
     *,
     profile: str,
     hands: int,
@@ -66,6 +67,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--profile", choices=("classic", "core"), default="classic")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument(
+        "--teacher-prior-margin",
+        type=float,
+        default=0.0,
+        help="与训练相同的 Teacher-anchored residual prior；0 表示普通 policy",
+    )
     parser.add_argument("--selection-hands", type=int, required=True)
     parser.add_argument("--selection-seed", type=int, required=True)
     parser.add_argument("--terminal-hands", type=int, required=True)
@@ -82,7 +89,14 @@ def main() -> None:
         raise ValueError("selection 与 terminal 都至少需要两副物理牌墙")
     if args.selection_seed == args.terminal_seed:
         raise ValueError("selection 与 terminal 必须使用不同起始种子")
-    candidate = TorchPolicyValueAgent.load(args.checkpoint, device=args.device)
+    if args.teacher_prior_margin < 0.0:
+        raise ValueError("Teacher prior margin 不能为负数")
+    residual = TorchPolicyValueAgent.load(args.checkpoint, device=args.device)
+    candidate: Any = (
+        TeacherAnchoredPolicyAgent(residual, margin=args.teacher_prior_margin)
+        if args.teacher_prior_margin > 0.0
+        else residual
+    )
     selection = audit_candidate(
         candidate,
         profile=args.profile,
@@ -94,6 +108,7 @@ def main() -> None:
         "checkpoint_sha256": checkpoint_sha256(args.checkpoint),
         "profile": args.profile,
         "inference_device": args.device,
+        "teacher_prior_margin": args.teacher_prior_margin,
         "promotion_gate": "paired_seed_score_delta_95pct_low > 0",
         "selection": {
             "hands": args.selection_hands,

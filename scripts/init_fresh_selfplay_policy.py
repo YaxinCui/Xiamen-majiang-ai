@@ -65,6 +65,7 @@ def create_fresh_policy(
     feature_version: int,
     hidden_size: int,
     device: str,
+    zero_policy_head: bool = False,
 ) -> TorchPolicyValueAgent:
     """Instantiate a reproducible actor with no checkpoint ancestry."""
 
@@ -77,13 +78,18 @@ def create_fresh_policy(
     torch.manual_seed(seed)
     if device == "cuda":
         torch.cuda.manual_seed_all(seed)
-    return TorchPolicyValueAgent(
+    agent = TorchPolicyValueAgent(
         feature_version=feature_version,
         hidden_size=hidden_size,
         architecture=ARCHITECTURE_CANDIDATE_MLP,
         action_selection=ACTION_SELECTION_POLICY,
         device=device,
     )
+    if zero_policy_head:
+        with torch.no_grad():
+            agent.network.policy_head.weight.zero_()
+            agent.network.policy_head.bias.zero_()
+    return agent
 
 
 def parse_args() -> argparse.Namespace:
@@ -96,6 +102,11 @@ def parse_args() -> argparse.Namespace:
         "--feature-version", type=int, default=3, choices=tuple(sorted(NEURAL_FEATURE_DIMS))
     )
     parser.add_argument("--hidden-size", type=int, default=128)
+    parser.add_argument(
+        "--zero-policy-head",
+        action="store_true",
+        help="将新 policy head 置零，供 Teacher-anchored residual PPO 使用",
+    )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
     return parser.parse_args()
 
@@ -111,6 +122,7 @@ def main() -> None:
         feature_version=args.feature_version,
         hidden_size=args.hidden_size,
         device=args.device,
+        zero_policy_head=args.zero_policy_head,
     )
     metadata = {
         "initialization": "fresh_random_actor_for_self_play",
@@ -125,6 +137,9 @@ def main() -> None:
             "historical_run4",
             "historical_teacher_clone_checkpoint",
         ],
+        "policy_head_initialization": (
+            "zero_teacher_residual" if args.zero_policy_head else "torch_default_random"
+        ),
     }
     agent.save(args.output, metadata=metadata)
     report = {
