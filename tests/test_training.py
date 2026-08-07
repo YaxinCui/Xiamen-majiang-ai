@@ -17,6 +17,7 @@ from xiamen_mahjong.training import (
     StateValueBaseline,
     _audit_constraint_repaired_history_prefix,
     _audit_initial_normal_draw_density,
+    _audit_opening_initial_response_claim_density,
     _audit_opening_first_opponent_draw_density,
     _audit_initial_setup_response_claim_density,
     _audit_resampled_history_prefix,
@@ -25,14 +26,18 @@ from xiamen_mahjong.training import (
     _history_replay_transition_targets,
     _initial_normal_draw_discard_constraint,
     _initial_setup_response_claim_constraint,
+    _initial_setup_response_claim_discard_constraint,
     _sample_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
     _sample_replay_setup_for_actor,
     _sample_replay_setup_given_opening_gold_and_draw,
+    _sample_replay_setup_given_opening_and_initial_response_claim,
+    _sample_replay_setup_given_opening_initial_claim_and_discard,
     _sample_post_gold_wall_given_indicator,
     _sample_post_gold_wall_given_indicator_and_opening_draw,
     _sample_structured_setup_given_normal_draw_flowers,
     _sample_structured_setup_given_gold_indicator_and_opening_draw,
+    _sample_structured_setup_given_opening_gold_and_initial_hand,
     _sample_structured_setup_given_opening_gold_and_first_opponent_draw,
     _sample_wall_given_normal_draw_flowers,
     _replay_snapshot_public_history,
@@ -277,15 +282,24 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool)
             self.assertAlmostEqual(proposal.condition_probability, 1.0 / 40.0)
 
-    def test_opening_and_first_opponent_draw_proposal_has_calibrated_weights(self):
+    def test_opening_and_first_opponent_draw_proposal_matches_exact_posterior(self):
         # One opponent base-hand slot and six pre-flip wall slots share the
         # labelled multiset [0, 0, 1, 2, 3, 34, 35]. We observe dealer
         # [34, 1], opponent [35, hidden base], a following discard of 2, and
         # indicator face 0. Enumeration gives a prior event probability 1/450.
+        #
+        # This deliberately checks more than the event normalizer.  The
+        # sampler is allowed to give different valid hidden allocations
+        # different p/q values, so a correct proposal must recover the exact
+        # posterior *after importance weighting*.  A mere legality test (or a
+        # test of an average condition probability) would not catch a missing
+        # branch factor in the joint gold/draw/discard proposal.
         pool = Counter({0: 2, 1: 1, 2: 1, 3: 1, 34: 1, 35: 1})
         labeled_faces = (0, 0, 1, 2, 3, 34, 35)
         valid = 0
         event_count = 0
+        posterior_hand_is_two = 0
+        posterior_post_gold_wall_ends_in_three = 0
         for ordering in permutations(range(len(labeled_faces))):
             hand = labeled_faces[ordering[0]]
             wall = [labeled_faces[index] for index in ordering[1:]]
@@ -301,9 +315,20 @@ class TrainingTests(unittest.TestCase):
                 and wall[selected] == 0
             ):
                 event_count += 1
+                posterior_hand_is_two += hand == 2
+                post_gold_wall = [*wall[:selected], *wall[selected + 1 :]]
+                posterior_post_gold_wall_ends_in_three += post_gold_wall[-1] == 3
         self.assertEqual(event_count / valid, 1.0 / 450.0)
-        weights: list[float] = []
-        for index in range(1_500):
+        self.assertEqual(posterior_hand_is_two / event_count, 1.0 / 2.0)
+        self.assertEqual(
+            posterior_post_gold_wall_ends_in_three / event_count,
+            1.0 / 2.0,
+        )
+        total_weight = 0.0
+        hand_is_two_weight = 0.0
+        post_gold_wall_ends_in_three_weight = 0.0
+        samples = 8_000
+        for index in range(samples):
             sampled = _sample_structured_setup_given_opening_gold_and_first_opponent_draw(
                 pool,
                 opponent_hand_sizes=(1,),
@@ -327,8 +352,171 @@ class TrainingTests(unittest.TestCase):
             self.assertEqual(
                 Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool
             )
-            weights.append(proposal.condition_probability)
-        self.assertAlmostEqual(sum(weights) / len(weights), 1.0 / 450.0, delta=0.00015)
+            weight = proposal.condition_probability
+            total_weight += weight
+            hand_is_two_weight += weight * (proposal.opponent_hands[0][0] == 2)
+            post_gold_wall_ends_in_three_weight += weight * (proposal.wall[-1] == 3)
+        self.assertAlmostEqual(total_weight / samples, 1.0 / 450.0, delta=0.00008)
+        self.assertAlmostEqual(
+            hand_is_two_weight / total_weight,
+            posterior_hand_is_two / event_count,
+            delta=0.035,
+        )
+        self.assertAlmostEqual(
+            post_gold_wall_ends_in_three_weight / total_weight,
+            posterior_post_gold_wall_ends_in_three / event_count,
+            delta=0.035,
+        )
+
+    def test_opening_gold_and_initial_claim_hand_matches_exact_posterior(self):
+        # The same physical micro-deck has one opponent opening hand slot and
+        # six pre-flip wall slots.  After observing [34, 1], require that the
+        # opening claimant owns tile 2 (a pong/chi consumed-tile constraint)
+        # and that the dice scan exposes gold face 0.  The sampler returns a
+        # post-gold wall, so enumerate against that exact representation.
+        pool = Counter({0: 2, 1: 1, 2: 1, 3: 1, 34: 1, 35: 1})
+        labeled_faces = (0, 0, 1, 2, 3, 34, 35)
+        valid = 0
+        event_count = 0
+        posterior_first_tail_is_zero = 0
+        posterior_last_is_three = 0
+        for ordering in permutations(range(len(labeled_faces))):
+            hand = labeled_faces[ordering[0]]
+            wall = [labeled_faces[index] for index in ordering[1:]]
+            if hand >= 34:
+                continue
+            valid += 1
+            selected = gold_indicator_index(wall, (1, 1))
+            if (
+                wall[:2] == [34, 1]
+                and hand == 2
+                and selected is not None
+                and wall[selected] == 0
+            ):
+                event_count += 1
+                post_gold_wall = [*wall[:selected], *wall[selected + 1 :]]
+                posterior_first_tail_is_zero += post_gold_wall[2] == 0
+                posterior_last_is_three += post_gold_wall[-1] == 3
+        self.assertEqual(event_count / valid, 1.0 / 225.0)
+        self.assertEqual(posterior_first_tail_is_zero / event_count, 3.0 / 8.0)
+        self.assertEqual(posterior_last_is_three / event_count, 3.0 / 8.0)
+
+        total_weight = 0.0
+        first_tail_is_zero_weight = 0.0
+        last_is_three_weight = 0.0
+        samples = 6_000
+        for index in range(samples):
+            sampled = _sample_structured_setup_given_opening_gold_and_initial_hand(
+                pool,
+                opponent_hand_sizes=(1,),
+                opponent_flower_sizes=(0,),
+                pre_flip_wall_size=6,
+                indicator=0,
+                dice=(1, 1),
+                opening_flowers=(34,),
+                opening_tile=1,
+                claimant_index=0,
+                required_claim_tiles=(2,),
+                rng=random.Random(45_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            proposal = sampled
+            assert proposal is not None
+            self.assertEqual(proposal.opponent_hands, ((2,),))
+            self.assertEqual(proposal.wall[:2], (34, 1))
+            self.assertEqual(
+                Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool
+            )
+            weight = proposal.condition_probability
+            total_weight += weight
+            first_tail_is_zero_weight += weight * (proposal.wall[2] == 0)
+            last_is_three_weight += weight * (proposal.wall[-1] == 3)
+        self.assertAlmostEqual(total_weight / samples, 1.0 / 225.0, delta=0.00008)
+        self.assertAlmostEqual(
+            first_tail_is_zero_weight / total_weight,
+            posterior_first_tail_is_zero / event_count,
+            delta=0.035,
+        )
+        self.assertAlmostEqual(
+            last_is_three_weight / total_weight,
+            posterior_last_is_three / event_count,
+            delta=0.035,
+        )
+
+    def test_opening_gold_and_claim_discard_initial_hand_matches_exact_posterior(self):
+        # A claim immediately followed by the claimant's discard constrains
+        # both initial-hand faces in this two-slot micro-deck.  This checks
+        # the joint initial-hand event independently of action likelihoods;
+        # it is the structural basis for the longer claim → discard audit.
+        pool = Counter({0: 2, 1: 1, 2: 1, 3: 1, 4: 1, 34: 1, 35: 1})
+        labeled_faces = (0, 0, 1, 2, 3, 4, 34, 35)
+        valid = 0
+        event_count = 0
+        posterior_first_tail_is_zero = 0
+        posterior_last_is_four = 0
+        for ordering in permutations(range(len(labeled_faces))):
+            hand = [labeled_faces[ordering[0]], labeled_faces[ordering[1]]]
+            wall = [labeled_faces[index] for index in ordering[2:]]
+            if any(tile >= 34 for tile in hand):
+                continue
+            valid += 1
+            selected = gold_indicator_index(wall, (1, 1))
+            if (
+                wall[:2] == [34, 1]
+                and 2 in hand
+                and 3 in hand
+                and selected is not None
+                and wall[selected] == 0
+            ):
+                event_count += 1
+                post_gold_wall = [*wall[:selected], *wall[selected + 1 :]]
+                posterior_first_tail_is_zero += post_gold_wall[2] == 0
+                posterior_last_is_four += post_gold_wall[-1] == 4
+        self.assertEqual(event_count / valid, 1.0 / 675.0)
+        self.assertEqual(posterior_first_tail_is_zero / event_count, 3.0 / 8.0)
+        self.assertEqual(posterior_last_is_four / event_count, 3.0 / 8.0)
+
+        total_weight = 0.0
+        first_tail_is_zero_weight = 0.0
+        last_is_four_weight = 0.0
+        samples = 6_000
+        for index in range(samples):
+            sampled = _sample_structured_setup_given_opening_gold_and_initial_hand(
+                pool,
+                opponent_hand_sizes=(2,),
+                opponent_flower_sizes=(0,),
+                pre_flip_wall_size=6,
+                indicator=0,
+                dice=(1, 1),
+                opening_flowers=(34,),
+                opening_tile=1,
+                claimant_index=0,
+                required_claim_tiles=(2, 3),
+                rng=random.Random(46_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            proposal = sampled
+            assert proposal is not None
+            self.assertEqual(proposal.opponent_hands, ((2, 3),))
+            self.assertEqual(proposal.wall[:2], (34, 1))
+            self.assertEqual(
+                Counter([*proposal.wall, 0, *proposal.opponent_hands[0]]), pool
+            )
+            weight = proposal.condition_probability
+            total_weight += weight
+            first_tail_is_zero_weight += weight * (proposal.wall[2] == 0)
+            last_is_four_weight += weight * (proposal.wall[-1] == 4)
+        self.assertAlmostEqual(total_weight / samples, 1.0 / 675.0, delta=0.00004)
+        self.assertAlmostEqual(
+            first_tail_is_zero_weight / total_weight,
+            posterior_first_tail_is_zero / event_count,
+            delta=0.035,
+        )
+        self.assertAlmostEqual(
+            last_is_four_weight / total_weight,
+            posterior_last_is_four / event_count,
+            delta=0.035,
+        )
 
     def test_opening_gold_setup_reconstruction_preserves_actor_information(self):
         teacher = HeuristicTeacherAgent()
@@ -500,6 +688,11 @@ class TrainingTests(unittest.TestCase):
             audit.minimum_prior_over_proposal or 0.0,
             audit.maximum_prior_over_proposal or 0.0,
         )
+        self.assertGreater(audit.structural_effective_sample_size, 0.0)
+        self.assertLessEqual(
+            audit.structural_effective_sample_size,
+            audit.accepted_particles,
+        )
         self.assertGreater(audit.effective_sample_size, 0.0)
         payload = audit.payload()
         self.assertEqual(
@@ -508,6 +701,8 @@ class TrainingTests(unittest.TestCase):
         self.assertEqual(
             payload["proposal_density_ratio"], "per_particle_prior_over_proposal"
         )
+        self.assertIn("structural_effective_sample_size", payload)
+        self.assertIn("behavior likelihood", payload["effective_sample_size_definition"])
         self.assertIn("outside", payload["warning"])
 
     def test_exact_density_audit_covers_only_initial_response_claims(self):
@@ -569,6 +764,116 @@ class TrainingTests(unittest.TestCase):
         self.assertIn("not authorized", payload["warning"])
         self.assertNotIn("wall", payload)
         self.assertNotIn("opponent_hands", payload)
+
+    def test_opening_aware_initial_claim_audit_has_exact_density_diagnostics(self):
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=2,
+            rules=XiamenRules.from_profile("core"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        opponents = {seat: ("heuristic_teacher", teacher) for seat in range(1, 4)}
+        snapshot = next(
+            item
+            for item in _run_candidate_base_hand(
+                game,
+                candidate_seat=0,
+                candidate_policy=teacher,
+                opponents=opponents,
+            )
+            if _initial_setup_response_claim_constraint(item) is not None
+        )
+        prepared = _sample_replay_setup_given_opening_and_initial_response_claim(
+            snapshot,
+            rng=random.Random(51_007),
+        )
+        self.assertIsNotNone(prepared)
+        proposal, target_public_action_count = prepared or (None, 0)
+        assert proposal is not None
+        self.assertEqual(
+            target_public_action_count,
+            (_initial_setup_response_claim_constraint(snapshot) or (0, 0, ()))[0],
+        )
+        reconstructed = Counter(proposal.game.wall)
+        reconstructed.update([proposal.game.gold_indicator])
+        for player in proposal.game.players:
+            reconstructed.update(player.hand)
+            reconstructed.update(player.flowers)
+        self.assertEqual(reconstructed, Counter(base_wall()))
+
+        audit = _audit_opening_initial_response_claim_density(
+            snapshot,
+            opponents=opponents,
+            particle_count=64,
+            rng=random.Random(51_017),
+        )
+        self.assertEqual(audit.initialized_particles, 64)
+        self.assertEqual(audit.accepted_particles, 64)
+        self.assertGreater(audit.structural_effective_sample_size, 0.0)
+        self.assertLessEqual(
+            audit.structural_effective_sample_size,
+            audit.accepted_particles,
+        )
+        self.assertGreater(audit.effective_sample_size, 0.0)
+        payload = audit.payload()
+        self.assertEqual(
+            payload["proposal"], "core_opening_initial_response_claim_density_v0"
+        )
+        self.assertEqual(
+            payload["proposal_density_ratio"], "per_particle_prior_over_proposal"
+        )
+        self.assertNotIn("wall", payload)
+        self.assertNotIn("opponent_hands", payload)
+        self.assertIn("outside", payload["warning"])
+
+    def test_opening_aware_claim_discard_audit_stays_a_gated_prefix(self):
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=2,
+            rules=XiamenRules.from_profile("core"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        opponents = {seat: ("heuristic_teacher", teacher) for seat in range(1, 4)}
+        snapshot = next(
+            item
+            for item in _run_candidate_base_hand(
+                game,
+                candidate_seat=0,
+                candidate_policy=teacher,
+                opponents=opponents,
+            )
+            if _initial_setup_response_claim_discard_constraint(item) is not None
+        )
+        prepared = _sample_replay_setup_given_opening_initial_claim_and_discard(
+            snapshot,
+            rng=random.Random(51_103),
+        )
+        self.assertIsNotNone(prepared)
+        proposal, target_public_action_count = prepared or (None, 0)
+        assert proposal is not None
+        self.assertEqual(
+            target_public_action_count,
+            (_initial_setup_response_claim_discard_constraint(snapshot) or (0, 0, ()))[0],
+        )
+        audit = _audit_opening_initial_response_claim_density(
+            snapshot,
+            opponents=opponents,
+            particle_count=64,
+            rng=random.Random(51_113),
+            include_claimant_discard=True,
+        )
+        self.assertGreater(audit.initialized_particles, 0)
+        self.assertGreater(audit.accepted_particles, 0)
+        self.assertLessEqual(audit.accepted_particles, audit.initialized_particles)
+        payload = audit.payload()
+        self.assertEqual(
+            payload["proposal"],
+            "core_opening_initial_response_claim_discard_density_v0",
+        )
+        self.assertIn("following_claim_discard", payload["proposal_density"])
+        self.assertIn("outside", payload["warning"])
 
     def test_resampled_history_rejects_positioned_opponent_flower_transition_without_density(self):
         teacher = HeuristicTeacherAgent()

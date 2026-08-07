@@ -1503,13 +1503,21 @@ class _InitialNormalDrawDensityAudit:
 
 @dataclass(frozen=True)
 class _OpeningNormalDrawDensityAudit:
-    """Aggregate audit for the opening-aware first-opponent-draw proposal."""
+    """Aggregate audit for the opening-aware first-opponent-draw proposal.
+
+    ``structural_effective_sample_size`` isolates variation introduced by the
+    explicit deal/draw ``p/q``.  ``effective_sample_size`` additionally
+    includes the frozen-policy behavior likelihood, so the two numbers make
+    it possible to distinguish a proposal-density problem from a policy-
+    likelihood collapse without exposing a particle world.
+    """
 
     proposed_particles: int
     initialized_particles: int
     accepted_particles: int
     minimum_prior_over_proposal: float | None
     maximum_prior_over_proposal: float | None
+    structural_effective_sample_size: float
     effective_sample_size: float
     mean_accepted_log_likelihood: float | None
     rejection_counts: dict[str, int]
@@ -1522,6 +1530,14 @@ class _OpeningNormalDrawDensityAudit:
     def effective_sample_fraction(self) -> float:
         return (
             self.effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    @property
+    def structural_effective_sample_fraction(self) -> float:
+        return (
+            self.structural_effective_sample_size / self.accepted_particles
             if self.accepted_particles
             else 0.0
         )
@@ -1540,14 +1556,106 @@ class _OpeningNormalDrawDensityAudit:
             "acceptance_rate": self.acceptance_rate,
             "minimum_prior_over_proposal": self.minimum_prior_over_proposal,
             "maximum_prior_over_proposal": self.maximum_prior_over_proposal,
+            "structural_effective_sample_size": self.structural_effective_sample_size,
+            "structural_effective_sample_fraction": (
+                self.structural_effective_sample_fraction
+            ),
             "effective_sample_size": self.effective_sample_size,
             "effective_sample_fraction": self.effective_sample_fraction,
+            "effective_sample_size_definition": (
+                "effective_sample_size includes structural p/q and frozen-policy "
+                "behavior likelihood"
+            ),
             "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
             "rejection_counts": dict(self.rejection_counts),
             "warning": (
                 "Opening-aware one-transition audit only; later actor-private "
                 "draws, later public history and collector authorization are "
                 "outside this proposal."
+            ),
+        }
+
+
+@dataclass(frozen=True)
+class _OpeningInitialClaimDensityAudit:
+    """Aggregate audit for an opening-aware initial response-claim proposal.
+
+    The structural ESS contains only the explicit opening/gold/initial-hand
+    correction.  The ordinary ESS additionally contains frozen behavior
+    likelihoods from replay; both remain aggregate-only diagnostics.
+    """
+
+    proposed_particles: int
+    initialized_particles: int
+    accepted_particles: int
+    minimum_prior_over_proposal: float | None
+    maximum_prior_over_proposal: float | None
+    structural_effective_sample_size: float
+    effective_sample_size: float
+    mean_accepted_log_likelihood: float | None
+    rejection_counts: dict[str, int]
+    includes_claimant_discard: bool
+
+    @property
+    def acceptance_rate(self) -> float:
+        return self.accepted_particles / self.proposed_particles
+
+    @property
+    def structural_effective_sample_fraction(self) -> float:
+        return (
+            self.structural_effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    @property
+    def effective_sample_fraction(self) -> float:
+        return (
+            self.effective_sample_size / self.accepted_particles
+            if self.accepted_particles
+            else 0.0
+        )
+
+    def payload(self) -> dict[str, Any]:
+        proposal = (
+            "core_opening_initial_response_claim_discard_density_v0"
+            if self.includes_claimant_discard
+            else "core_opening_initial_response_claim_density_v0"
+        )
+        proposal_density = (
+            "structured_deal_prior_conditioned_on_opening_gold_actor_draw_"
+            "required_initial_claim_hand_and_following_claim_discard"
+            if self.includes_claimant_discard
+            else (
+                "structured_deal_prior_conditioned_on_opening_gold_actor_draw_"
+                "and_required_initial_claim_hand"
+            )
+        )
+        return {
+            "proposal": proposal,
+            "proposal_density": proposal_density,
+            "proposal_density_ratio": "per_particle_prior_over_proposal",
+            "proposed_particles": self.proposed_particles,
+            "initialized_particles": self.initialized_particles,
+            "accepted_particles": self.accepted_particles,
+            "acceptance_rate": self.acceptance_rate,
+            "minimum_prior_over_proposal": self.minimum_prior_over_proposal,
+            "maximum_prior_over_proposal": self.maximum_prior_over_proposal,
+            "structural_effective_sample_size": self.structural_effective_sample_size,
+            "structural_effective_sample_fraction": (
+                self.structural_effective_sample_fraction
+            ),
+            "effective_sample_size": self.effective_sample_size,
+            "effective_sample_fraction": self.effective_sample_fraction,
+            "effective_sample_size_definition": (
+                "effective_sample_size includes structural p/q and frozen-policy "
+                "behavior likelihood"
+            ),
+            "mean_accepted_log_likelihood": self.mean_accepted_log_likelihood,
+            "rejection_counts": dict(self.rejection_counts),
+            "warning": (
+                "Opening-aware initial-claim prefix audit only; later draws, later "
+                "public history and collector authorization are outside this proposal."
             ),
         }
 
@@ -2330,6 +2438,226 @@ def _sample_structured_setup_given_gold_indicator_and_opening_draw(
             )
 
 
+def _sample_structured_setup_given_opening_gold_and_initial_hand(
+    pool: Counter[int],
+    *,
+    opponent_hand_sizes: Sequence[int],
+    opponent_flower_sizes: Sequence[int],
+    pre_flip_wall_size: int,
+    indicator: int,
+    dice: tuple[int, int],
+    opening_flowers: Sequence[int],
+    opening_tile: int,
+    claimant_index: int,
+    required_claim_tiles: Sequence[int],
+    rng: random.Random,
+) -> _StructuredSetupDrawProposal | None:
+    """Jointly condition the opening, gold flip and one initial claim hand.
+
+    This is the exact structural primitive for the first response claim after
+    the dealer's opening discard.  At that point a chi/pong/ming-kan's
+    concealed tiles necessarily came from the claimant's *initial* hand.
+    The proposal samples that hand from its multivariate-hypergeometric law
+    conditioned on the public consumed faces, then conditions the remaining
+    structured allocation on the dice-selected gold indicator.  Its returned
+    per-particle ``p/q`` includes the known opening prefix, initial-hand
+    feasibility, and the gold event after that sampled hand.
+
+    As with the one-draw primitive below, a sampled conditional hand that
+    leaves no copy of the observed indicator has zero gold likelihood and is
+    returned as ``None``.  Callers must count that as a rejected proposal,
+    rather than silently retrying it as though the missing branch factor were
+    one.  This primitive is audit-only and covers no later draw or history.
+    """
+
+    if (
+        len(opponent_hand_sizes) != len(opponent_flower_sizes)
+        or not 0 <= claimant_index < len(opponent_hand_sizes)
+        or not is_base_tile(indicator)
+        or not is_base_tile(opening_tile)
+        or not required_claim_tiles
+        or not all(is_base_tile(tile) for tile in required_claim_tiles)
+        or any(
+            not isinstance(tile, int) or is_base_tile(tile)
+            for tile in opening_flowers
+        )
+    ):
+        return None
+    remaining = Counter({tile: count for tile, count in pool.items() if count > 0})
+    base_total = sum(
+        count for tile, count in remaining.items() if is_base_tile(tile)
+    )
+    flower_total = sum(
+        count for tile, count in remaining.items() if not is_base_tile(tile)
+    )
+    base_hand_slots = sum(opponent_hand_sizes)
+    flower_hand_slots = sum(opponent_flower_sizes)
+    base_wall_remaining = base_total - base_hand_slots
+    flower_wall_remaining = flower_total - flower_hand_slots
+    if (
+        base_wall_remaining < 0
+        or flower_wall_remaining < 0
+        or base_wall_remaining + flower_wall_remaining != pre_flip_wall_size
+        or sum(remaining.values())
+        != base_hand_slots + flower_hand_slots + pre_flip_wall_size
+    ):
+        return None
+
+    probability = 1.0
+    positions_remaining = pre_flip_wall_size
+    base_total_remaining = base_total
+    flower_total_remaining = flower_total
+
+    def consume_known_wall_face(tile: int) -> bool:
+        nonlocal probability
+        nonlocal positions_remaining
+        nonlocal base_wall_remaining
+        nonlocal flower_wall_remaining
+        nonlocal base_total_remaining
+        nonlocal flower_total_remaining
+        if positions_remaining <= 0 or remaining[tile] <= 0:
+            return False
+        if is_base_tile(tile):
+            if base_wall_remaining <= 0 or base_total_remaining <= 0:
+                return False
+            probability *= base_wall_remaining / positions_remaining
+            probability *= remaining[tile] / base_total_remaining
+            base_wall_remaining -= 1
+            base_total_remaining -= 1
+        else:
+            if flower_wall_remaining <= 0 or flower_total_remaining <= 0:
+                return False
+            probability *= flower_wall_remaining / positions_remaining
+            probability *= remaining[tile] / flower_total_remaining
+            flower_wall_remaining -= 1
+            flower_total_remaining -= 1
+        remaining[tile] -= 1
+        positions_remaining -= 1
+        return True
+
+    opening_prefix = [*opening_flowers, opening_tile]
+    for tile in opening_prefix:
+        if not consume_known_wall_face(tile):
+            return None
+    prefix_length = len(opening_prefix)
+    start = pre_flip_wall_size - sum(dice)
+    remaining_flower_count = sum(
+        count
+        for tile, count in remaining.items()
+        if count > 0 and not is_base_tile(tile)
+    )
+    # This positional proof prevents the gold scan from changing the known
+    # opening draw.  It uses all remaining flowers, so it remains valid no
+    # matter how the unknown flower slots are later allocated.
+    if (
+        start < prefix_length
+        or start - prefix_length + 1 <= remaining_flower_count
+    ):
+        return None
+    conditioned_claim_hand = _sample_multivariate_hand_given_required_tiles(
+        Counter(
+            {
+                tile: count
+                for tile, count in remaining.items()
+                if is_base_tile(tile) and count > 0
+            }
+        ),
+        hand_size=opponent_hand_sizes[claimant_index],
+        required_tiles=required_claim_tiles,
+        rng=rng,
+    )
+    if conditioned_claim_hand is None:
+        return None
+    claimant_hand, claim_probability = conditioned_claim_hand
+    probability *= claim_probability
+    remaining.subtract(Counter(claimant_hand))
+    if any(count < 0 for count in remaining.values()):
+        return None  # pragma: no cover - protected by conditional sampler
+    remaining_base_count = sum(
+        count
+        for tile, count in remaining.items()
+        if count > 0 and is_base_tile(tile)
+    )
+    if remaining[indicator] <= 0 or remaining_base_count <= 0:
+        return None
+    probability *= remaining[indicator] / remaining_base_count
+
+    while True:
+        base_values = [
+            tile
+            for tile, count in remaining.items()
+            if is_base_tile(tile)
+            for _ in range(count)
+        ]
+        flower_values = [
+            tile
+            for tile, count in remaining.items()
+            if not is_base_tile(tile)
+            for _ in range(count)
+        ]
+        rng.shuffle(base_values)
+        rng.shuffle(flower_values)
+        expected_base_values = (
+            base_hand_slots
+            - opponent_hand_sizes[claimant_index]
+            + base_wall_remaining
+        )
+        expected_flower_values = flower_hand_slots + flower_wall_remaining
+        if (
+            len(base_values) != expected_base_values
+            or len(flower_values) != expected_flower_values
+        ):
+            return None  # pragma: no cover - protected by exact conservation
+        base_offset = 0
+        flower_offset = 0
+        opponent_hands: list[tuple[int, ...]] = []
+        opponent_flowers: list[tuple[int, ...]] = []
+        for index, (hand_size, flower_size) in enumerate(
+            zip(opponent_hand_sizes, opponent_flower_sizes)
+        ):
+            if index == claimant_index:
+                opponent_hands.append(tuple(sorted(claimant_hand)))
+            else:
+                opponent_hands.append(
+                    tuple(sorted(base_values[base_offset : base_offset + hand_size]))
+                )
+                base_offset += hand_size
+            opponent_flowers.append(
+                tuple(sorted(flower_values[flower_offset : flower_offset + flower_size]))
+            )
+            flower_offset += flower_size
+        tail_kinds = ["base"] * base_wall_remaining + [
+            "flower"
+        ] * flower_wall_remaining
+        rng.shuffle(tail_kinds)
+        wall = list(opening_prefix)
+        for kind in tail_kinds:
+            if kind == "base":
+                wall.append(base_values[base_offset])
+                base_offset += 1
+            else:
+                wall.append(flower_values[flower_offset])
+                flower_offset += 1
+        if (
+            base_offset != len(base_values)
+            or flower_offset != len(flower_values)
+            or len(wall) != pre_flip_wall_size
+        ):
+            return None  # pragma: no cover - protected by exact conservation
+        indicator_index = gold_indicator_index(wall, dice)
+        if (
+            indicator_index is not None
+            and indicator_index >= prefix_length
+            and wall[indicator_index] == indicator
+        ):
+            return _StructuredSetupDrawProposal(
+                opponent_hands=tuple(opponent_hands),
+                opponent_flowers=tuple(opponent_flowers),
+                wall=tuple([*wall[:indicator_index], *wall[indicator_index + 1 :]]),
+                condition_probability=probability,
+            )
+
+
 def _sample_structured_setup_given_opening_gold_and_first_opponent_draw(
     pool: Counter[int],
     *,
@@ -2867,6 +3195,163 @@ def _sample_replay_setup_given_opening_gold_and_draw(
         sampled,
         prior_over_proposal=allocation.condition_probability,
         condition_probability=allocation.condition_probability,
+    )
+
+
+def _sample_replay_setup_given_opening_and_initial_hand_constraint(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    claimant_seat: int,
+    required_initial_tiles: Sequence[int],
+    rng: random.Random,
+) -> _SetupReplayProposal | None:
+    """Reconstruct an opening particle for an exact initial-hand event.
+
+    ``required_initial_tiles`` can contain both the public claim's consumed
+    faces and a following claimed player's discard face.  In either case the
+    constraint is solely about that player's original concealed hand; action
+    choices are evaluated separately by the frozen-policy likelihood.
+    """
+
+    trace = snapshot.actor_trace
+    source = snapshot.initial_game
+    actor_seat = trace.actor_seat
+    if (
+        source.rules.profile != "core"
+        or source.phase != "discard"
+        or source.current_player != actor_seat
+        or source.gold_indicator is None
+        or source.gold_dice is None
+        or not source.public_actions
+    ):
+        return None
+    actor = source.players[actor_seat]
+    opening_tile = source.last_drawn_tiles[actor_seat]
+    opening_flowers = tuple(source.last_drawn_flowers[actor_seat])
+    opening_event = source.public_actions[-1]
+    if (
+        opening_tile is None
+        or opening_tile not in actor.hand
+        or not is_base_tile(opening_tile)
+        or not all(not is_base_tile(tile) for tile in opening_flowers)
+        or opening_event.get("kind") != "draw"
+        or opening_event.get("seat") != actor_seat
+        or tuple(opening_event.get("tiles", ())) != opening_flowers
+    ):
+        return None
+    actor_hand_before_draw = list(actor.hand)
+    actor_hand_before_draw.remove(opening_tile)
+    actor_flowers_before_draw = list(actor.flowers)
+    for flower in opening_flowers:
+        try:
+            actor_flowers_before_draw.remove(flower)
+        except ValueError:
+            return None
+
+    pool = Counter(base_wall())
+
+    def consume(tiles: Iterable[int]) -> bool:
+        counts = Counter(tiles)
+        if any(pool[tile] < count for tile, count in counts.items()):
+            return False
+        pool.subtract(counts)
+        return True
+
+    if not consume(actor_hand_before_draw) or not consume(actor_flowers_before_draw):
+        return None
+    opponent_seats = tuple(
+        player.seat for player in source.players if player.seat != actor_seat
+    )
+    try:
+        claimant_index = opponent_seats.index(claimant_seat)
+    except ValueError:
+        return None  # pragma: no cover - constraint excludes the actor
+    opening_prefix_size = len(opening_flowers) + 1
+    allocation = _sample_structured_setup_given_opening_gold_and_initial_hand(
+        pool,
+        opponent_hand_sizes=tuple(
+            len(source.players[seat].hand) for seat in opponent_seats
+        ),
+        opponent_flower_sizes=tuple(
+            len(source.players[seat].flowers) for seat in opponent_seats
+        ),
+        pre_flip_wall_size=len(source.wall) + 1 + opening_prefix_size,
+        indicator=source.gold_indicator,
+        dice=source.gold_dice,
+        opening_flowers=opening_flowers,
+        opening_tile=opening_tile,
+        claimant_index=claimant_index,
+        required_claim_tiles=required_initial_tiles,
+        rng=rng,
+    )
+    if allocation is None or allocation.wall[:opening_prefix_size] != tuple(
+        [*opening_flowers, opening_tile]
+    ):
+        return None
+    sampled = copy.deepcopy(source)
+    for seat, hand, flowers in zip(
+        opponent_seats, allocation.opponent_hands, allocation.opponent_flowers
+    ):
+        sampled.players[seat].hand = list(hand)
+        sampled.players[seat].flowers = list(flowers)
+        sampled.last_drawn_tiles[seat] = None
+        sampled.last_drawn_flowers[seat] = ()
+    sampled.wall = list(allocation.wall[opening_prefix_size:])
+    if len(sampled.wall) != len(source.wall):
+        return None  # pragma: no cover - protected by conservation checks
+    sampled.random = random.Random(rng.randrange(2**63))
+    return _SetupReplayProposal(
+        sampled,
+        prior_over_proposal=allocation.condition_probability,
+        condition_probability=allocation.condition_probability,
+    )
+
+
+def _sample_replay_setup_given_opening_and_initial_response_claim(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    rng: random.Random,
+) -> tuple[_SetupReplayProposal, int] | None:
+    """Reconstruct an opening particle for the immediate response claim."""
+
+    constraint = _initial_setup_response_claim_constraint(snapshot)
+    if constraint is None:
+        return None
+    target_public_action_count, claimant_seat, required_claim_tiles = constraint
+    proposal = _sample_replay_setup_given_opening_and_initial_hand_constraint(
+        snapshot,
+        claimant_seat=claimant_seat,
+        required_initial_tiles=required_claim_tiles,
+        rng=rng,
+    )
+    return (
+        (proposal, target_public_action_count)
+        if proposal is not None
+        else None
+    )
+
+
+def _sample_replay_setup_given_opening_initial_claim_and_discard(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    rng: random.Random,
+) -> tuple[_SetupReplayProposal, int] | None:
+    """Reconstruct the opening claim prefix through the claimant's discard."""
+
+    constraint = _initial_setup_response_claim_discard_constraint(snapshot)
+    if constraint is None:
+        return None
+    target_public_action_count, claimant_seat, required_initial_tiles = constraint
+    proposal = _sample_replay_setup_given_opening_and_initial_hand_constraint(
+        snapshot,
+        claimant_seat=claimant_seat,
+        required_initial_tiles=required_initial_tiles,
+        rng=rng,
+    )
+    return (
+        (proposal, target_public_action_count)
+        if proposal is not None
+        else None
     )
 
 
@@ -4161,6 +4646,38 @@ def _initial_setup_response_claim_constraint(
     return setup_count + 2, claimant, tuple(int(tile) for tile in tiles)
 
 
+def _initial_setup_response_claim_discard_constraint(
+    snapshot: _CounterfactualDecisionSnapshot,
+) -> tuple[int, int, tuple[int, ...]] | None:
+    """Recognize an immediate claim followed by that claimant's discard.
+
+    A player who calls chi/pong/ming-kan before receiving any normal draw
+    must make both the claim and its next discard from the original concealed
+    hand.  Duplicating the discard face in the returned tile tuple correctly
+    represents cases where it has the same face as a consumed claim tile.
+    """
+
+    initial_claim = _initial_setup_response_claim_constraint(snapshot)
+    if initial_claim is None:
+        return None
+    _claim_target, claimant, claim_tiles = initial_claim
+    source = snapshot.initial_game
+    setup_count = len(source.public_actions)
+    events = snapshot.game.public_actions
+    if len(events) < setup_count + 3:
+        return None
+    following_discard = events[setup_count + 2]
+    discard_tile = following_discard.get("tile")
+    if (
+        following_discard.get("kind") != "discard"
+        or following_discard.get("seat") != claimant
+        or not isinstance(discard_tile, int)
+        or not is_base_tile(discard_tile)
+    ):
+        return None
+    return setup_count + 3, claimant, (*claim_tiles, discard_tile)
+
+
 def _initial_normal_draw_discard_constraint(
     snapshot: _CounterfactualDecisionSnapshot,
 ) -> tuple[int, int, tuple[int, ...], int, int] | None:
@@ -4322,6 +4839,98 @@ def _audit_initial_setup_response_claim_density(
     )
 
 
+def _audit_opening_initial_response_claim_density(
+    snapshot: _CounterfactualDecisionSnapshot,
+    *,
+    opponents: Mapping[int, tuple[str, Any]],
+    particle_count: int,
+    rng: random.Random,
+    behavior_temperature: float = 1.0,
+    uniform_mixture: float = 0.02,
+    include_claimant_discard: bool = False,
+) -> _OpeningInitialClaimDensityAudit:
+    """Audit the opening-aware exact proposal for one immediate claim.
+
+    This is the gold-consistent counterpart to the older post-setup claim
+    audit.  With ``include_claimant_discard`` it adds the claimant's immediate
+    discard as an additional exact initial-hand feasibility condition. Action
+    choices remain frozen-policy likelihoods in either case.
+    """
+
+    if particle_count <= 0:
+        raise ValueError("particle_count 必须为正数")
+    accepted_log_likelihoods: list[float] = []
+    importance_weights: list[float] = []
+    prior_over_proposals: list[float] = []
+    rejection_counts: Counter[str] = Counter()
+    initialized = 0
+    for _ in range(particle_count):
+        prepared = (
+            _sample_replay_setup_given_opening_initial_claim_and_discard(
+                snapshot,
+                rng=rng,
+            )
+            if include_claimant_discard
+            else _sample_replay_setup_given_opening_and_initial_response_claim(
+                snapshot,
+                rng=rng,
+            )
+        )
+        if prepared is None:
+            rejection_counts["setup_proposal"] += 1
+            continue
+        proposal, target_public_action_count = prepared
+        initialized += 1
+        result = _replay_snapshot_public_history(
+            snapshot,
+            opponents=opponents,
+            behavior_temperature=behavior_temperature,
+            uniform_mixture=uniform_mixture,
+            initial_game=proposal.game,
+            condition_actor_draws=True,
+            target_public_action_count=target_public_action_count,
+        )
+        if not result.accepted:
+            rejection_counts[result.rejection_reason or "unknown"] += 1
+            continue
+        accepted_log_likelihoods.append(result.log_likelihood)
+        prior_over_proposals.append(proposal.prior_over_proposal)
+        importance_weights.append(proposal.prior_over_proposal * result.likelihood)
+    normalizer = sum(importance_weights)
+    structural_normalizer = sum(prior_over_proposals)
+    structural_effective_sample_size = (
+        structural_normalizer * structural_normalizer
+        / sum(weight * weight for weight in prior_over_proposals)
+        if structural_normalizer > 0.0
+        else 0.0
+    )
+    effective_sample_size = (
+        normalizer * normalizer / sum(weight * weight for weight in importance_weights)
+        if normalizer > 0.0
+        else 0.0
+    )
+    return _OpeningInitialClaimDensityAudit(
+        proposed_particles=particle_count,
+        initialized_particles=initialized,
+        accepted_particles=len(accepted_log_likelihoods),
+        minimum_prior_over_proposal=(
+            min(prior_over_proposals) if prior_over_proposals else None
+        ),
+        maximum_prior_over_proposal=(
+            max(prior_over_proposals) if prior_over_proposals else None
+        ),
+        structural_effective_sample_size=structural_effective_sample_size,
+        effective_sample_size=effective_sample_size,
+        mean_accepted_log_likelihood=(
+            sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)
+            if accepted_log_likelihoods
+            else None
+        ),
+        rejection_counts=dict(sorted(rejection_counts.items())),
+        includes_claimant_discard=include_claimant_discard,
+    )
+
+
 def _audit_initial_normal_draw_density(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
@@ -4464,6 +5073,13 @@ def _audit_opening_first_opponent_draw_density(
         prior_over_proposals.append(proposal.prior_over_proposal)
         importance_weights.append(proposal.prior_over_proposal * result.likelihood)
     normalizer = sum(importance_weights)
+    structural_normalizer = sum(prior_over_proposals)
+    structural_effective_sample_size = (
+        structural_normalizer * structural_normalizer
+        / sum(weight * weight for weight in prior_over_proposals)
+        if structural_normalizer > 0.0
+        else 0.0
+    )
     effective_sample_size = (
         normalizer * normalizer / sum(weight * weight for weight in importance_weights)
         if normalizer > 0.0
@@ -4479,6 +5095,7 @@ def _audit_opening_first_opponent_draw_density(
         maximum_prior_over_proposal=(
             max(prior_over_proposals) if prior_over_proposals else None
         ),
+        structural_effective_sample_size=structural_effective_sample_size,
         effective_sample_size=effective_sample_size,
         mean_accepted_log_likelihood=(
             sum(accepted_log_likelihoods) / len(accepted_log_likelihoods)

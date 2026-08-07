@@ -126,6 +126,29 @@ top-1 76.84%、交叉熵 0.725）。在同一 64 粒子、8 个公开事件 sequ
 隐藏世界，而非行为概率温度；该代理不得接入 SMC、collector、Q 或网页。下一步仍须先完成有显式密度并通过 toy
 exact posterior 的结构 proposal，不能继续调 softmax 温度或扩大行为代理。
 
+### 开局 claim proposal 的精确校准与新瓶颈（2026-08-07）
+
+“开局翻金＋庄家首摸＋下家补花/摸打” proposal 的 toy 测试现不再只检查事件总概率：对每个采样 world 用其
+`p/q` 加权后，暗手和翻金后墙尾的边缘分布均须与标记物理牌穷举 posterior 一致。另新增“开局翻金＋首个
+吃/碰/明杠所需初始暗手”的联合 proposal；当 claim 后立即弃牌时，弃牌面也作为同一初始手牌多重集约束。
+两个条件都在独立可枚举小牌墙上通过总归一化和加权后验边缘回归，因而不存在用 tile swap 或合法性过滤冒充
+密度的步骤。
+
+审计现在分开报告 structural ESS（只有显式 `p/q`）和 total ESS（再乘冻结策略行为似然）。固定 core `seed=271`、
+256 粒子、audit RNG `202608504` 的“一次对手摸打”前缀为 256/256 结构重放，structural ESS **248.76/256
+(97.2%)**，但 total ESS **15.28/256 (6.0%)**。这证明该窄 proposal 的密度本身并非主要退化来源，低 ESS 来自
+公开动作选择的行为相容性。
+
+固定 core `seed=2` 的首个 opening claim 在 256 粒子、audit RNG `202608505` 下为 255/256 接受，structural ESS
+**246.33/255 (96.6%)**、total ESS **187.88/255 (73.7%)**；它只覆盖“本家首弃→他家 claim”的两动作前缀，尚不构成
+可采集 belief。将同一 prefix 只延长一条 claimant 的公开弃牌（RNG `202608506`）后，虽对已接受 32 个粒子仍有
+structural ESS **30.29/32 (94.7%)**，却只有 **32/256** 重放成功；其余 224 个为 `public_event_mismatch`，total ESS
+**11.94/32**。这不是继续加摸牌/花牌结构约束能解决的问题，而是必须构造对公开**决策**相容的 proposal。
+
+因此该路径继续停留在 audit：不接入 SMC、collector、Q、训练或网页。下一项研究必须先为行为相容的隐藏手牌
+proposal 给出可计算密度与 toy exact posterior；不能对确定性 Teacher 的“选中动作”直接 rejection 后把未知接受率
+当作 `p/q`，也不能以这三个短前缀的高 structural ESS 声称已得到全历史 posterior。
+
 ### Teacher 单点干预 response 数据（当前因果来源）
 
 run4-based response outcome ensemble 已被全新实战否决，不能再把 run4 作为改善 Teacher 的桥梁。collector 现支持

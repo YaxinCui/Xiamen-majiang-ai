@@ -684,3 +684,19 @@ outcome 成员在 validation 的 score MAE 为 31.52–32.40 分，零预测为 
 3 个，最终 ESS **2.86**。两条路径都因后续事件在 proposal world 中结构不一致而全粒子失败。故软化行为 likelihood
 没有改善、也不能修复提议分布；不提交到 SMC collector/Q/网页。下一阶段必须先改进带已知密度、可枚举 toy posterior
 校准的结构 proposal，而不是继续训练代理或调温度。
+
+## 2026-08-07：opening claim 精确 proposal 与行为相容性诊断
+
+加强了 opening-aware structural proposal 的证据门槛：微型标记物理牌墙不只验证 `P(事件)`，还穷举目标 posterior，
+并确认 proposal 的逐粒子 `p/q` 加权后能恢复暗手和翻金后墙位的边缘分布。该检查覆盖首个 claim 所需初始暗手，
+以及 claim 后立即弃牌所需的联合初始手牌多重集；所有测试只在内存运行，不导出暗牌或墙。
+
+新的 audit 将 structural ESS 与包含行为似然的 total ESS 分开。core `seed=271`、256 粒子、RNG `202608504` 的
+opening→首次对手摸打为 256/256 接受，structural ESS **248.76/256**，total ESS **15.28/256**；旧总 ESS 的低值不应
+再误读为该 `p/q` 的退化。core `seed=2`、256 粒子、RNG `202608505` 的 opening→claim 为 255/256 接受，structural
+ESS **246.33/255**、total ESS **187.88/255**，但覆盖范围仅两条动作。
+
+同一 core 局把精确初始手牌条件延长到 claimant 的下一次弃牌（RNG `202608506`）后，只有 **32/256** replay 接受，
+224 个因 `public_event_mismatch` 拒绝；已接受粒子的 structural ESS **30.29/32**，total ESS **11.94/32**。结论：
+后续主要问题是公共动作选择的隐藏手牌相容性，而不是花牌、翻金或弃牌可行性的普通结构约束。此 audit 没有进入
+SMC、collector、动作价值、训练或网页；对确定性 Teacher 动作做未归一化 rejection 不是合法的下一步。
