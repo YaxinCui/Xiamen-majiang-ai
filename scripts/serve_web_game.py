@@ -28,6 +28,14 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--human-log-purpose",
+        choices=("training", "evaluation"),
+        help=(
+            "人类记录的不可混用用途。training 只可经人工批准后用于模仿；"
+            "evaluation 永远不能进入训练，只用于独立真人对局审计。"
+        ),
+    )
+    parser.add_argument(
         "--ai-checkpoint",
         type=Path,
         help=(
@@ -42,6 +50,10 @@ def main() -> None:
         help="--ai-checkpoint 的推理设备",
     )
     args = parser.parse_args()
+    if args.human_log is None and args.human_log_purpose is not None:
+        parser.error("--human-log-purpose 必须与 --human-log 一起使用")
+    if args.human_log is not None and args.human_log_purpose is None:
+        parser.error("启用 --human-log 时必须指定 --human-log-purpose")
     ai_agent = None
     ai_profile = "heuristic_teacher"
     ai_identity = "heuristic_teacher"
@@ -61,6 +73,7 @@ def main() -> None:
         args.host,
         args.port,
         human_log=args.human_log,
+        human_recording_purpose=args.human_log_purpose,
         ai_agent=ai_agent,
         ai_profile=ai_profile,
         ai_identity=ai_identity,

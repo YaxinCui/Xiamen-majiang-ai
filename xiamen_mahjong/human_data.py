@@ -25,6 +25,7 @@ _FORBIDDEN_PRIVATE_KEYS = {
 }
 HUMAN_SPLIT_VERSION = "xiamen-local-human-hand-split-v1"
 _HUMAN_SPLIT_SALT = "xiamen-local-human-hand-split-v1"
+_RECORDING_PURPOSES = frozenset({"training", "evaluation"})
 
 
 def _private_key_paths(value: Any, *, prefix: str = "") -> list[str]:
@@ -61,6 +62,8 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
         issues.append("collector_not_local_human_opt_in")
     if metadata.get("training_default") != "excluded_until_separate_quality_review":
         issues.append("missing_training_isolation_marker")
+    if metadata.get("recording_purpose") not in _RECORDING_PURPOSES:
+        issues.append("missing_or_invalid_recording_purpose")
     if not isinstance(metadata.get("opponent_policy"), str):
         issues.append("missing_opponent_policy_identity")
     if trajectory.seed is not None or any(
@@ -78,6 +81,8 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
         and all(isinstance(score, (int, float)) and not isinstance(score, bool) for score in scores)
     ):
         issues.append("non_numeric_score_delta")
+    elif not math.isclose(sum(float(score) for score in scores), 0.0, abs_tol=1e-9):
+        issues.append("non_zero_sum_score_delta")
     if not trajectory.decisions:
         issues.append("no_human_decisions")
     for decision in trajectory.decisions:
@@ -126,6 +131,7 @@ def audit_local_human_trajectories(
     profiles: Counter[str] = Counter()
     rules_versions: Counter[str] = Counter()
     opponent_policies: Counter[str] = Counter()
+    recording_purposes: Counter[str] = Counter()
     action_counts: Counter[str] = Counter()
     human_scores: list[float] = []
     human_wins = 0
@@ -141,6 +147,7 @@ def audit_local_human_trajectories(
         profiles[trajectory.profile] += 1
         rules_versions[trajectory.rules_version] += 1
         opponent_policies[str(trajectory.source_metadata["opponent_policy"])] += 1
+        recording_purposes[str(trajectory.source_metadata["recording_purpose"])] += 1
         action_counts.update(decision.chosen_action.kind for decision in trajectory.decisions)
         scores = trajectory.outcome["scores"]
         human_scores.append(float(scores[0]))
@@ -158,6 +165,8 @@ def audit_local_human_trajectories(
         gate_reasons.append("mixed_rule_profiles")
     if len(opponent_policies) != 1:
         gate_reasons.append("mixed_opponent_policies")
+    if len(recording_purposes) != 1:
+        gate_reasons.append("mixed_recording_purposes")
     human_score_mean = sum(human_scores) / len(human_scores) if human_scores else None
     human_score_stderr = (
         math.sqrt(
@@ -178,6 +187,7 @@ def audit_local_human_trajectories(
         "rule_profiles": dict(sorted(profiles.items())),
         "rules_versions": dict(sorted(rules_versions.items())),
         "opponent_policies": dict(sorted(opponent_policies.items())),
+        "recording_purposes": dict(sorted(recording_purposes.items())),
         "human_action_counts": dict(sorted(action_counts.items())),
         "human_match_summary": {
             "scope": "structurally_valid_completed_hands_only",
@@ -236,6 +246,8 @@ def require_local_human_training_approval(
     if not audit["ready_for_manual_review"]:
         reasons = ", ".join(str(item) for item in audit["gate_reasons"])
         raise ValueError("本地人类轨迹未通过训练前结构门槛：" + reasons)
+    if set(audit["recording_purposes"]) != {"training"}:
+        raise ValueError("独立真人评测记录不得用于训练；训练输入必须全部标记为 training")
     return {
         "source": "local_human_opt_in",
         "manual_training_approval": True,
@@ -269,6 +281,8 @@ def split_local_human_trajectories(
     if not audit["ready_for_manual_review"]:
         reasons = ", ".join(str(item) for item in audit["gate_reasons"])
         raise ValueError("人类轨迹未通过切分前结构门槛：" + reasons)
+    if set(audit["recording_purposes"]) != {"training"}:
+        raise ValueError("独立真人评测记录不得切分为训练数据")
 
     trajectories: list[TrainingTrajectory] = []
     for path in files:
@@ -308,4 +322,50 @@ def split_local_human_trajectories(
             split: len(group_sets[split]) for split in partitions
         },
         "split_group_overlap": 0,
+    }
+
+
+def audit_local_human_evaluation(
+    paths: Iterable[str | Path],
+    *,
+    minimum_hands: int = 200,
+) -> dict[str, Any]:
+    """Audit an evaluation-only human-versus-fixed-AI match corpus.
+
+    The browser records one human at seat zero and three copies of one frozen
+    AI identity.  The AI-side score is therefore the negation of the human
+    hand score.  This routine reports a conservative normal-approximation
+    lower bound for that *specific local match corpus*.  It deliberately does
+    not claim population-level human strength or authorize a deployment: the
+    recording purpose only makes leakage into this project's trainers fail
+    closed; participant quality and recruitment still require manual review.
+    """
+
+    audit = audit_local_human_trajectories(paths, minimum_hands=minimum_hands)
+    gate_reasons = list(audit["gate_reasons"])
+    if set(audit["recording_purposes"]) != {"evaluation"}:
+        gate_reasons.append("records_are_not_evaluation_only")
+    summary = audit["human_match_summary"]
+    human_mean = summary["human_score_delta_mean"]
+    human_high = summary["human_score_delta_95pct_high"]
+    ai_mean = -float(human_mean) if human_mean is not None else None
+    ai_low = -float(human_high) if human_high is not None else None
+    return {
+        "status": "local_human_evaluation_audit_only",
+        "source": "local_human_opt_in",
+        "audit": audit,
+        "comparison": {
+            "scope": "one_human_seat_vs_three_copies_of_one_fixed_ai_identity",
+            "ai_side_score_delta_mean": ai_mean,
+            "ai_side_score_delta_95pct_low": ai_low,
+            "positive_ai_side_lcb": ai_low is not None and ai_low > 0.0,
+        },
+        "ready_for_manual_human_strength_review": not gate_reasons,
+        "gate_reasons": gate_reasons,
+        "warning": (
+            "This is an evaluation-only local match audit, not a claim that an AI "
+            "beats humans generally. Before any such claim, manually verify consent, "
+            "participant recruitment/skill, frozen AI identity, and that these hands "
+            "were never read for training or model selection."
+        ),
     }

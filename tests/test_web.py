@@ -8,6 +8,7 @@ from urllib.request import Request, urlopen
 
 from xiamen_mahjong.agents import HeuristicTeacherAgent
 from xiamen_mahjong.human_data import (
+    audit_local_human_evaluation,
     audit_local_human_trajectories,
     require_local_human_training_approval,
     split_local_human_trajectories,
@@ -110,6 +111,7 @@ class WebTests(unittest.TestCase):
             output = Path(directory) / "human.jsonl"
             store = GameStore(
                 human_log=output,
+                human_recording_purpose="training",
                 ai_agent=HeuristicTeacherAgent(),
                 ai_profile="explicit_test_checkpoint",
                 ai_identity="sha256:test",
@@ -144,6 +146,7 @@ class WebTests(unittest.TestCase):
                 record["source_metadata"]["training_default"],
                 "excluded_until_separate_quality_review",
             )
+            self.assertEqual(record["source_metadata"]["recording_purpose"], "training")
             self.assertEqual(
                 record["source_metadata"]["opponent_policy"],
                 "sha256:test",
@@ -166,6 +169,7 @@ class WebTests(unittest.TestCase):
             self.assertTrue(audit["ready_for_manual_review"])
             self.assertEqual(audit["valid_hands"], 1)
             self.assertEqual(audit["opponent_policies"], {"sha256:test": 1})
+            self.assertEqual(audit["recording_purposes"], {"training": 1})
             summary = audit["human_match_summary"]
             self.assertEqual(summary["scope"], "structurally_valid_completed_hands_only")
             self.assertEqual(summary["hands"], 1)
@@ -240,6 +244,40 @@ class WebTests(unittest.TestCase):
             self.assertFalse(split_group_sets["train"] & split_group_sets["validation"])
             self.assertFalse(split_group_sets["train"] & split_group_sets["test"])
             self.assertFalse(split_group_sets["validation"] & split_group_sets["test"])
+
+            # A frozen-AI human benchmark must be recorded evaluation-only;
+            # this purpose is rejected by both training approval and the
+            # hand splitter, but may be summarized by the strength auditor.
+            evaluation_input = Path(directory) / "evaluation-input.jsonl"
+            evaluation_rows = []
+            for index in range(100):
+                evaluation_record = json.loads(json.dumps(record))
+                evaluation_record["trajectory_id"] = f"human-evaluation-{index}"
+                evaluation_record["split_group_id"] = f"evaluation-group-{index}"
+                evaluation_record["hand_number"] = index + 1
+                evaluation_record["source_metadata"]["recording_purpose"] = "evaluation"
+                evaluation_record["outcome"]["scores"] = [-16, 6, 5, 5]
+                evaluation_rows.append(json.dumps(evaluation_record, ensure_ascii=False))
+            evaluation_input.write_text(
+                "\n".join(evaluation_rows) + "\n", encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, "不得用于训练"):
+                require_local_human_training_approval(
+                    [evaluation_input], manually_approved=True, minimum_hands=100
+                )
+            with self.assertRaisesRegex(ValueError, "不得切分为训练数据"):
+                split_local_human_trajectories([evaluation_input], minimum_hands=100)
+            evaluation = audit_local_human_evaluation(
+                [evaluation_input], minimum_hands=100
+            )
+            self.assertTrue(evaluation["ready_for_manual_human_strength_review"])
+            self.assertEqual(
+                evaluation["comparison"]["ai_side_score_delta_mean"], 16.0
+            )
+            self.assertEqual(
+                evaluation["comparison"]["ai_side_score_delta_95pct_low"], 16.0
+            )
+            self.assertTrue(evaluation["comparison"]["positive_ai_side_lcb"])
 
 
 if __name__ == "__main__":

@@ -37,16 +37,25 @@ class GameStore:
         self,
         *,
         human_log: str | Path | None = None,
+        human_recording_purpose: str | None = None,
         ai_agent: Any | None = None,
         ai_profile: str = "heuristic_teacher",
         ai_identity: str | None = None,
     ) -> None:
+        valid_purposes = {"training", "evaluation"}
+        if human_log is None and human_recording_purpose is not None:
+            raise ValueError("未启用 --human-log 时不能指定人类记录用途")
+        if human_log is not None and human_recording_purpose not in valid_purposes:
+            raise ValueError(
+                "启用人类记录时必须明确指定用途：training 或 evaluation"
+            )
         self.lock = threading.Lock()
         self.rules_profile = "classic"
         self._ai_agent = ai_agent
         self._ai_profile = ai_profile
         self._ai_identity = ai_identity or ai_profile
         self._human_log = Path(human_log) if human_log is not None else None
+        self._human_recording_purpose = human_recording_purpose
         self._human_decisions: list[TeacherDecision] = []
         self._human_hand_written = False
         self._human_log_error = False
@@ -71,6 +80,7 @@ class GameStore:
         state["ai_profile"] = self._ai_profile
         state["local_human_recording"] = {
             "enabled": self._human_log is not None,
+            "purpose": self._human_recording_purpose,
             "pending_decisions": len(self._human_decisions),
             "completed_hand_written": self._human_hand_written,
             "write_failed": self._human_log_error,
@@ -136,6 +146,11 @@ class GameStore:
                 "recording_scope": "actor_visible_state_and_public_outcome_only",
                 "behavior_label": "executed_human_action",
                 "training_default": "excluded_until_separate_quality_review",
+                # This purpose is chosen when recording starts, not inferred
+                # later from a filename.  It prevents evaluation hands from
+                # entering the behavioral-imitation path and lets the human
+                # benchmark require an explicit independent source.
+                "recording_purpose": self._human_recording_purpose,
                 "opponent_policy": self._ai_identity,
             },
         )
@@ -324,12 +339,14 @@ def serve(
     port: int = 8765,
     *,
     human_log: str | Path | None = None,
+    human_recording_purpose: str | None = None,
     ai_agent: Any | None = None,
     ai_profile: str = "heuristic_teacher",
     ai_identity: str | None = None,
 ) -> None:
     store = GameStore(
         human_log=human_log,
+        human_recording_purpose=human_recording_purpose,
         ai_agent=ai_agent,
         ai_profile=ai_profile,
         ai_identity=ai_identity,

@@ -23,13 +23,18 @@ python3 scripts/serve_web_game.py --host 127.0.0.1 --port 8765
 
 ```bash
 python3 scripts/serve_web_game.py \
-  --human-log local_human_data/my-play.jsonl
+  --human-log local_human_data/my-training-play.jsonl \
+  --human-log-purpose training
 ```
 
 仅在一局结束后记录：玩家本人可见的手牌与公开状态、当时全部合法动作、实际选择和最终公开结算。
 不保存牌墙顺序、三家暗手、随机种子、账号或网络标识；`local_human_data/` 默认被 Git 忽略，也不会自动
 混入 Teacher/DAgger 训练。人类数据必须先按牌局切分、检查规则档位和质量，并在独立人类留出局上验证，才可
 作为新的训练来源。
+
+`--human-log-purpose` 是强制的来源契约，不能事后靠文件名推断：`training` 只表示可在人工复核后申请用于
+行为模仿；`evaluation` 表示独立强度评测，训练器和切分器会直接拒绝它。两种用途必须写入不同的本地 JSONL，
+不能混合。
 
 若要让人类玩家与某个实验 checkpoint 对局，必须显式指定它；没有该参数时仍是 Teacher。网页会显示
 “EXPLICIT EXPERIMENTAL CHECKPOINT”，避免把未通过离线门槛的模型误认为默认版本：
@@ -38,7 +43,8 @@ python3 scripts/serve_web_game.py \
 .venv/bin/python scripts/serve_web_game.py \
   --ai-checkpoint artifacts/policy-value-classic-v1-run3/policy-value.pt \
   --ai-device cpu \
-  --human-log local_human_data/run3-vs-human.jsonl
+  --human-log local_human_data/run3-vs-human-evaluation.jsonl \
+  --human-log-purpose evaluation
 ```
 
 这只是受控试玩和数据采集路径，不构成该 checkpoint 胜过人类的证据。run3 仅是历史实验 checkpoint：其后续
@@ -55,6 +61,19 @@ python3 scripts/audit_human_trajectories.py \
 审计会拒绝混合规则档位/对手版本、重复牌局、带重放种子或隐私字段的记录，并对结构合格牌局汇总人类本局
 平均分差、标准误、正态近似 95% 区间、胡率和流局率。即使结构审计通过，也只表示可以进行人工质量评审；
 这些描述性统计不等同于人类强度结论。要声称对人类变强，仍须使用从未用于训练或调参的真人对局留出集。
+
+对于已冻结、已知 SHA-256 身份的候选 AI，只能用 `evaluation` 记录器收集**从未进入训练或选模**的真人局，
+再运行独立只读审计：
+
+```bash
+python3 scripts/audit_human_match_strength.py \
+  --input local_human_data/frozen-ai-human-evaluation.jsonl \
+  --minimum-hands 200
+```
+
+报告的是“一名真人座位对三份同一 AI”的 AI 方分差及其正态近似 95% 下界。下界为正也只解锁人工复核：仍需验证
+参与者同意、招募范围和水平、AI 身份在全程冻结，以及这些局从未用于训练、early stop 或选模，才可能作为
+“胜过该真人评测群体”的证据；它不自动证明胜过一般人类。
 
 审计通过后，用下列命令把**完整牌局**稳定拆成互不重叠的 train / validation / test。输出被限制在
 Git 忽略的 `local_human_data/` 下，已存在的输出默认拒绝覆盖：
