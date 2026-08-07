@@ -15,6 +15,8 @@
 - [更强 AI 训练方案](training_program.md)：从现有规则 Teacher 基线到自博弈
   强化学习的分阶段训练和验收标准。
 - [训练实验日志](experiment_log.md)：已运行实验、独立评测与淘汰结论。
+- [外部项目迁移审计](external_transfer_audit_2026-08.md)：对指定抚州／南城项目的
+  规则、许可证和可迁移工程方法的边界结论。
 - [厦门规则调研](../RULES_RESEARCH.md)：当前经典规则档位的来源和实现边界。
 
 ## 使用准则
