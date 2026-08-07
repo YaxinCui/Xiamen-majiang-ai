@@ -897,3 +897,22 @@ checkpoint 挑选。训练共生成 2,048 个候选席对局；只审计 final i
 复用该 selection/terminal 墙。checkpoint 和原始报告只留在本地 ignored artifact，不上传为模型参数，也不接入网页。
 下一步必须先建立一个可独立审计的强启动信号（经质量审计的人类对局，或新的、带独立强度证据的规则/搜索教师），而不是
 重复纯随机 PPO。
+
+## 2026-08-07：Teacher-anchored residual self-play v1-b（selection 拒绝，terminal 未读）
+
+为避免 fresh PPO v1-a 的随机 actor 灾难性退化，新候选不继承任何历史权重：candidate-MLP 由
+`seed=202611950` 初始化且 policy head 全零。每个合法集合中，冻结 `HeuristicTeacherAgent` 推荐动作固定加 prior
+logit 0，其余动作为 −5；因此残差为零时 deterministic policy 严格等于 Teacher。prior 只由本家／公开信息生成，并
+同时记录在 PPO 行为 step、重放到 update 和 current-snapshot 对手，防止训练/推理不一致。训练固定为 classic
+8×256 candidate-seat episodes、PPO epoch 2、Teacher/snapshot=0.5/0.5、无历史 checkpoint、无 oracle critic。
+
+最终 iteration-8 residual 只在 wrapper margin=5 下评测 classic `seed=202612900` 起 80 个物理墙、四座轮换。结果是
+**严格零差异**：candidate 与 Teacher 均为 80/320 胜、0 流局、总分 0，paired mean/stderr/95% 下界均为 **0**。这说明
+在固定训练预算和安全余量下，任何 learned residual 都没有跨过 deterministic Teacher 的排序边界；它既没有退化，也
+没有可证明提升。严格门槛要求下界 >0，故状态 `selection_rejected_terminal_unread`，`seed=202613100` 起 320 墙
+terminal 未读。
+
+该固定 margin/预算/最终 checkpoint 整体拒绝：不在 selection 墙上降低 margin、增加 iteration、减少 entropy、挑选
+中间 checkpoint 或改变 teacher/snapshot 比例；不上传该 residual 参数，不接入网页。与 v1-a 合并的证据表明，当前
+仅靠终局 PPO 一端要么远离 Teacher（随机 actor），要么因安全锚定而没有可见政策改动。下一阶段不能继续微调这两条
+PPO 族；需要经审计的人类数据，或一个独立验证过的更强搜索／规则教师来提供启动与探索信号。
