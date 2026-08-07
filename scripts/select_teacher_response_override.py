@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Choose a pre-registered one-response override, then audit it once.
+"""Choose a pre-registered one-phase override, then audit it once.
 
 Candidate thresholds are compared only on ``--selection-data``.  If none
 passes the grouped IPS/DR gate, the script intentionally never reads
 ``--terminal-data``.  If one does pass, the deterministic winner is evaluated
-once on terminal wall groups.  This still estimates one Teacher response
+once on terminal wall groups.  This still estimates one Teacher phase
 override followed by a Teacher suffix, not a full Mahjong policy.
 """
 
@@ -42,6 +42,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--value-scale", type=float, default=80.0)
     parser.add_argument("--minimum-effective-sample-size", type=float, default=30.0)
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument(
+        "--intervention-phase",
+        choices=("discard", "response"),
+        default="response",
+        help="必须与训练 outcome 模型和 selection/terminal 轨迹的 collector phase 一致",
+    )
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -96,6 +102,7 @@ def audit_one(
     score_lcb_z: float,
     minimum_lcb_advantage: float,
     minimum_effective_sample_size: float,
+    intervention_phase: str = "response",
 ) -> dict[str, Any]:
     observations, target_kinds, scanned = selected_interventions(
         (data,),
@@ -103,12 +110,14 @@ def audit_one(
         value_scale=value_scale,
         score_lcb_z=score_lcb_z,
         minimum_lcb_advantage=minimum_lcb_advantage,
+        intervention_phase=intervention_phase,
     )
     estimates = intervention_estimates(observations)
     return {
         "minimum_lcb_advantage": minimum_lcb_advantage,
+        "intervention_phase": intervention_phase,
         "scanned_candidate_decisions": scanned,
-        "randomized_response_interventions": len(observations),
+        "randomized_interventions": len(observations),
         "target_action_kinds": dict(sorted(target_kinds.items())),
         "estimates": estimates,
         "gate": gate_summary(
@@ -143,6 +152,7 @@ def main() -> None:
             score_lcb_z=args.score_lcb_z,
             minimum_lcb_advantage=threshold,
             minimum_effective_sample_size=args.minimum_effective_sample_size,
+            intervention_phase=args.intervention_phase,
         )
         for threshold in thresholds
     ]
@@ -153,7 +163,8 @@ def main() -> None:
         "inference_device": args.device,
         "protocol": {
             "base": "heuristic_teacher",
-            "policy": "one response override followed by Teacher suffix",
+            "intervention_phase": args.intervention_phase,
+            "policy": f"one {args.intervention_phase} override followed by Teacher suffix",
             "score_lcb_z": args.score_lcb_z,
             "pre_registered_minimum_lcb_advantages": thresholds,
             "selection_data": str(args.selection_data),
@@ -177,6 +188,7 @@ def main() -> None:
             score_lcb_z=args.score_lcb_z,
             minimum_lcb_advantage=float(chosen["minimum_lcb_advantage"]),
             minimum_effective_sample_size=args.minimum_effective_sample_size,
+            intervention_phase=args.intervention_phase,
         )
         payload.update(
             {

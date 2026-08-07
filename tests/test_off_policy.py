@@ -8,6 +8,7 @@ from xiamen_mahjong.off_policy import (
     ips_delta,
 )
 from scripts.audit_teacher_response_intervention_ope import (
+    selected_interventions,
     teacher_epsilon_propensities,
 )
 from scripts.train_afterstate_outcomes import initial_agent_for_outcome_training
@@ -101,6 +102,17 @@ class OffPolicyTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "随机化"):
             teacher_epsilon_propensities(action_count=2, teacher_index=0, epsilon=0.0)
+
+    def test_single_intervention_audit_rejects_unknown_phase(self):
+        with self.assertRaisesRegex(ValueError, "intervention_phase"):
+            selected_interventions(
+                (),
+                (),
+                value_scale=80.0,
+                score_lcb_z=1.0,
+                minimum_lcb_advantage=0.0,
+                intervention_phase="all",
+            )
 
     def test_fresh_outcome_anchors_are_reproducible_without_a_checkpoint(self):
         from types import SimpleNamespace

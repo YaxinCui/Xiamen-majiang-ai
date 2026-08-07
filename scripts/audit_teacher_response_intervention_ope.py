@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Audit a one-response Teacher override with grouped IPS and DR estimates.
+"""Audit a one-phase Teacher override with grouped IPS and DR estimates.
 
 The input must be held-out trajectories collected with
 ``collect_candidate_teacher_dagger_trajectories.py --teacher-base``.  Every
-accepted row has exactly one randomized response action and then returns to
+accepted row has exactly one randomized action in the requested phase and then returns to
 the frozen Teacher.  The estimate therefore covers *one* possible override,
 not a policy that changes every response in a hand.
 """
@@ -45,6 +45,14 @@ def parse_args() -> argparse.Namespace:
         help="仅输入从 outcome checkpoint 训练墙隔离的 intervention test JSONL",
     )
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    parser.add_argument(
+        "--intervention-phase",
+        choices=("discard", "response"),
+        default="response",
+        help=(
+            "只审计该 collector phase 的单点干预；输入 manifest 中的 phase 必须严格一致。"
+        ),
+    )
     parser.add_argument("--value-scale", type=float, default=80.0)
     parser.add_argument("--score-lcb-z", type=float, default=1.0)
     parser.add_argument(
@@ -149,9 +157,12 @@ def selected_interventions(
     value_scale: float,
     score_lcb_z: float,
     minimum_lcb_advantage: float,
+    intervention_phase: str = "response",
 ) -> tuple[list[LoggedIntervention], Counter[str], int]:
     """Build OPE rows while validating the Teacher intervention contract."""
 
+    if intervention_phase not in {"discard", "response"}:
+        raise ValueError("OPE intervention_phase 必须是 discard 或 response")
     observations: list[LoggedIntervention] = []
     target_kinds: Counter[str] = Counter()
     scanned = 0
@@ -162,6 +173,8 @@ def selected_interventions(
                 raise ValueError("OPE 输入不是单点 epsilon 干预轨迹")
             if metadata.get("base_policy") != "heuristic_teacher":
                 raise ValueError("此评测器只接受 --teacher-base 收集的轨迹")
+            if metadata.get("intervention_phase") != intervention_phase:
+                raise ValueError("干预数据 phase 与 OPE 请求不一致")
             epsilon = metadata.get("uniform_exploration_probability")
             if isinstance(epsilon, bool) or not isinstance(epsilon, (int, float)):
                 raise ValueError("Teacher 干预轨迹缺少 epsilon")
@@ -172,7 +185,7 @@ def selected_interventions(
                 raise ValueError("Teacher 干预轨迹缺少按物理墙隔离的 split_group_id")
             for decision in trajectory.decisions:
                 scanned += 1
-                if decision.state.get("phase") != "response":
+                if decision.state.get("phase") != intervention_phase:
                     continue
                 if (
                     decision.executed_index is None
@@ -233,6 +246,7 @@ def main() -> None:
         value_scale=args.value_scale,
         score_lcb_z=args.score_lcb_z,
         minimum_lcb_advantage=args.minimum_lcb_advantage,
+        intervention_phase=args.intervention_phase,
     )
     estimates = intervention_estimates(observations)
     ips = estimates["ips"]
@@ -249,19 +263,22 @@ def main() -> None:
         >= args.minimum_effective_sample_size
     )
     payload = {
-        "status": "audit_only_one_response_teacher_override",
+        "status": f"audit_only_one_{args.intervention_phase}_teacher_override",
         "outcome_checkpoints": [str(path) for path in args.outcome_checkpoint],
         "data": [str(path) for path in args.data],
         "inference_device": args.device,
         "candidate": {
             "base": "heuristic_teacher",
             "target": "max_afterstate_score_lcb_or_teacher",
+            "intervention_phase": args.intervention_phase,
             "score_lcb_z": args.score_lcb_z,
             "minimum_lcb_advantage": args.minimum_lcb_advantage,
-            "protocol": "one randomized response position; Teacher before and after",
+            "protocol": (
+                f"one randomized {args.intervention_phase} position; Teacher before and after"
+            ),
         },
         "scanned_candidate_decisions": scanned,
-        "randomized_response_interventions": len(observations),
+        "randomized_interventions": len(observations),
         "target_action_kinds": dict(sorted(target_kinds.items())),
         "estimates": estimates,
         "ready_for_single_override_game_screen": ready,
@@ -270,7 +287,7 @@ def main() -> None:
             "minimum_effective_sample_size_per_side": args.minimum_effective_sample_size,
         },
         "warning": (
-            "This estimate identifies only one response replacement followed by the "
+            "This estimate identifies only one phase-matched replacement followed by the "
             "same Teacher suffix under the logged intervention protocol. It is not "
             "evidence for a policy that changes multiple decisions, browser deployment, "
             "or strength against humans. Outcome checkpoints must be trained without "
