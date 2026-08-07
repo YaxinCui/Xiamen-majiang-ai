@@ -174,3 +174,27 @@ terminal。不能因为 DR target 在代数上无偏，就跳过 finite-sample O
 个物理牌墙产生相同的可复放反事实结果；每动作至少 8 个 belief world，报告吞吐、ESS、
 均值/方差、分位数，以及物理牌墙切分的 Q 排序。若 Q 排序和配对实战均无改善，停止 AWR/PPO，
 优先排查过滤器校准和 Teacher/对手混合，而非继续调温度或网络宽度。
+
+## 2026-08-07：NFSP / 平均策略自博弈的准入结论
+
+[Heinrich 与 Silver 的 NFSP 原论文](https://arxiv.org/abs/1603.01121) 用“近似最佳响应网络 +
+reservoir 中的平均策略网络”替代单一不断变化的自博弈策略；在 Leduc 和限注德州扑克的**两人零和**实验中，
+它避免了普通 RL 的发散。官方研究框架 [OpenSpiel](https://github.com/google-deepmind/open_spiel) 支持多玩家、
+一般和及 NFSP/Deep CFR 等算法，但这表示接口覆盖，不表示四人厦门麻将可获得收敛或强度保证。一个 MIT 的
+[NFSP 复现项目](https://github.com/EricSteinberger/Neural-Fictitous-Self-Play) 也只在 PokerRL 的扑克环境中报告
+复现；不导入其代码、牌谱或权重。
+
+这条路线与已否决的 v1-a 不是同一个算法：若将来实施，平均策略必须由 reservoir 对“最佳响应模式”的
+actor-visible 决策进行监督，采样时每个玩家按预注册比例混合当前 best response 与冻结 average policy；
+平均策略与 best response 必须是独立网络和独立优化器，所有动作仍由厦门规则引擎掩码。评测只能使用
+average policy，并保持未读的 paired Teacher／异质联赛／真人留出门槛。
+
+**当前不实现、更不运行。** v1-a 已表明，从随机策略、只有稀疏终局净分的当前策略自博弈无法得到可竞争的行为。
+在此基础上加入 reservoir 只会平均无信息的随机动作，不能凭空形成强启动信号。NFSP 的重新准入需要同时满足：
+
+1. 至少一条经审计且与厦门 classic 一致的高质量行为来源（opt-in 真人训练牌局，或独立联赛通过的新 Teacher）；
+2. 行为来源与真人 terminal 评测记录的用途/整局切分严格隔离；
+3. 一个 fresh-only、预注册的 reservoir/BR 消融，在全新 core 墙上先证明不劣于同预算行为克隆，再进入 classic。
+
+因此 NFSP 被记录为“有条件的后续算法”，不是绕过数据与启动信号缺口的理由，也不得复用已拒绝 PPO、Teacher
+residual 或历史神经 checkpoint 的参数。
