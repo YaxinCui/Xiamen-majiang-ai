@@ -13,6 +13,7 @@ import json
 from pathlib import Path
 import random
 import sys
+from typing import Iterable
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -121,6 +122,41 @@ class SingleInterventionEpsilonBehavior:
         if action != self._last_action or self._last_probability is None:
             raise ValueError("action_probability 必须紧随同一行为策略动作调用")
         return self._last_probability
+
+
+def randomized_intervention_coverage(
+    trajectories: Iterable[object], *, intervention_phase: str
+) -> dict[str, int]:
+    """Return public coverage counts without exposing actions or outcomes.
+
+    The held-out manifest needs a way to enforce a pre-registered minimum
+    number of supported interventions while leaving terminal labels and action
+    summaries sealed.  This helper deliberately exports only counts grouped by
+    complete physical-wall ids.
+    """
+
+    if intervention_phase not in {"all", "discard", "response"}:
+        raise ValueError("intervention_phase 必须是 all、discard 或 response")
+    decision_count = 0
+    group_ids: set[str] = set()
+    for trajectory in trajectories:
+        decisions = getattr(trajectory, "decisions", ())
+        for decision in decisions:
+            phase = decision.state.get("phase")
+            probability = decision.executed_probability
+            if (
+                (intervention_phase == "all" or phase == intervention_phase)
+                and probability is not None
+                and probability < 1.0
+            ):
+                decision_count += 1
+                group_id = getattr(trajectory, "split_group_id", None)
+                if isinstance(group_id, str) and group_id:
+                    group_ids.add(group_id)
+    return {
+        "randomized_decisions": decision_count,
+        "wall_groups": len(group_ids),
+    }
 
 
 def parse_args() -> argparse.Namespace:
@@ -258,6 +294,9 @@ def main() -> None:
             "file": filename,
             "hands": write_trajectory_jsonl(records, args.output_dir / filename),
             "manifest": trajectory_manifest(records),
+            "randomized_intervention_coverage": randomized_intervention_coverage(
+                records, intervention_phase=args.intervention_phase
+            ),
         }
     if args.replay_index:
         write_trajectory_replay_index(trajectories, args.replay_index)
@@ -288,6 +327,9 @@ def main() -> None:
             "rotation_grouping": "all four candidate seats share one partition",
         },
         "dataset": trajectory_manifest(trajectories),
+        "randomized_intervention_coverage": randomized_intervention_coverage(
+            trajectories, intervention_phase=args.intervention_phase
+        ),
         "partitions": partition_reports,
     }
     (args.output_dir / "manifest.json").write_text(

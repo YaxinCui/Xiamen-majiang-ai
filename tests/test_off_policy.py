@@ -114,6 +114,37 @@ class OffPolicyTests(unittest.TestCase):
                 intervention_phase="all",
             )
 
+    def test_intervention_coverage_exposes_only_phase_count_and_wall_groups(self):
+        from types import SimpleNamespace
+
+        from scripts.collect_candidate_teacher_dagger_trajectories import (
+            randomized_intervention_coverage,
+        )
+
+        def decision(phase, probability):
+            return SimpleNamespace(
+                state={"phase": phase}, executed_probability=probability
+            )
+
+        rows = (
+            SimpleNamespace(
+                split_group_id="wall-a",
+                decisions=(decision("discard", 0.2), decision("response", 0.3)),
+            ),
+            SimpleNamespace(
+                split_group_id="wall-a",
+                decisions=(decision("discard", 1.0),),
+            ),
+            SimpleNamespace(
+                split_group_id="wall-b",
+                decisions=(decision("discard", 0.4),),
+            ),
+        )
+        self.assertEqual(
+            randomized_intervention_coverage(rows, intervention_phase="discard"),
+            {"randomized_decisions": 2, "wall_groups": 2},
+        )
+
     def test_fresh_outcome_anchors_are_reproducible_without_a_checkpoint(self):
         from types import SimpleNamespace
         import torch
