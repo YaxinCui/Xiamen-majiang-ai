@@ -1595,6 +1595,7 @@ class _OpeningInitialClaimDensityAudit:
     mean_accepted_log_likelihood: float | None
     rejection_counts: dict[str, int]
     includes_claimant_discard: bool
+    claimant_discard_tile_factor: float
 
     @property
     def acceptance_rate(self) -> float:
@@ -1635,6 +1636,11 @@ class _OpeningInitialClaimDensityAudit:
             "proposal": proposal,
             "proposal_density": proposal_density,
             "proposal_density_ratio": "per_particle_prior_over_proposal",
+            "claimant_discard_tile_factor": (
+                self.claimant_discard_tile_factor
+                if self.includes_claimant_discard
+                else None
+            ),
             "proposed_particles": self.proposed_particles,
             "initialized_particles": self.initialized_particles,
             "accepted_particles": self.accepted_particles,
@@ -2008,6 +2014,139 @@ def _sample_multivariate_hand_given_required_tiles(
     if remaining != 0:  # pragma: no cover - protected by constrained_ways
         raise RuntimeError("条件手牌采样没有填满目标槽位")
     return selected, valid_ways / all_ways
+
+
+def _sample_weighted_multivariate_hand_given_required_tiles(
+    pool: Counter[int],
+    *,
+    hand_size: int,
+    required_tiles: Sequence[int],
+    tile_weights: Mapping[int, float],
+    rng: random.Random,
+) -> tuple[list[int], float, float] | None:
+    """Sample a hand from an exactly normalized tile-factor proposal.
+
+    Let ``H`` be the unordered multivariate-hypergeometric hand from
+    ``pool`` and ``R`` be the event that it contains ``required_tiles``.  For
+    strictly positive face weights ``w[t]``, this samples
+
+    ``q(H) ∝ P(H | R) × product(w[t] ** count_H[t])``.
+
+    It returns ``(hand, P(R), P(H | R) / q(H))``.  The partition function is
+    evaluated by a small count dynamic program, so the correction is exact
+    rather than an acceptance-rate estimate.  This is a proposal primitive:
+    a future behavior-energy model may supply the weights, but its scores
+    never replace the frozen behavior likelihood or turn an unnormalized
+    Teacher-action rejection into a posterior claim.
+    """
+
+    if hand_size < 0:
+        raise ValueError("hand_size 不能为负数")
+    positive_pool = Counter({tile: count for tile, count in pool.items() if count > 0})
+    total = sum(positive_pool.values())
+    if hand_size > total:
+        return None
+    required = Counter(required_tiles)
+    if any(positive_pool[tile] < count for tile, count in required.items()):
+        return None
+    if sum(required.values()) > hand_size:
+        return None
+    values = tuple(sorted(positive_pool))
+    weights: dict[int, float] = {}
+    for tile in values:
+        weight = float(tile_weights.get(tile, 1.0))
+        if not math.isfinite(weight) or weight <= 0.0:
+            raise ValueError("tile_weights 必须为正且有限")
+        weights[tile] = weight
+    suffix_capacity = [0] * (len(values) + 1)
+    for index in range(len(values) - 1, -1, -1):
+        suffix_capacity[index] = suffix_capacity[index + 1] + positive_pool[
+            values[index]
+        ]
+    count_cache: dict[tuple[int, int], int] = {}
+    partition_cache: dict[tuple[int, int], float] = {}
+
+    def choose_weighted_count(options: Sequence[tuple[int, float]]) -> int:
+        total_weight = sum(weight for _count, weight in options)
+        if not math.isfinite(total_weight) or total_weight <= 0.0:
+            raise RuntimeError("加权条件手牌采样没有有效选项")
+        threshold = rng.random() * total_weight
+        cumulative = 0.0
+        for count, weight in options:
+            cumulative += weight
+            if threshold < cumulative:
+                return count
+        return options[-1][0]  # Floating-point roundoff at the upper edge.
+
+    def constrained_ways(index: int, remaining: int) -> int:
+        key = (index, remaining)
+        if key in count_cache:
+            return count_cache[key]
+        if remaining < 0 or remaining > suffix_capacity[index]:
+            return 0
+        if index == len(values):
+            return int(remaining == 0)
+        tile = values[index]
+        total_ways = sum(
+            math.comb(positive_pool[tile], count)
+            * constrained_ways(index + 1, remaining - count)
+            for count in range(
+                required[tile], min(positive_pool[tile], remaining) + 1
+            )
+        )
+        count_cache[key] = total_ways
+        return total_ways
+
+    def weighted_ways(index: int, remaining: int) -> float:
+        key = (index, remaining)
+        if key in partition_cache:
+            return partition_cache[key]
+        if remaining < 0 or remaining > suffix_capacity[index]:
+            return 0.0
+        if index == len(values):
+            return 1.0 if remaining == 0 else 0.0
+        tile = values[index]
+        total_weight = sum(
+            math.comb(positive_pool[tile], count)
+            * (weights[tile] ** count)
+            * weighted_ways(index + 1, remaining - count)
+            for count in range(
+                required[tile], min(positive_pool[tile], remaining) + 1
+            )
+        )
+        partition_cache[key] = total_weight
+        return total_weight
+
+    valid_ways = constrained_ways(0, hand_size)
+    partition = weighted_ways(0, hand_size)
+    if valid_ways <= 0 or not math.isfinite(partition) or partition <= 0.0:
+        return None
+    selected: list[int] = []
+    proposal_weight = 1.0
+    remaining = hand_size
+    for index, tile in enumerate(values):
+        options = [
+            (
+                count,
+                math.comb(positive_pool[tile], count)
+                * (weights[tile] ** count)
+                * weighted_ways(index + 1, remaining - count),
+            )
+            for count in range(
+                required[tile], min(positive_pool[tile], remaining) + 1)
+        ]
+        options = [(count, weight) for count, weight in options if weight > 0.0]
+        count = choose_weighted_count(options)
+        selected.extend([tile] * count)
+        proposal_weight *= weights[tile] ** count
+        remaining -= count
+    if remaining != 0:  # pragma: no cover - protected by weighted_ways
+        raise RuntimeError("加权条件手牌采样没有填满目标槽位")
+    return (
+        selected,
+        valid_ways / math.comb(total, hand_size),
+        partition / (valid_ways * proposal_weight),
+    )
 
 
 def _sample_structured_setup_given_normal_draw_flowers(
@@ -2451,6 +2590,7 @@ def _sample_structured_setup_given_opening_gold_and_initial_hand(
     claimant_index: int,
     required_claim_tiles: Sequence[int],
     rng: random.Random,
+    tile_factor_weights: Mapping[int, float] | None = None,
 ) -> _StructuredSetupDrawProposal | None:
     """Jointly condition the opening, gold flip and one initial claim hand.
 
@@ -2554,22 +2694,40 @@ def _sample_structured_setup_given_opening_gold_and_initial_hand(
         or start - prefix_length + 1 <= remaining_flower_count
     ):
         return None
-    conditioned_claim_hand = _sample_multivariate_hand_given_required_tiles(
-        Counter(
-            {
-                tile: count
-                for tile, count in remaining.items()
-                if is_base_tile(tile) and count > 0
-            }
-        ),
-        hand_size=opponent_hand_sizes[claimant_index],
-        required_tiles=required_claim_tiles,
-        rng=rng,
+    claim_hand_pool = Counter(
+        {
+            tile: count
+            for tile, count in remaining.items()
+            if is_base_tile(tile) and count > 0
+        }
     )
-    if conditioned_claim_hand is None:
-        return None
-    claimant_hand, claim_probability = conditioned_claim_hand
-    probability *= claim_probability
+    if tile_factor_weights is None:
+        conditioned_claim_hand = _sample_multivariate_hand_given_required_tiles(
+            claim_hand_pool,
+            hand_size=opponent_hand_sizes[claimant_index],
+            required_tiles=required_claim_tiles,
+            rng=rng,
+        )
+        if conditioned_claim_hand is None:
+            return None
+        claimant_hand, claim_probability = conditioned_claim_hand
+        conditional_prior_over_proposal = 1.0
+    else:
+        weighted_claim_hand = _sample_weighted_multivariate_hand_given_required_tiles(
+            claim_hand_pool,
+            hand_size=opponent_hand_sizes[claimant_index],
+            required_tiles=required_claim_tiles,
+            tile_weights=tile_factor_weights,
+            rng=rng,
+        )
+        if weighted_claim_hand is None:
+            return None
+        (
+            claimant_hand,
+            claim_probability,
+            conditional_prior_over_proposal,
+        ) = weighted_claim_hand
+    probability *= claim_probability * conditional_prior_over_proposal
     remaining.subtract(Counter(claimant_hand))
     if any(count < 0 for count in remaining.values()):
         return None  # pragma: no cover - protected by conditional sampler
@@ -3204,6 +3362,7 @@ def _sample_replay_setup_given_opening_and_initial_hand_constraint(
     claimant_seat: int,
     required_initial_tiles: Sequence[int],
     rng: random.Random,
+    tile_factor_weights: Mapping[int, float] | None = None,
 ) -> _SetupReplayProposal | None:
     """Reconstruct an opening particle for an exact initial-hand event.
 
@@ -3283,6 +3442,7 @@ def _sample_replay_setup_given_opening_and_initial_hand_constraint(
         claimant_index=claimant_index,
         required_claim_tiles=required_initial_tiles,
         rng=rng,
+        tile_factor_weights=tile_factor_weights,
     )
     if allocation is None or allocation.wall[:opening_prefix_size] != tuple(
         [*opening_flowers, opening_tile]
@@ -3335,6 +3495,7 @@ def _sample_replay_setup_given_opening_initial_claim_and_discard(
     snapshot: _CounterfactualDecisionSnapshot,
     *,
     rng: random.Random,
+    claimant_discard_tile_factor: float = 1.0,
 ) -> tuple[_SetupReplayProposal, int] | None:
     """Reconstruct the opening claim prefix through the claimant's discard."""
 
@@ -3342,11 +3503,19 @@ def _sample_replay_setup_given_opening_initial_claim_and_discard(
     if constraint is None:
         return None
     target_public_action_count, claimant_seat, required_initial_tiles = constraint
+    if (
+        not math.isfinite(claimant_discard_tile_factor)
+        or claimant_discard_tile_factor <= 0.0
+    ):
+        raise ValueError("claimant_discard_tile_factor 必须为正且有限")
     proposal = _sample_replay_setup_given_opening_and_initial_hand_constraint(
         snapshot,
         claimant_seat=claimant_seat,
         required_initial_tiles=required_initial_tiles,
         rng=rng,
+        tile_factor_weights={
+            required_initial_tiles[-1]: claimant_discard_tile_factor
+        },
     )
     return (
         (proposal, target_public_action_count)
@@ -4662,6 +4831,7 @@ def _initial_setup_response_claim_discard_constraint(
         return None
     _claim_target, claimant, claim_tiles = initial_claim
     source = snapshot.initial_game
+    trace = snapshot.actor_trace
     setup_count = len(source.public_actions)
     events = snapshot.game.public_actions
     if len(events) < setup_count + 3:
@@ -4674,6 +4844,26 @@ def _initial_setup_response_claim_discard_constraint(
         or not isinstance(discard_tile, int)
         or not is_base_tile(discard_tile)
     ):
+        return None
+    # Applying a discard with no possible response automatically consumes the
+    # following normal draw in the same engine transition.  Stopping before
+    # that draw would make a valid particle look like a public mismatch and,
+    # more importantly, would skip an unmodelled draw-flower density.  Keep
+    # this proposal to atomic boundaries only, just as the normal-draw prefix
+    # recognizer does below.
+    actor_discard = events[setup_count]
+    actor_discard_tile = actor_discard.get("tile")
+    if not isinstance(actor_discard_tile, int):
+        return None  # pragma: no cover - initial-claim recognizer guarded it
+    probe = copy.deepcopy(source)
+    try:
+        probe.players[trace.actor_seat].hand.remove(actor_discard_tile)
+    except ValueError:
+        return None
+    probe.wall = [0] * len(source.wall)
+    probe.last_discard = discard_tile
+    probe.discarder = claimant
+    if not probe._response_actions(trace.actor_seat):
         return None
     return setup_count + 3, claimant, (*claim_tiles, discard_tile)
 
@@ -4848,6 +5038,7 @@ def _audit_opening_initial_response_claim_density(
     behavior_temperature: float = 1.0,
     uniform_mixture: float = 0.02,
     include_claimant_discard: bool = False,
+    claimant_discard_tile_factor: float = 1.0,
 ) -> _OpeningInitialClaimDensityAudit:
     """Audit the opening-aware exact proposal for one immediate claim.
 
@@ -4859,6 +5050,13 @@ def _audit_opening_initial_response_claim_density(
 
     if particle_count <= 0:
         raise ValueError("particle_count 必须为正数")
+    if (
+        not math.isfinite(claimant_discard_tile_factor)
+        or claimant_discard_tile_factor <= 0.0
+    ):
+        raise ValueError("claimant_discard_tile_factor 必须为正且有限")
+    if not include_claimant_discard and claimant_discard_tile_factor != 1.0:
+        raise ValueError("claimant_discard_tile_factor 仅适用于 claim 后弃牌前缀")
     accepted_log_likelihoods: list[float] = []
     importance_weights: list[float] = []
     prior_over_proposals: list[float] = []
@@ -4869,6 +5067,7 @@ def _audit_opening_initial_response_claim_density(
             _sample_replay_setup_given_opening_initial_claim_and_discard(
                 snapshot,
                 rng=rng,
+                claimant_discard_tile_factor=claimant_discard_tile_factor,
             )
             if include_claimant_discard
             else _sample_replay_setup_given_opening_and_initial_response_claim(
@@ -4928,6 +5127,7 @@ def _audit_opening_initial_response_claim_density(
         ),
         rejection_counts=dict(sorted(rejection_counts.items())),
         includes_claimant_discard=include_claimant_discard,
+        claimant_discard_tile_factor=claimant_discard_tile_factor,
     )
 
 

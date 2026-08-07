@@ -696,7 +696,21 @@ opening→首次对手摸打为 256/256 接受，structural ESS **248.76/256**�
 再误读为该 `p/q` 的退化。core `seed=2`、256 粒子、RNG `202608505` 的 opening→claim 为 255/256 接受，structural
 ESS **246.33/255**、total ESS **187.88/255**，但覆盖范围仅两条动作。
 
-同一 core 局把精确初始手牌条件延长到 claimant 的下一次弃牌（RNG `202608506`）后，只有 **32/256** replay 接受，
-224 个因 `public_event_mismatch` 拒绝；已接受粒子的 structural ESS **30.29/32**，total ESS **11.94/32**。结论：
-后续主要问题是公共动作选择的隐藏手牌相容性，而不是花牌、翻金或弃牌可行性的普通结构约束。此 audit 没有进入
-SMC、collector、动作价值、训练或网页；对确定性 Teacher 动作做未归一化 rejection 不是合法的下一步。
+最初将同一 core `seed=2` 延长到 claimant 下一弃牌（RNG `202608506`）所见的 32/256 replay 接受已撤销为无效诊断：
+该弃牌无人可响应时，引擎会在同一 transition 自动产生下一 normal draw，旧代码在 draw 前停止导致 224 个
+`public_event_mismatch`。recognizer 现只接受弃牌后仍有 actor response option 的原子边界；不具备该条件者会在
+未建模下一 draw 的 density 前安全跳过。
+
+修正后，独立 core `seed=67`、256 粒子、RNG `202608507` 的 claim→discard 前缀为 **256/256** 接受，structural ESS
+**250.74/256**、total ESS **33.30/256**。因此这条更长 prefix 的低 total ESS 确为行为 likelihood 退化，而非事件边界
+错误。该 audit 仍没有进入 SMC、collector、动作价值、训练或网页；对确定性 Teacher 动作做未归一化 rejection 仍不是
+合法的下一步。
+
+为探索同时保留归一化的行为导向 proposal，新增 tile-factor 条件多元超几何 sampler：每种面额的正权重用 count-DP
+精确归一化，返回条件 event 概率和 conditional `p/q`；toy 后验测试确认重要性加权可还原原始超几何分布。它只是一个
+数学 primitive，不是行为模型。
+
+在打开结果前固定 factor `{1, 1.5, 2, 3}`，只提高 claim 后公开弃牌面额的额外副本权重；墙组为 core `67,139,201,275`，
+每个 factor/墙 256 粒子。平均 structural ESS fraction 为 **0.9787、0.9655、0.9441、0.8801**；平均 total ESS
+fraction 为 **0.1334、0.1399、0.1252、0.0979**。所有候选都有远低于 20% 的单墙 total ESS，故此 tile-only family
+整体失败；1.5 的小幅同组差异不用于选择或二次调参。没有生成训练数据、模型参数或网页行为。

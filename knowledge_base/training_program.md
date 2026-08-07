@@ -141,9 +141,24 @@ exact posterior 的结构 proposal，不能继续调 softmax 温度或扩大行�
 
 固定 core `seed=2` 的首个 opening claim 在 256 粒子、audit RNG `202608505` 下为 255/256 接受，structural ESS
 **246.33/255 (96.6%)**、total ESS **187.88/255 (73.7%)**；它只覆盖“本家首弃→他家 claim”的两动作前缀，尚不构成
-可采集 belief。将同一 prefix 只延长一条 claimant 的公开弃牌（RNG `202608506`）后，虽对已接受 32 个粒子仍有
-structural ESS **30.29/32 (94.7%)**，却只有 **32/256** 重放成功；其余 224 个为 `public_event_mismatch`，total ESS
-**11.94/32**。这不是继续加摸牌/花牌结构约束能解决的问题，而是必须构造对公开**决策**相容的 proposal。
+可采集 belief。首次把该 prefix 直接截到 claimant 弃牌后得到的 32/256 “接受率”经追踪被判定为**无效实验**：若该弃牌
+无人可响应，引擎会在同一原子 transition 自动产生下一次摸牌，旧 recognizer 错在 draw 前截断，因而把额外事件标作
+`public_event_mismatch`。现已加入原子边界 guard；这类状态在具备下一张公开摸牌的精确 density 前一律拒绝。
+
+在通过该 guard 的独立 core `seed=67` claim→discard 前缀上，256 粒子、audit RNG `202608507` 为 **256/256** 结构重放，
+structural ESS **250.74/256 (97.9%)**，但 total ESS 仅 **33.30/256 (13.0%)**。因此更正后仍可确认：短前缀的结构
+proposal 已健康，而动作历史 likelihood 才是此路线的下一瓶颈；不能将先前 224 次边界错误解释成行为不相容。
+
+为使下一步仍保留精确 density，新增 tile-factor 多元超几何 proposal：对手暗手的每一种 tile face 可乘一个正权重，
+归一化常数以计数 DP 精确计算并返回条件 prior/proposal 比；独立 toy 牌墙验证其采样分布与加权后原始超几何 posterior。
+这允许将未来的线性行为能量模型作为**proposal**，同时仍以冻结行为 likelihood 作目标权重，避免把能量分数误当概率。
+
+第一个、预先固定的低容量 probe 只将“claim 后公开弃牌”同面额的额外副本权重设为 `{1, 1.5, 2, 3}`；结构墙组固定为
+core `67, 139, 201, 275`（按是否存在原子 claim→discard 前缀筛选，而未查看 ESS/收益），每项 256 粒子。四项平均
+structural ESS fraction 依次为 **97.87%、96.55%、94.41%、88.01%**，total ESS fraction 仅为
+**13.34%、13.99%、12.52%、9.79%**；每项均有低 ESS 墙，最高均值也不足以进入现有 20% 的局部 belief 健康门槛。
+因此这条“只偏置弃牌同面额”的 action proposal 家族整体否决；不会因 1.5 的微小同组均值差而选择它、重跑或接入任何
+collector。保留 DP primitive 作为未来经独立数据训练的、预注册线性能量 proposal 的正确密度基础。
 
 因此该路径继续停留在 audit：不接入 SMC、collector、Q、训练或网页。下一项研究必须先为行为相容的隐藏手牌
 proposal 给出可计算密度与 toy exact posterior；不能对确定性 Teacher 的“选中动作”直接 rejection 后把未知接受率

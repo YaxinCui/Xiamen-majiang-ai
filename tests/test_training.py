@@ -28,6 +28,7 @@ from xiamen_mahjong.training import (
     _initial_setup_response_claim_constraint,
     _initial_setup_response_claim_discard_constraint,
     _sample_multivariate_hand_given_required_tiles,
+    _sample_weighted_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
     _sample_replay_setup_for_actor,
     _sample_replay_setup_given_opening_gold_and_draw,
@@ -140,6 +141,53 @@ class TrainingTests(unittest.TestCase):
             self.assertAlmostEqual(condition_probability, 5.0 / 6.0)
             double_one_hands += hand.count(1) == 2
         self.assertAlmostEqual(double_one_hands / samples, 1.0 / 5.0, delta=0.03)
+
+    def test_weighted_initial_hand_proposal_has_exact_partition_correction(self):
+        # From [0, 0, 1, 1, 2], a two-card hand containing 1 has seven
+        # labelled realizations.  Tile factors weight {0,1}, {1,1}, {1,2}
+        # by 1, 1/4 and 3/2 respectively, so the exact partition is 29/4.
+        # Importance weighting must recover the ordinary conditional
+        # hypergeometric posterior rather than the deliberately tilted draw.
+        pool = Counter({0: 2, 1: 2, 2: 1})
+        samples = 12_000
+        proposal_counts: Counter[tuple[int, ...]] = Counter()
+        total_weight = 0.0
+        double_one_weight = 0.0
+        one_two_weight = 0.0
+        for index in range(samples):
+            sampled = _sample_weighted_multivariate_hand_given_required_tiles(
+                pool,
+                hand_size=2,
+                required_tiles=(1,),
+                tile_weights={0: 2.0, 1: 0.5, 2: 3.0},
+                rng=random.Random(7_000 + index),
+            )
+            self.assertIsNotNone(sampled)
+            hand, condition_probability, conditional_prior_over_proposal = (
+                sampled or ([], 0.0, 0.0)
+            )
+            key = tuple(hand)
+            proposal_counts[key] += 1
+            self.assertAlmostEqual(condition_probability, 7.0 / 10.0)
+            weight = condition_probability * conditional_prior_over_proposal
+            total_weight += weight
+            double_one_weight += weight * (key == (1, 1))
+            one_two_weight += weight * (key == (1, 2))
+        # q({0,1}), q({1,1}), q({1,2}) = 16/29, 1/29, 12/29.
+        self.assertAlmostEqual(
+            proposal_counts[(0, 1)] / samples, 16.0 / 29.0, delta=0.025
+        )
+        self.assertAlmostEqual(
+            proposal_counts[(1, 1)] / samples, 1.0 / 29.0, delta=0.012
+        )
+        self.assertAlmostEqual(
+            proposal_counts[(1, 2)] / samples, 12.0 / 29.0, delta=0.025
+        )
+        # The mean combined p/q is P(hand contains 1) = 7/10. Conditional
+        # posterior masses are 1/7 and 2/7 for {1,1} and {1,2}.
+        self.assertAlmostEqual(total_weight / samples, 7.0 / 10.0, delta=0.012)
+        self.assertAlmostEqual(double_one_weight / total_weight, 1.0 / 7.0, delta=0.02)
+        self.assertAlmostEqual(one_two_weight / total_weight, 2.0 / 7.0, delta=0.025)
 
     def test_normal_draw_flower_wall_proposal_has_exact_density(self):
         # In [0, 0, 1, 34], observing flower 34 and then a hidden base tile
@@ -830,7 +878,7 @@ class TrainingTests(unittest.TestCase):
     def test_opening_aware_claim_discard_audit_stays_a_gated_prefix(self):
         teacher = HeuristicTeacherAgent()
         game = XiamenMahjongGame(
-            seed=2,
+            seed=67,
             rules=XiamenRules.from_profile("core"),
             auto_advance=False,
             human_seat=-1,
@@ -874,6 +922,35 @@ class TrainingTests(unittest.TestCase):
         )
         self.assertIn("following_claim_discard", payload["proposal_density"])
         self.assertIn("outside", payload["warning"])
+
+        # Seed 2 has the same early claim shape but no actor response to the
+        # claimant's discard.  The engine would automatically draw next, so
+        # the three-action truncation must be rejected instead of emitting a
+        # spurious public_event_mismatch.
+        automatic_draw_game = XiamenMahjongGame(
+            seed=2,
+            rules=XiamenRules.from_profile("core"),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        automatic_draw_snapshots = _run_candidate_base_hand(
+            automatic_draw_game,
+            candidate_seat=0,
+            candidate_policy=teacher,
+            opponents=opponents,
+        )
+        self.assertTrue(
+            any(
+                _initial_setup_response_claim_constraint(item) is not None
+                for item in automatic_draw_snapshots
+            )
+        )
+        self.assertFalse(
+            any(
+                _initial_setup_response_claim_discard_constraint(item) is not None
+                for item in automatic_draw_snapshots
+            )
+        )
 
     def test_resampled_history_rejects_positioned_opponent_flower_transition_without_density(self):
         teacher = HeuristicTeacherAgent()
