@@ -855,3 +855,11 @@ DR 非 Teacher 伪优势标准差仍为 **162.28** 分、范围 [−1,378.88,+3,
 下一步只能在未读 selection 上比较固定 12 个 `(C,beta,tau)`，其中 beta∈{.05,.10}、tau∈{8,16}；随机分布的 OPE
 使用未缩减 stochastic IPS/DR，且两侧 ESS 必须≥100、双 95% 下界为正。若无 winner，terminal 必须保持未读；若有唯一
 winner，脚本才可读取 terminal 一次。
+
+selection 已执行且全部拒绝，状态 `selection_rejected_terminal_unread`。支持度已不再是限制：12 个组合的 target ESS
+为 **294.0–326.4**、Teacher baseline ESS **268.0**，全部远高于 100；但 4.27%–8.79% 的期望非 Teacher 概率仍没有
+正向证据。最接近的是 C=80、beta=.05、tau=8，grouped IPS/DR 95% 下界仍为 **−0.372/−0.395** 分/局；其余组合的
+下界更低（beta=.10 普遍约翻倍负向）。因此 v4 stochastic residual policy 整体拒绝：不读取 terminal、不进行 200 墙
+实战筛选、不接入网页，也不把诊断模型参数上传为可用 AI。v4 selection 墙组已消耗，禁止在其上增加 beta/tau/C、换
+网络、direct member 或 OPE estimator 后重跑；terminal 保持封存。完整本地审计为
+`artifacts/teacher-stochastic-relative-classic-v4-heldout/selection-result.json`。
