@@ -8107,22 +8107,23 @@ def _public_context_features(state: dict[str, Any], target: int) -> list[float]:
     return features
 
 
-def public_action_sequence_features(
-    state: Mapping[str, Any], *, length: int = PUBLIC_ACTION_SEQUENCE_LENGTH
+def public_action_history_features(
+    actions: Sequence[Mapping[str, Any]], *, length: int = PUBLIC_ACTION_SEQUENCE_LENGTH
 ) -> tuple[tuple[float, ...], ...]:
-    """Encode an ordered, actor-visible public action history for sequence models.
+    """Encode an ordered actor-relative public history for sequence models.
 
-    The game exporter records ``an_kan`` without its face value, so the
-    resulting token cannot leak another player's concealed kong.  The output
-    contains only real events (no padding); callers build the attention mask.
+    ``actions`` must already expose seats relative to the acting player. The
+    game exporter records ``an_kan`` without its face value, so the resulting
+    token cannot leak another player's concealed kong. The output contains
+    only real events (no padding); callers build the attention mask.
     """
 
     if length <= 0:
         raise ValueError("公开动作序列长度必须为正数")
-    actions = list(state.get("recent_public_actions", []))[-length:]
+    visible_actions = list(actions)[-length:]
     encoded: list[tuple[float, ...]] = []
     kind_index = {kind: index for index, kind in enumerate(PUBLIC_ACTION_KINDS)}
-    for position, raw_action in enumerate(actions):
+    for position, raw_action in enumerate(visible_actions):
         action = dict(raw_action)
         values: list[float] = []
         kind = str(action.get("kind", ""))
@@ -8154,11 +8155,21 @@ def public_action_sequence_features(
             if isinstance(tile, int) and is_base_tile(tile)
         )
         values.extend(public_tiles[tile] / 4.0 for tile in range(BASE_TILE_COUNT))
-        values.append((position + 1) / max(len(actions), 1))
+        values.append((position + 1) / max(len(visible_actions), 1))
         if len(values) != PUBLIC_ACTION_SEQUENCE_DIM:
             raise RuntimeError("公开动作序列特征维度错误")
         encoded.append(tuple(values))
     return tuple(encoded)
+
+
+def public_action_sequence_features(
+    state: Mapping[str, Any], *, length: int = PUBLIC_ACTION_SEQUENCE_LENGTH
+) -> tuple[tuple[float, ...], ...]:
+    """Encode the compact actor-relative public window stored in one decision."""
+
+    return public_action_history_features(
+        state.get("recent_public_actions", []), length=length
+    )
 
 
 def _lookahead_features(state: dict[str, Any], action: GameAction) -> list[float]:

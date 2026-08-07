@@ -63,4 +63,6 @@ TeacherDecision
 
 每个 JSONL 分片必须按完整牌局切分，不能把一副牌局跨文件拆开。训练时可用一个 `--train` 和多个
 `--additional-train` 指向这些分片，再加入 `--stream-train-shards`；训练器会先流式统计全量类别权重和目标类型，随后每个
-epoch 逐分片打乱、训练、释放。这样不会把完整富轨迹一次性展开到内存，且每个决策每个 epoch 恰好训练一次。
+epoch 用有界随机缓冲逐条读取、近似打乱、训练、释放。这样不会把完整富轨迹一次性展开到内存，且每个决策每个 epoch
+恰好训练一次。`--full-public-history --history-window 160` 只对 `public_history_complete=true` 的自然轨迹展开至游标；
+`recent_window_only` 课程仍严格限于其显式窗口。

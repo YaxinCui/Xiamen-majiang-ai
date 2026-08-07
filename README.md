@@ -258,8 +258,20 @@ python3 scripts/collect_training_trajectories.py \
 ```
 
 当 v4 语料被切成多个大分片时，把后续训练分片通过重复的 `--additional-train` 传入，并开启
-`--stream-train-shards`。它会逐分片打乱、训练并释放 Python 对象；验证与测试仍完整读取，确保 checkpoint
-选择只由固定留出集决定。
+`--stream-train-shards`。它会以有界随机缓冲逐条读取、近似打乱、训练并释放 Python 对象；验证与测试仍完整读取，
+确保 checkpoint 选择只由固定留出集决定。v4 的完整公开历史可由序列模型显式启用：
+
+```bash
+.venv/bin/python scripts/train_policy_value.py \
+  --train artifacts/trajectory-v4-scale-classic/part-01/train.trajectories.jsonl \
+  --additional-train artifacts/trajectory-v4-scale-classic/part-02/train.trajectories.jsonl \
+  --additional-train artifacts/trajectory-v4-scale-classic/part-03/train.trajectories.jsonl \
+  --additional-train artifacts/trajectory-v4-scale-classic/part-04/train.trajectories.jsonl \
+  --validation artifacts/trajectory-v4-scale-classic/part-01/validation.trajectories.jsonl \
+  --test artifacts/trajectory-v4-scale-classic/part-01/test.trajectories.jsonl \
+  --architecture public_sequence_transformer --history-window 160 \
+  --full-public-history --stream-train-shards --device cuda
+```
 
 离线数据无法完全覆盖模型犯错后的状态，因此下一轮可用“候选一席 vs 三个冻结 Teacher”
 的 DAgger 采集器。每副牌墙轮换候选四座，四个轮换被强制置于同一数据切分；候选实际访问

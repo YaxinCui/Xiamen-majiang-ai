@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -12,6 +13,49 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(torch is None, "PyTorch 仅在项目 .venv 中安装")
 class CheckpointSelectionTests(unittest.TestCase):
+    def test_v4_full_public_history_stops_at_decision_cursor(self):
+        from scripts.train_policy_value import public_events_for_training_decision
+        from xiamen_mahjong.training import collect_teacher_trajectories
+
+        trajectories, _summary = collect_teacher_trajectories(
+            hands=1, profile="classic", seed=913
+        )
+        trajectory = trajectories[0]
+        decision = max(
+            trajectory.decisions,
+            key=lambda item: int(item.state["public_action_count"]),
+        )
+        self.assertGreater(decision.state["public_action_count"], 24)
+        args = SimpleNamespace(history_window=160, full_public_history=True)
+        events = public_events_for_training_decision(trajectory, decision, args)
+        self.assertEqual(len(events), decision.state["public_action_count"])
+        extended = replace(
+            trajectory,
+            public_actions=trajectory.public_actions
+            + ({"kind": "discard", "seat": (decision.seat + 1) % 4, "tile": 0},),
+        )
+        self.assertEqual(
+            events,
+            public_events_for_training_decision(extended, decision, args),
+        )
+
+    def test_sequence_checkpoint_preserves_nondefault_history_window(self):
+        from xiamen_mahjong.torch_policy import (
+            PublicSequencePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+
+        network = PublicSequencePolicyValueNetwork(
+            feature_dim=145, hidden_size=16, event_length=48, attention_heads=4
+        )
+        agent = TorchPolicyValueAgent(network=network, device="cpu")
+        self.assertEqual(agent.event_length, 48)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sequence-history.pt"
+            agent.save(checkpoint)
+            loaded = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+        self.assertEqual(loaded.event_length, 48)
+
     def test_streamed_training_shards_cover_each_example_once(self):
         from scripts.train_policy_value import Example, iter_training_batches
 
@@ -35,7 +79,7 @@ class CheckpointSelectionTests(unittest.TestCase):
         examples_by_path = {first: [example(0), example(1)], second: [example(2)]}
         args = SimpleNamespace(seed=37)
         with patch(
-            "scripts.train_policy_value.load_examples",
+            "scripts.train_policy_value.iter_examples",
             side_effect=lambda path, _args: examples_by_path[path],
         ) as loader:
             batches = list(

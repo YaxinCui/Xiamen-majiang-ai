@@ -42,6 +42,7 @@ from xiamen_mahjong.training import (
     PUBLIC_ACTION_SEQUENCE_LENGTH,
     TeacherDecision,
     _dense_action_features,
+    public_action_history_features,
     public_action_sequence_features,
     read_trajectory_jsonl,
 )
@@ -76,9 +77,15 @@ def parse_args() -> argparse.Namespace:
         "--stream-train-shards",
         action="store_true",
         help=(
-            "逐个读取、打乱并释放 train JSONL 分片；适用于大规模 v4 语料。"
+            "逐条读取、近似打乱并释放 train JSONL 分片；适用于大规模 v4 语料。"
             "验证与测试仍完整载入，以保持 checkpoint 选择可复现。"
         ),
+    )
+    parser.add_argument(
+        "--stream-shuffle-buffer",
+        type=int,
+        default=4096,
+        help="流式训练的有界随机缓冲决策数；越大越接近全量打乱、占用也越高",
     )
     parser.add_argument(
         "--validation", type=Path, default=base / "validation.trajectories.jsonl"
@@ -110,6 +117,20 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--hidden-size", type=int, default=128)
     parser.add_argument("--attention-heads", type=int, default=4)
+    parser.add_argument(
+        "--history-window",
+        type=int,
+        default=PUBLIC_ACTION_SEQUENCE_LENGTH,
+        help="序列网络的最多公开事件数；旧 checkpoint 的默认短窗口为 24",
+    )
+    parser.add_argument(
+        "--full-public-history",
+        action="store_true",
+        help=(
+            "对声明 complete 的 v4 轨迹按历史游标读取完整公开前缀，"
+            "再截取至 --history-window；窗口课程仍只读取其显式短历史"
+        ),
+    )
     parser.add_argument("--epochs", type=int, default=24)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=0.001)
@@ -300,8 +321,52 @@ def configure_q_only_trainable_parameters(
     return [parameter for parameter in network.parameters() if parameter.requires_grad]
 
 
-def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
-    examples: list[Example] = []
+def public_events_for_training_decision(
+    trajectory: Any, decision: TeacherDecision, args: argparse.Namespace
+) -> tuple[tuple[float, ...], ...]:
+    """Return a bounded public history without exposing future events.
+
+    v4 stores the physical hand's public events once and places a cursor on
+    every decision.  Only this helper is allowed to expand that prefix for a
+    sequence model.  Window-only synthetic curricula explicitly take the
+    legacy short path, so a trainer cannot mistake a truncated construction
+    for a complete natural history.
+    """
+
+    history_window = int(
+        getattr(args, "history_window", PUBLIC_ACTION_SEQUENCE_LENGTH)
+    )
+    if history_window <= 0:
+        raise ValueError("history-window 必须为正数")
+    if not getattr(args, "full_public_history", False) or not decision.state.get(
+        "public_history_complete"
+    ):
+        return public_action_sequence_features(decision.state, length=history_window)
+
+    raw_cursor = decision.state.get("public_action_count")
+    if isinstance(raw_cursor, bool) or not isinstance(raw_cursor, int):
+        raise ValueError("完整公开历史决策缺少 public_action_count")
+    public_actions = trajectory.public_actions
+    if not 0 <= raw_cursor <= len(public_actions):
+        raise ValueError("完整公开历史决策的 public_action_count 越界")
+    player_count = len(trajectory.agent_profiles)
+    if player_count <= 0:
+        raise ValueError("轨迹缺少玩家座位数")
+    relative_actions: list[dict[str, Any]] = []
+    for raw_action in public_actions[:raw_cursor]:
+        action = dict(raw_action)
+        raw_seat = action.pop("seat", None)
+        if raw_seat is not None:
+            if isinstance(raw_seat, bool) or not isinstance(raw_seat, int):
+                raise ValueError("公开历史事件的 seat 非法")
+            action["relative_seat"] = (raw_seat - decision.seat) % player_count
+        relative_actions.append(action)
+    return public_action_history_features(relative_actions, length=history_window)
+
+
+def iter_examples(path: Path, args: argparse.Namespace) -> Iterable[Example]:
+    """Encode one JSONL trajectory at a time without retaining the file."""
+
     for trajectory in read_trajectory_jsonl(path):
         source = str(trajectory.source_metadata.get("collector", "legacy"))
         if source == "local_human_opt_in" and not getattr(
@@ -322,7 +387,7 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
                 )
                 for action in decision.legal_actions
             )
-            events = public_action_sequence_features(decision.state)
+            events = public_events_for_training_decision(trajectory, decision, args)
             value_target = None
             # Random legal rollouts are useful to expose policy decisions, but
             # their terminal score belongs to the random continuation, not to
@@ -352,21 +417,24 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
                 sample_weight /= 1.0 + (
                     mean_stderr / args.action_value_stderr_scale
                 ) ** 2
-            examples.append(
-                Example(
-                    candidates=vectors,
-                    public_events=events,
-                    chosen_index=decision.chosen_index,
-                    action_kind=decision.chosen_action.kind,
-                    source=source,
-                    action_values=decision.action_values,
-                    action_value_stderrs=decision.action_value_stderrs,
-                    action_value_gap_stderrs=decision.action_value_gap_stderrs,
-                    value_target=value_target,
-                    sample_weight=sample_weight,
-                )
+            yield Example(
+                candidates=vectors,
+                public_events=events,
+                chosen_index=decision.chosen_index,
+                action_kind=decision.chosen_action.kind,
+                source=source,
+                action_values=decision.action_values,
+                action_value_stderrs=decision.action_value_stderrs,
+                action_value_gap_stderrs=decision.action_value_gap_stderrs,
+                value_target=value_target,
+                sample_weight=sample_weight,
             )
-    return examples
+
+
+def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
+    """Materialize one split for reproducible validation or legacy training."""
+
+    return list(iter_examples(path, args))
 
 
 def summarize_training_examples(
@@ -454,12 +522,13 @@ def iter_training_batches(
     stream_shards: bool,
     in_memory_examples: list[Example] | None,
 ) -> Iterable[list[Example]]:
-    """Yield deterministic shuffled batches without retaining all train shards.
+    """Yield deterministic batches without retaining a whole train shard.
 
-    Shard order and within-shard order change each epoch.  A streaming epoch
-    intentionally uses each decision once, exactly like the in-memory path;
-    only the shuffle domain is one JSONL shard so that large v4 corpora do not
-    expand into tens of gigabytes of Python objects.
+    Shard order changes each epoch. In streaming mode a bounded reservoir-like
+    replacement buffer approximates a global shuffle while retaining at most
+    ``stream_shuffle_buffer`` encoded decisions. Every decision still appears
+    exactly once per epoch, so large v4 histories do not expand into tens of
+    gigabytes of Python objects.
     """
 
     if batch_size <= 0:
@@ -478,18 +547,38 @@ def iter_training_batches(
 
     shard_order = list(enumerate(paths))
     random.Random(args.seed + epoch).shuffle(shard_order)
+    shuffle_buffer = int(getattr(args, "stream_shuffle_buffer", 4096))
+    if shuffle_buffer <= 0:
+        raise ValueError("stream_shuffle_buffer 必须为正数")
     for source_index, path in shard_order:
-        examples = load_examples(path, args)
-        indices = list(range(len(examples)))
-        random.Random(args.seed + epoch * 1_000_003 + source_index).shuffle(indices)
-        for start in range(0, len(indices), batch_size):
-            yield [examples[index] for index in indices[start : start + batch_size]]
+        rng = random.Random(args.seed + epoch * 1_000_003 + source_index)
+        buffer: list[Example] = []
+        batch: list[Example] = []
+        for example in iter_examples(path, args):
+            if len(buffer) < shuffle_buffer:
+                buffer.append(example)
+                continue
+            replacement_index = rng.randrange(len(buffer))
+            batch.append(buffer[replacement_index])
+            buffer[replacement_index] = example
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+        rng.shuffle(buffer)
+        for example in buffer:
+            batch.append(example)
+            if len(batch) == batch_size:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
 
 
 def tensors(
     examples: list[Example],
     *,
     feature_dim: int,
+    event_length: int = PUBLIC_ACTION_SEQUENCE_LENGTH,
     device: torch.device,
     weights: dict[str, float],
 ) -> tuple[
@@ -506,6 +595,8 @@ def tensors(
     torch.Tensor,
     torch.Tensor,
 ]:
+    if event_length <= 0:
+        raise ValueError("event_length 必须为正数")
     batch_size = len(examples)
     max_actions = max(len(example.candidates) for example in examples)
     candidates = torch.zeros(
@@ -513,12 +604,12 @@ def tensors(
     )
     mask = torch.zeros((batch_size, max_actions), dtype=torch.bool, device=device)
     events = torch.zeros(
-        (batch_size, PUBLIC_ACTION_SEQUENCE_LENGTH, PUBLIC_ACTION_SEQUENCE_DIM),
+        (batch_size, event_length, PUBLIC_ACTION_SEQUENCE_DIM),
         dtype=torch.float32,
         device=device,
     )
     event_mask = torch.zeros(
-        (batch_size, PUBLIC_ACTION_SEQUENCE_LENGTH), dtype=torch.bool, device=device
+        (batch_size, event_length), dtype=torch.bool, device=device
     )
     chosen = torch.empty(batch_size, dtype=torch.long, device=device)
     action_values = torch.zeros(
@@ -539,6 +630,8 @@ def tensors(
         candidates[row, :count] = torch.tensor(example.candidates, dtype=torch.float32)
         mask[row, :count] = True
         event_count = len(example.public_events)
+        if event_count > event_length:
+            raise ValueError("公开事件序列超过 event_length")
         if event_count:
             events[row, :event_count] = torch.tensor(
                 example.public_events, dtype=torch.float32, device=device
@@ -802,6 +895,7 @@ def evaluate(
     examples: list[Example],
     *,
     feature_dim: int,
+    event_length: int = PUBLIC_ACTION_SEQUENCE_LENGTH,
     device: torch.device,
     batch_size: int,
     class_weight_map: dict[str, float],
@@ -847,7 +941,11 @@ def evaluate(
                 action_value_stderrs,
                 action_value_gap_stderrs,
             ) = tensors(
-                rows, feature_dim=feature_dim, device=device, weights=class_weight_map
+                rows,
+                feature_dim=feature_dim,
+                event_length=event_length,
+                device=device,
+                weights=class_weight_map,
             )
             logits, predicted_values, predicted_action_values = forward_network(
                 network, candidates, mask, events, event_mask
@@ -1073,6 +1171,8 @@ def main() -> None:
         or args.learning_rate <= 0
         or args.base_learning_rate_scale <= 0
         or args.attention_heads <= 0
+        or args.history_window <= 0
+        or args.stream_shuffle_buffer <= 0
         or args.value_scale <= 0
         or args.exploration_weight <= 0
         or args.synthetic_weight <= 0
@@ -1194,6 +1294,19 @@ def main() -> None:
             }
             and initial_agent.attention_heads != args.attention_heads
         )
+        matching_sequence_length = (
+            args.architecture
+            in {
+                ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER,
+                ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL,
+            }
+            and initial_agent.architecture
+            in {
+                ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER,
+                ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL,
+            }
+            and initial_agent.event_length != args.history_window
+        )
         residual_from_candidate = (
             args.architecture == ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL
             and initial_agent.architecture == ARCHITECTURE_CANDIDATE_MLP
@@ -1202,6 +1315,7 @@ def main() -> None:
             initial_agent.feature_version != args.feature_version
             or initial_agent.hidden_size != args.hidden_size
             or matching_sequence_heads
+            or matching_sequence_length
             or (
                 initial_agent.architecture != args.architecture
                 and not residual_from_candidate
@@ -1213,6 +1327,7 @@ def main() -> None:
             network = ResidualPublicSequencePolicyValueNetwork(
                 feature_dim,
                 args.hidden_size,
+                event_length=args.history_window,
                 attention_heads=args.attention_heads,
             ).to(device)
             network.initialize_from_candidate(initial_agent.network)
@@ -1224,12 +1339,14 @@ def main() -> None:
         network = PublicSequencePolicyValueNetwork(
             feature_dim,
             args.hidden_size,
+            event_length=args.history_window,
             attention_heads=args.attention_heads,
         ).to(device)
     else:
         network = ResidualPublicSequencePolicyValueNetwork(
             feature_dim,
             args.hidden_size,
+            event_length=args.history_window,
             attention_heads=args.attention_heads,
         ).to(device)
     if (
@@ -1314,7 +1431,11 @@ def main() -> None:
                 action_value_stderrs,
                 action_value_gap_stderrs,
             ) = tensors(
-                rows, feature_dim=feature_dim, device=device, weights=weights
+                rows,
+                feature_dim=feature_dim,
+                event_length=args.history_window,
+                device=device,
+                weights=weights,
             )
             logits, predicted_values, predicted_action_values = forward_network(
                 network, candidates, mask, events, event_mask
@@ -1402,6 +1523,7 @@ def main() -> None:
             network,
             validation,
             feature_dim=feature_dim,
+            event_length=args.history_window,
             device=device,
             batch_size=args.batch_size,
             class_weight_map=weights,
@@ -1443,6 +1565,7 @@ def main() -> None:
         network,
         validation,
         feature_dim=feature_dim,
+        event_length=args.history_window,
         device=device,
         batch_size=args.batch_size,
         class_weight_map=weights,
@@ -1457,6 +1580,7 @@ def main() -> None:
         network,
         test,
         feature_dim=feature_dim,
+        event_length=args.history_window,
         device=device,
         batch_size=args.batch_size,
         class_weight_map=weights,
@@ -1474,6 +1598,8 @@ def main() -> None:
         "hidden_size": args.hidden_size,
         "architecture": args.architecture,
         "attention_heads": args.attention_heads,
+        "history_window": args.history_window,
+        "full_public_history": args.full_public_history,
         "device": str(device),
         "seed": args.seed,
         "value_scale": args.value_scale,
@@ -1492,6 +1618,9 @@ def main() -> None:
         "action_value_margin_scale": args.action_value_margin_scale,
         "base_learning_rate_scale": args.base_learning_rate_scale,
         "stream_train_shards": args.stream_train_shards,
+        "stream_shuffle_buffer": (
+            args.stream_shuffle_buffer if args.stream_train_shards else None
+        ),
         "dataset_decisions": {
             "train": train_decisions,
             "validation": len(validation),
@@ -1579,6 +1708,7 @@ def main() -> None:
         hidden_size=args.hidden_size,
         architecture=args.architecture,
         attention_heads=args.attention_heads,
+        event_length=args.history_window,
         device=str(device),
         network=network,
     )

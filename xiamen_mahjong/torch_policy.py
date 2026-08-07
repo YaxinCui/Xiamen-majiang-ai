@@ -7,6 +7,7 @@ contains PyTorch when training or evaluating a ``.pt`` checkpoint.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -32,13 +33,14 @@ from .training import (
 )
 
 
-TORCH_POLICY_VALUE_VERSION = "xiamen-candidate-policy-value-v6"
+TORCH_POLICY_VALUE_VERSION = "xiamen-candidate-policy-value-v7"
 _SUPPORTED_TORCH_POLICY_VALUE_VERSIONS = {
     "xiamen-candidate-policy-value-v1",
     "xiamen-candidate-policy-value-v2",
     "xiamen-candidate-policy-value-v3",
     "xiamen-candidate-policy-value-v4",
     "xiamen-candidate-policy-value-v5",
+    "xiamen-candidate-policy-value-v6",
     TORCH_POLICY_VALUE_VERSION,
 }
 ARCHITECTURE_CANDIDATE_MLP = "candidate_mlp"
@@ -426,6 +428,7 @@ class TorchPolicyValueAgent:
         hidden_size: int = 128,
         architecture: str = ARCHITECTURE_CANDIDATE_MLP,
         attention_heads: int = 4,
+        event_length: int = PUBLIC_ACTION_SEQUENCE_LENGTH,
         action_selection: str = ACTION_SELECTION_POLICY,
         device: str | None = None,
         network: (
@@ -440,6 +443,9 @@ class TorchPolicyValueAgent:
         self.feature_version = feature_version
         self.feature_dim = NEURAL_FEATURE_DIMS[feature_version]
         self.hidden_size = hidden_size
+        if event_length <= 0:
+            raise ValueError("公开事件长度必须为正数")
+        self.event_length = event_length
         if architecture not in {
             ARCHITECTURE_CANDIDATE_MLP,
             ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER,
@@ -454,12 +460,18 @@ class TorchPolicyValueAgent:
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
         if network is not None:
             self.network = network
+            # A caller may construct a small experimental network and leave
+            # the convenience constructor's hidden-size default untouched.
+            # Persist the network's real shape so its checkpoint can reload.
+            self.hidden_size = network.hidden_size
             if isinstance(network, PublicSequencePolicyValueNetwork):
                 self.architecture = ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER
                 self.attention_heads = network.attention_heads
+                self.event_length = network.event_length
             elif isinstance(network, ResidualPublicSequencePolicyValueNetwork):
                 self.architecture = ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL
                 self.attention_heads = network.attention_heads
+                self.event_length = network.event_length
             else:
                 self.architecture = ARCHITECTURE_CANDIDATE_MLP
         elif architecture == ARCHITECTURE_CANDIDATE_MLP:
@@ -468,26 +480,30 @@ class TorchPolicyValueAgent:
             self.network = PublicSequencePolicyValueNetwork(
                 self.feature_dim,
                 hidden_size,
+                event_length=self.event_length,
                 attention_heads=attention_heads,
             )
         else:
             self.network = ResidualPublicSequencePolicyValueNetwork(
                 self.feature_dim,
                 hidden_size,
+                event_length=self.event_length,
                 attention_heads=attention_heads,
             )
         self.network.to(self.device)
         self.network.eval()
 
     def _public_events(self, decision: TeacherDecision) -> tuple[Tensor, Tensor]:
-        sequence = public_action_sequence_features(decision.state)
+        sequence = public_action_sequence_features(
+            decision.state, length=self.event_length
+        )
         events = torch.zeros(
-            (1, PUBLIC_ACTION_SEQUENCE_LENGTH, PUBLIC_ACTION_SEQUENCE_DIM),
+            (1, self.event_length, PUBLIC_ACTION_SEQUENCE_DIM),
             dtype=torch.float32,
             device=self.device,
         )
         event_mask = torch.zeros(
-            (1, PUBLIC_ACTION_SEQUENCE_LENGTH), dtype=torch.bool, device=self.device
+            (1, self.event_length), dtype=torch.bool, device=self.device
         )
         if sequence:
             events[0, : len(sequence)] = torch.tensor(
@@ -500,17 +516,19 @@ class TorchPolicyValueAgent:
         self, decisions: Sequence[TeacherDecision]
     ) -> tuple[Tensor, Tensor]:
         events = torch.zeros(
-            (len(decisions), PUBLIC_ACTION_SEQUENCE_LENGTH, PUBLIC_ACTION_SEQUENCE_DIM),
+            (len(decisions), self.event_length, PUBLIC_ACTION_SEQUENCE_DIM),
             dtype=torch.float32,
             device=self.device,
         )
         event_mask = torch.zeros(
-            (len(decisions), PUBLIC_ACTION_SEQUENCE_LENGTH),
+            (len(decisions), self.event_length),
             dtype=torch.bool,
             device=self.device,
         )
         for row, decision in enumerate(decisions):
-            sequence = public_action_sequence_features(decision.state)
+            sequence = public_action_sequence_features(
+                decision.state, length=self.event_length
+            )
             if sequence:
                 events[row, : len(sequence)] = torch.tensor(
                     sequence, dtype=torch.float32, device=self.device
@@ -797,9 +815,43 @@ class TorchPolicyValueAgent:
     def predict_action(self, decision: TeacherDecision) -> GameAction:
         return decision.legal_actions[self.predict_index(decision)]
 
+    def _decision_for_game(
+        self,
+        game: XiamenMahjongGame,
+        player_id: int,
+        legal: Sequence[GameAction],
+    ) -> TeacherDecision:
+        """Build an inference decision with the same full-history contract as v4.
+
+        The persisted training trajectory owns the full history to avoid
+        duplicating it in every row.  During live play the game has that same
+        public append-only log, so long-window sequence checkpoints recover an
+        actor-relative suffix directly from it.  Other architectures retain
+        the compact decision state unchanged.
+        """
+
+        decision = _decision(game, game.seed or 0, player_id, legal, legal[0])
+        if self.architecture not in {
+            ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER,
+            ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL,
+        }:
+            return decision
+        relative_actions: list[dict[str, Any]] = []
+        for raw_action in game.public_actions[-self.event_length :]:
+            action = dict(raw_action)
+            raw_seat = action.pop("seat", None)
+            if isinstance(raw_seat, int) and not isinstance(raw_seat, bool):
+                action["relative_seat"] = (
+                    raw_seat - player_id
+                ) % game.rules.player_count
+            relative_actions.append(action)
+        state = dict(decision.state)
+        state["recent_public_actions"] = relative_actions
+        return replace(decision, state=state)
+
     def choose_turn_action(self, game: XiamenMahjongGame, player_id: int) -> GameAction:
         legal = tuple(_turn_actions(game, player_id))
-        decision = _decision(game, game.seed or 0, player_id, legal, legal[0])
+        decision = self._decision_for_game(game, player_id, legal)
         # Q labels currently cover only public response states. Never apply a
         # response-only checkpoint to turn/discard choices without turn Q data.
         if self.action_selection == ACTION_SELECTION_RESPONSE_ACTION_VALUE:
@@ -813,7 +865,7 @@ class TorchPolicyValueAgent:
         self, game: XiamenMahjongGame, player_id: int, options: Sequence[GameAction]
     ) -> GameAction:
         legal = tuple(options)
-        decision = _decision(game, game.seed or 0, player_id, legal, legal[0])
+        decision = self._decision_for_game(game, player_id, legal)
         if self.action_selection == ACTION_SELECTION_RESPONSE_ACTION_VALUE:
             scores = self._scores_for_selection(
                 decision, action_selection=ACTION_SELECTION_ACTION_VALUE
@@ -835,6 +887,7 @@ class TorchPolicyValueAgent:
                 "feature_dim": self.feature_dim,
                 "hidden_size": self.hidden_size,
                 "attention_heads": self.attention_heads,
+                "event_length": self.event_length,
                 "action_selection": self.action_selection,
                 "state_dict": self.network.state_dict(),
                 "metadata": metadata or {},
@@ -865,6 +918,7 @@ class TorchPolicyValueAgent:
             hidden_size=int(payload["hidden_size"]),
             architecture=architecture,
             attention_heads=int(payload.get("attention_heads", 4)),
+            event_length=int(payload.get("event_length", PUBLIC_ACTION_SEQUENCE_LENGTH)),
             action_selection=action_selection
             or str(payload.get("action_selection", ACTION_SELECTION_POLICY)),
             device=device,
