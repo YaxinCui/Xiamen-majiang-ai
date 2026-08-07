@@ -344,10 +344,23 @@ response 按已知概率采样。它是数据收集入口，不是部署 selecto
 
 ```bash
 .venv/bin/python scripts/collect_candidate_teacher_dagger_trajectories.py \
-  --teacher-base --profile classic --seed-count 240 --seed 202608451 \
-  --uniform-exploration-probability 0.40 --intervention-max-decisions 16 \
+  --teacher-base --profile classic --seed-count 800 --seed 202608463 \
+  --uniform-exploration-probability 0.40 --intervention-max-decisions 4 \
   --intervention-phase response --train-fraction 0.7 --validation-fraction 0.15 \
   --output-dir artifacts/teacher-response-intervention-v1
+```
+
+对 Teacher 数据，禁止使用已否决的 run3/run4 参数作初始化。改用同一个从未训练的随机 policy anchor（仅固定集成
+成员间的 logits；不参与选牌），训练多个不同随机种子的可训练 afterstate head：
+
+```bash
+.venv/bin/python scripts/train_afterstate_outcomes.py \
+  --train artifacts/teacher-response-intervention-v1/train.trajectories.jsonl \
+  --validation artifacts/teacher-response-intervention-v1/validation.trajectories.jsonl \
+  --test artifacts/teacher-response-intervention-v1/test.trajectories.jsonl \
+  --fresh-policy-anchor-seed 202608471 --epochs 48 --batch-size 256 \
+  --require-known-propensity --only-randomized-actions --decision-phase response \
+  --output-dir artifacts/policy-value-teacher-response-outcome-v1-seed1 --device cuda --seed 1
 ```
 
 若有多个按物理牌墙隔离的单点干预墙组，可用 `--additional-train`、`--additional-validation` 和

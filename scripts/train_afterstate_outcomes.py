@@ -75,7 +75,26 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="可重复指定；只能追加与训练/验证墙组不重叠的测试数据。",
     )
-    parser.add_argument("--init-checkpoint", type=Path, required=True)
+    initialization = parser.add_mutually_exclusive_group(required=True)
+    initialization.add_argument(
+        "--init-checkpoint",
+        type=Path,
+        help="历史初始化仅供兼容旧实验；新 Teacher OPE 不应使用已否决 checkpoint",
+    )
+    initialization.add_argument(
+        "--fresh-policy-anchor-seed",
+        type=int,
+        help=(
+            "从固定随机种子创建从未训练的冻结 policy anchor；"
+            "同一 outcome ensemble 的每个成员必须使用同一 seed"
+        ),
+    )
+    parser.add_argument(
+        "--fresh-anchor-hidden-size",
+        type=int,
+        default=128,
+        help="--fresh-policy-anchor-seed 的 candidate MLP 隐层宽度",
+    )
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--feature-version", type=int, choices=(3,), default=3)
     parser.add_argument("--epochs", type=int, default=32)
@@ -420,6 +439,37 @@ def propensity_summary(examples: Iterable[AfterstateExample]) -> dict[str, float
     }
 
 
+def initial_agent_for_outcome_training(
+    args: argparse.Namespace, *, device: torch.device
+) -> tuple[TorchPolicyValueAgent, dict[str, object]]:
+    """Load a legacy base or make a reproducible, never-trained policy anchor.
+
+    The fresh path is intentionally a representation/shape anchor only.  Its
+    policy logits remain frozen and are never selected for game play; using a
+    shared seed makes those logits exactly identical across independently
+    trained outcome heads, which is required for their conservative ensemble.
+    """
+
+    if args.init_checkpoint is not None:
+        agent = TorchPolicyValueAgent.load(args.init_checkpoint, device=str(device))
+        return agent, {"kind": "checkpoint", "path": str(args.init_checkpoint)}
+    if args.fresh_policy_anchor_seed is None:
+        raise ValueError("需要 init-checkpoint 或 fresh-policy-anchor-seed")
+    if args.fresh_anchor_hidden_size <= 0:
+        raise ValueError("fresh-anchor-hidden-size 必须为正数")
+    torch.manual_seed(args.fresh_policy_anchor_seed)
+    agent = TorchPolicyValueAgent(
+        feature_version=args.feature_version,
+        hidden_size=args.fresh_anchor_hidden_size,
+        device=str(device),
+    )
+    return agent, {
+        "kind": "fresh_untrained_policy_anchor",
+        "seed": args.fresh_policy_anchor_seed,
+        "hidden_size": args.fresh_anchor_hidden_size,
+    }
+
+
 def main() -> None:
     args = parse_args()
     if args.epochs <= 0 or args.batch_size <= 0 or args.learning_rate <= 0:
@@ -462,7 +512,9 @@ def main() -> None:
         only_randomized_actions=args.only_randomized_actions,
         decision_phase=args.decision_phase,
     )
-    initial_agent = TorchPolicyValueAgent.load(args.init_checkpoint, device=str(device))
+    initial_agent, initialization = initial_agent_for_outcome_training(
+        args, device=device
+    )
     if not isinstance(initial_agent.network, CandidatePolicyValueNetwork):
         raise ValueError("afterstate outcome 当前只支持 candidate_mlp checkpoint")
     if initial_agent.feature_version != args.feature_version:
@@ -564,7 +616,7 @@ def main() -> None:
     report = {
         "model": "candidate_policy_value_afterstate_outcomes",
         "status": "diagnostic_only_not_authorized_for_action_selection",
-        "init_checkpoint": str(args.init_checkpoint),
+        "initialization": initialization,
         "feature_version": args.feature_version,
         "feature_dim": feature_dim,
         "hidden_size": initial_agent.hidden_size,

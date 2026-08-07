@@ -635,3 +635,22 @@ test 墙的 outcome ensemble；候选 action 用跨成员终局分数 LCB 与 Te
 输出状态固定为 `audit_only_one_response_teacher_override`。即使 IPS、DR 两项 95% 下界为正且两侧 ESS 达标，也只可
 进入「一局至多一次 response override，随后 Teacher 后缀」的 200 墙筛选，不能作为完整策略、网页部署或打败人类的
 证据。当前只有脚本与单测，尚无经典 Teacher 干预数据、outcome checkpoint 或 OPE 数值结果。
+
+## 2026-08-07：Teacher response 干预数据与首轮 OPE（否决）
+
+收集 `teacher-response-intervention-classic-v1`：800 个独立经典物理墙、四座轮换共 3,200 局，按墙组为
+553/134/113 个 train/validation/test。安全 JSONL 不含随机种子、墙或隐藏手牌；三分区 `split_group_id` 交集均为
+零。随机 response 记录为 **1,341/332/282**，测试动作覆盖吃 125、碰 88、过 53、胡 8、明杠 8，propensity 范围
+0.1–0.8。原始 JSONL 保留在本机训练盘（train 文件 106 MB，超过 GitHub 单文件上限）；manifest 与 SHA-256 为
+`c5dcc1d20697b8213dc5d961d74f9a069e3e1d786485083c81213965b7cc2034`（train）、
+`97d4b72c0875323f08e6ad784bbe58398c562d53f8136cbaddfc36e3c88dadb8`（validation）、
+`6dd701fc4e04340a491adbe446173f0a90c20606bd5bcec7ce6d90ef1efcdb77`（test）。
+
+为避免任何历史 checkpoint 重新成为训练起点，以相同的**从未训练** policy anchor（seed 202608471）训练五个
+afterstate outcome 成员，分别只更新其独立的 afterstate encoder/score/win heads。独立 test 的 score MAE 为
+30.70–32.22 分，零预测为 32.85 分；这是 logged-action 校准改善，仍非选牌许可。
+
+在 108 个有有效干预的 test 墙组（282 条随机 response）上，预先固定的 `LCB(z=1) 最大 score，否则 Teacher`
+一次 override 候选产生 IPS **−1.6428 ± 4.4087**（95% CI **[−10.2839, +6.9983]**）与 DR
+**−0.7897 ± 4.6188**（**[−9.8425, +8.2632]**）。target/base ESS 为 **66.1/218.7**，支持度足够但两个下界均不为正。
+因此明确拒绝，不进行 200 墙、网页试用或任何强度主张；这个 test 墙组已冻结，不能用于事后调 LCB 阈值或选择成员。

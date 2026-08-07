@@ -133,6 +133,13 @@ run4-based response outcome ensemble 已被全新实战否决，不能再把 run
 策略改动的 IPS 和 DR 保守下界均为正，才允许使用与收集协议一致的“一局至多一次 override”候选进行 200 墙筛选。
 不得复用已被否决的 run4 selector、不得把 logged-action 校准或单点 OPE 直接称为完整对局强度。
 
+首轮经典数据（800 物理墙）以全新的固定随机 policy anchor 训练 5 个 outcome 成员，避免把 run3/run4 的权重作为
+新的训练起点；只有 outcome encoder 和三类 outcome head 可更新。113 个未接触训练／validation 的 test 墙中有 108
+个发生有效随机 response 干预（282 条）。`max_afterstate_score_lcb_or_teacher` 在该 test 的 grouped IPS 为
+−1.6428 分/局（95% CI [−10.2839, +6.9983]），DR 为 −0.7897（[−9.8425, +8.2632]）；虽有 target/base ESS
+66.1/218.7，双下界均不为正，`ready_for_single_override_game_screen=false`。该 test 组已消耗，禁止再用它调 LCB
+阈值、挑 ensemble 成员或重试 selector。下一轮必须预注册新候选，并使用新的 selector 与终检墙组。
+
 ## 实验记录模板
 
 每个实验目录应保存 `config.json`、`metrics.json`、`checkpoint`、`git_commit`、

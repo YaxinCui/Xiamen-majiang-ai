@@ -10,6 +10,7 @@ from xiamen_mahjong.off_policy import (
 from scripts.audit_teacher_response_intervention_ope import (
     teacher_epsilon_propensities,
 )
+from scripts.train_afterstate_outcomes import initial_agent_for_outcome_training
 
 
 class OffPolicyTests(unittest.TestCase):
@@ -98,6 +99,27 @@ class OffPolicyTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "随机化"):
             teacher_epsilon_propensities(action_count=2, teacher_index=0, epsilon=0.0)
+
+    def test_fresh_outcome_anchors_are_reproducible_without_a_checkpoint(self):
+        from types import SimpleNamespace
+        import torch
+
+        args = SimpleNamespace(
+            init_checkpoint=None,
+            fresh_policy_anchor_seed=81,
+            fresh_anchor_hidden_size=16,
+            feature_version=3,
+        )
+        first, first_identity = initial_agent_for_outcome_training(
+            args, device=torch.device("cpu")
+        )
+        second, second_identity = initial_agent_for_outcome_training(
+            args, device=torch.device("cpu")
+        )
+        self.assertEqual(first_identity, second_identity)
+        self.assertEqual(first_identity["kind"], "fresh_untrained_policy_anchor")
+        for name, value in first.network.state_dict().items():
+            self.assertTrue((value == second.network.state_dict()[name]).all(), name)
 
 
 if __name__ == "__main__":
