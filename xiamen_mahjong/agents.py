@@ -253,6 +253,76 @@ class AvailabilityTeacherAgent(HeuristicTeacherAgent):
         return sorted(candidates, key=lambda item: (-float(item["score"]), int(item["tile"])))
 
 
+class RiskAwareTeacherAgent(AvailabilityTeacherAgent):
+    """Public-information defensive variant of the availability Teacher.
+
+    It does not estimate an opponent's concealed hand.  Instead it applies a
+    small, explainable penalty to tiles that have many non-public copies while
+    opponents show public signs of commitment (open melds or a later hand).
+    A tile previously discarded by an opponent is discounted, but never
+    declared fully safe: Xiamen rules and future draws need not imply a
+    universal furiten-style guarantee.
+    """
+
+    def __init__(self, *, risk_weight: float, wait_copy_value: float = 4.5):
+        super().__init__(wait_copy_value=wait_copy_value)
+        if risk_weight < 0:
+            raise ValueError("risk_weight 不能为负数")
+        self.risk_weight = float(risk_weight)
+
+    def _public_visible_counts(self, game, player_id: int) -> Counter[int]:
+        """Count only actor-known and public base tiles for danger features."""
+
+        visible = Counter(
+            tile for tile in game.players[player_id].hand if is_base_tile(tile)
+        )
+        for player in game.players:
+            visible.update(tile for tile in player.discards if is_base_tile(tile))
+            visible.update(
+                tile
+                for meld in player.melds
+                for tile in meld["tiles"]
+                if is_base_tile(tile)
+            )
+        if game.gold_indicator is not None and is_base_tile(game.gold_indicator):
+            visible[game.gold_indicator] += 1
+        return visible
+
+    def _public_danger(self, game, player_id: int, tile: int) -> float:
+        if not is_base_tile(tile):
+            return 0.0
+        visible = self._public_visible_counts(game, player_id)
+        unseen_fraction = max(0, 4 - visible[tile]) / 4.0
+        # public_actions is a shared event log. Its length is public and a
+        # monotone, rule-independent proxy for how late the hand has become.
+        late_hand = min(1.0, len(game.public_actions) / 40.0)
+        danger = 0.0
+        for opponent in game.players:
+            if opponent.seat == player_id:
+                continue
+            threat = 1.0 + 0.75 * len(opponent.melds) + 0.5 * late_hand
+            previously_discarded = tile in opponent.discards
+            safety_discount = 0.2 if previously_discarded else 1.0
+            danger += unseen_fraction * threat * safety_discount
+        return danger
+
+    def explain_discard(self, game, player_id: int) -> list[dict[str, object]]:
+        candidates = []
+        for base in super().explain_discard(game, player_id):
+            tile = int(base["tile"])
+            danger = self._public_danger(game, player_id, tile)
+            score = float(base["score"]) - self.risk_weight * danger
+            candidates.append(
+                {
+                    **base,
+                    "public_danger": round(danger, 3),
+                    "risk_penalty": round(self.risk_weight * danger, 3),
+                    "score": round(score, 3),
+                }
+            )
+        return sorted(candidates, key=lambda item: (-float(item["score"]), int(item["tile"])))
+
+
 class OnePlyLookaheadTeacherAgent(HeuristicTeacherAgent):
     """Experimental public-information one-ply discard Teacher.
 
