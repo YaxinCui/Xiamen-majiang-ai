@@ -11,6 +11,7 @@ from scripts.audit_teacher_response_intervention_ope import (
     teacher_epsilon_propensities,
 )
 from scripts.train_afterstate_outcomes import initial_agent_for_outcome_training
+from scripts.train_afterstate_outcomes import parse_args as parse_afterstate_args
 from scripts.select_teacher_response_override import choose_candidate, gate_summary
 
 
@@ -142,6 +143,30 @@ class OffPolicyTests(unittest.TestCase):
         tied = choose_candidate((audit(0.0, 1.0, 1.0), audit(8.0, 1.0, 1.0)))
         self.assertEqual(tied["minimum_lcb_advantage"], 8.0)
         self.assertIsNone(choose_candidate((audit(0.0, -1.0, 2.0),)))
+
+    def test_outcome_trainer_allows_a_blind_terminal_set(self):
+        import sys
+        from unittest.mock import patch
+
+        with patch.object(
+            sys,
+            "argv",
+            [
+                "train_afterstate_outcomes.py",
+                "--train",
+                "train.jsonl",
+                "--validation",
+                "validation.jsonl",
+                "--skip-test",
+                "--fresh-policy-anchor-seed",
+                "1",
+                "--output-dir",
+                "output",
+            ],
+        ):
+            args = parse_afterstate_args()
+        self.assertTrue(args.skip_test)
+        self.assertIsNone(args.test)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,13 @@ def parse_args() -> argparse.Namespace:
         default=[],
         help="可重复指定；只能追加与训练墙组不重叠的验证数据。",
     )
-    parser.add_argument("--test", type=Path, required=True)
+    test_group = parser.add_mutually_exclusive_group(required=True)
+    test_group.add_argument("--test", type=Path)
+    test_group.add_argument(
+        "--skip-test",
+        action="store_true",
+        help="不读取终端集；用于 final OPE 尚未解封时的 checkpoint 训练",
+    )
     parser.add_argument(
         "--additional-test",
         type=Path,
@@ -503,14 +509,20 @@ def main() -> None:
         only_randomized_actions=args.only_randomized_actions,
         decision_phase=args.decision_phase,
     )
-    test = load_partition(
-        (args.test, *args.additional_test),
-        feature_version=args.feature_version,
-        value_scale=args.value_scale,
-        sources=sources,
-        require_known_propensity=args.require_known_propensity,
-        only_randomized_actions=args.only_randomized_actions,
-        decision_phase=args.decision_phase,
+    if args.skip_test and args.additional_test:
+        raise ValueError("skip-test 时不能指定 additional-test")
+    test = (
+        []
+        if args.skip_test
+        else load_partition(
+            (args.test, *args.additional_test),
+            feature_version=args.feature_version,
+            value_scale=args.value_scale,
+            sources=sources,
+            require_known_propensity=args.require_known_propensity,
+            only_randomized_actions=args.only_randomized_actions,
+            decision_phase=args.decision_phase,
+        )
     )
     initial_agent, initialization = initial_agent_for_outcome_training(
         args, device=device
@@ -602,16 +614,20 @@ def main() -> None:
         own_win_weight=args.own_win_loss_weight,
         opponent_win_weight=args.opponent_win_loss_weight,
     )
-    test_metrics = evaluate(
-        network,
-        test,
-        feature_dim=feature_dim,
-        device=device,
-        batch_size=args.batch_size,
-        value_scale=args.value_scale,
-        score_weight=args.score_loss_weight,
-        own_win_weight=args.own_win_loss_weight,
-        opponent_win_weight=args.opponent_win_loss_weight,
+    test_metrics = (
+        None
+        if args.skip_test
+        else evaluate(
+            network,
+            test,
+            feature_dim=feature_dim,
+            device=device,
+            batch_size=args.batch_size,
+            value_scale=args.value_scale,
+            score_weight=args.score_loss_weight,
+            own_win_weight=args.own_win_loss_weight,
+            opponent_win_weight=args.opponent_win_loss_weight,
+        )
     )
     report = {
         "model": "candidate_policy_value_afterstate_outcomes",
@@ -637,6 +653,7 @@ def main() -> None:
             "known_propensity_required": args.require_known_propensity,
             "only_randomized_actions": args.only_randomized_actions,
             "decision_phase": args.decision_phase,
+            "terminal_test_read": not args.skip_test,
         },
         "sources": sorted(sources),
         "inputs": {
@@ -645,18 +662,22 @@ def main() -> None:
                 str(args.validation),
                 *(str(path) for path in args.additional_validation),
             ],
-            "test": [str(args.test), *(str(path) for path in args.additional_test)],
+            "test": (
+                []
+                if args.skip_test
+                else [str(args.test), *(str(path) for path in args.additional_test)]
+            ),
         },
         "counts": {
             "train": len(train),
             "validation": len(validation),
-            "test": len(test),
+            "test": None if args.skip_test else len(test),
             "train_by_source": source_counts(train),
             "validation_by_source": source_counts(validation),
-            "test_by_source": source_counts(test),
+            "test_by_source": None if args.skip_test else source_counts(test),
             "train_propensity": propensity_summary(train),
             "validation_propensity": propensity_summary(validation),
-            "test_propensity": propensity_summary(test),
+            "test_propensity": None if args.skip_test else propensity_summary(test),
         },
         "checkpoint_selection": {
             "split": "validation",
