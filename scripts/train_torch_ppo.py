@@ -154,6 +154,32 @@ def privileged_critic_features(
     return progressive_hiding_features(game, candidate_seat, stage="oracle")
 
 
+def mask_progressive_hiding_features(
+    features: Sequence[float], *, stage: str
+) -> tuple[float, ...]:
+    """Apply the same stage mask to an in-memory oracle feature vector.
+
+    This lets a calibration experiment reuse one fixed rollout set without
+    retaining game objects or exporting hidden cards.  It is intentionally
+    not part of the actor feature path.
+    """
+
+    if stage not in PROGRESSIVE_HIDING_STAGES:
+        raise ValueError("未知 progressive hiding stage")
+    if len(features) != PRIVILEGED_CRITIC_FEATURE_DIM:
+        raise ValueError("progressive hiding 特征维度不匹配")
+    masked = [float(value) for value in features]
+    if stage == "oracle":
+        return tuple(masked)
+    wall_start = BASE_TILE_COUNT * 4
+    wall_end = BASE_TILE_COUNT * 5
+    masked[wall_start:wall_end] = [0.0] * BASE_TILE_COUNT
+    if stage == "visible":
+        opponent_start = BASE_TILE_COUNT
+        masked[opponent_start:wall_start] = [0.0] * (wall_start - opponent_start)
+    return tuple(masked)
+
+
 @dataclass(frozen=True)
 class RolloutSummary:
     episodes: int
@@ -856,9 +882,9 @@ def tensors(
 
 
 def _privileged_critic_training_tensors(
-    steps: Sequence[PpoStep], *, device: torch.device
+    steps: Sequence[PpoStep], *, device: torch.device, hiding_stage: str = "oracle"
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return only in-process oracle inputs and terminal rewards for a critic.
+    """Return only in-process masked inputs and terminal rewards for a critic.
 
     This is deliberately separate from the actor tensors so an experiment can
     calibrate a centralized baseline without taking an actor optimization step.
@@ -870,7 +896,12 @@ def _privileged_critic_training_tensors(
     if any(step.privileged_features is None for step in steps):
         raise ValueError("启用 privileged critic 的 PPO step 缺少内存特征")
     inputs = torch.tensor(
-        [step.privileged_features for step in steps],
+        [
+            mask_progressive_hiding_features(
+                step.privileged_features or (), stage=hiding_stage
+            )
+            for step in steps
+        ],
         dtype=torch.float32,
         device=device,
     )
@@ -891,6 +922,7 @@ def train_privileged_critic(
     epochs: int,
     learning_rate: float,
     seed: int,
+    hiding_stage: str = "oracle",
 ) -> dict[str, float]:
     """Fit only the training-time critic, never the deployable actor.
 
@@ -900,7 +932,9 @@ def train_privileged_critic(
 
     if batch_size <= 0 or epochs <= 0 or learning_rate <= 0:
         raise ValueError("privileged critic 校准超参数不合法")
-    inputs, rewards = _privileged_critic_training_tensors(steps, device=device)
+    inputs, rewards = _privileged_critic_training_tensors(
+        steps, device=device, hiding_stage=hiding_stage
+    )
     optimizer = torch.optim.AdamW(
         privileged_critic.parameters(), lr=learning_rate, weight_decay=0.0001
     )
@@ -920,7 +954,77 @@ def train_privileged_critic(
             total_loss += float(loss.detach().cpu())
             updates += 1
     privileged_critic.eval()
-    return {"updates": float(updates), "loss": total_loss / updates}
+    return {
+        "hiding_stage": float(PROGRESSIVE_HIDING_STAGES.index(hiding_stage)),
+        "updates": float(updates),
+        "loss": total_loss / updates,
+    }
+
+
+def evaluate_privileged_critic(
+    privileged_critic: PrivilegedCritic,
+    steps: Sequence[PpoStep],
+    *,
+    device: torch.device,
+    hiding_stage: str = "oracle",
+) -> dict[str, float]:
+    """Evaluate one in-memory critic at a fixed information-hiding stage."""
+
+    inputs, rewards = _privileged_critic_training_tensors(
+        steps, device=device, hiding_stage=hiding_stage
+    )
+    privileged_critic.eval()
+    with torch.no_grad():
+        predictions = privileged_critic(inputs)
+        errors = predictions - rewards
+        huber = F.smooth_l1_loss(predictions, rewards)
+        mae = errors.abs().mean()
+    return {
+        "decisions": float(len(steps)),
+        "huber": float(huber.detach().cpu()),
+        "mae": float(mae.detach().cpu()),
+    }
+
+
+def train_progressive_hiding_critic(
+    privileged_critic: PrivilegedCritic,
+    steps: Sequence[PpoStep],
+    *,
+    schedule: Sequence[tuple[str, int]],
+    device: torch.device,
+    batch_size: int,
+    learning_rate: float,
+    seed: int,
+) -> list[dict[str, float]]:
+    """Train an in-memory critic through a fixed oracle-to-visible schedule.
+
+    It never calls a policy optimizer, mutates an actor, or serializes the
+    critic. A final independent ``visible`` evaluation is mandatory before
+    this curriculum can motivate any later student-policy experiment.
+    """
+
+    if not schedule or schedule[-1][0] != "visible":
+        raise ValueError("progressive hiding schedule 必须以 visible 结束")
+    metrics: list[dict[str, float]] = []
+    elapsed_epochs = 0
+    for index, (stage, epochs) in enumerate(schedule):
+        if stage not in PROGRESSIVE_HIDING_STAGES or epochs <= 0:
+            raise ValueError("progressive hiding schedule 无效")
+        result = train_privileged_critic(
+            privileged_critic,
+            steps,
+            device=device,
+            batch_size=batch_size,
+            epochs=epochs,
+            learning_rate=learning_rate,
+            # Match the direct-baseline epoch shuffle stream.  A stage
+            # boundary must not accidentally repeat an earlier permutation.
+            seed=seed + elapsed_epochs,
+            hiding_stage=stage,
+        )
+        metrics.append({"stage_index": float(index), **result})
+        elapsed_epochs += epochs
+    return metrics
 
 
 def ppo_update(

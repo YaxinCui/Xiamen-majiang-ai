@@ -159,7 +159,10 @@ class TorchPpoTests(unittest.TestCase):
             PRIVILEGED_CRITIC_FEATURE_DIM,
             PrivilegedCritic,
             collect_rollouts_batched,
+            evaluate_privileged_critic,
+            mask_progressive_hiding_features,
             ppo_update,
+            train_progressive_hiding_critic,
             train_privileged_critic,
         )
         from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
@@ -237,6 +240,29 @@ class TorchPpoTests(unittest.TestCase):
                 for name, value in critic.state_dict().items()
             )
         )
+        visible_features = mask_progressive_hiding_features(
+            steps[0].privileged_features or (), stage="visible"
+        )
+        self.assertTrue(all(value == 0.0 for value in visible_features[34:170]))
+        curriculum_critic = PrivilegedCritic(hidden_size=16).to(policy.device)
+        curriculum = train_progressive_hiding_critic(
+            curriculum_critic,
+            steps,
+            schedule=(("oracle", 1), ("hide_wall", 1), ("visible", 1)),
+            device=policy.device,
+            batch_size=32,
+            learning_rate=0.0001,
+            seed=853,
+        )
+        self.assertEqual(len(curriculum), 3)
+        visible_metrics = evaluate_privileged_critic(
+            curriculum_critic,
+            steps,
+            device=policy.device,
+            hiding_stage="visible",
+        )
+        self.assertGreater(visible_metrics["decisions"], 0)
+        self.assertGreaterEqual(visible_metrics["mae"], 0.0)
 
     def test_progressive_hiding_visible_stage_is_invariant_to_hidden_world(self):
         import random
