@@ -7,6 +7,7 @@ from xiamen_mahjong.off_policy import (
     effective_sample_size,
     intervention_estimates,
     ips_delta,
+    winsorized_doubly_robust_action_advantages,
 )
 from scripts.audit_teacher_response_intervention_ope import (
     selected_interventions,
@@ -114,6 +115,28 @@ class OffPolicyTests(unittest.TestCase):
             doubly_robust_action_advantages(baseline_logged),
             (0.0, -3.0),
         )
+
+    def test_winsorized_dr_advantages_bound_low_propensity_residuals(self):
+        row = LoggedIntervention(
+            group_id="wall-a",
+            logged_index=1,
+            propensities=(0.9, 0.1),
+            reward=14.0,
+            baseline_index=0,
+            target_index=1,
+            direct_values=(3.0, 10.0),
+        )
+        # The unshrunk correction is (14 - 10) / 0.1 = 40.
+        self.assertEqual(
+            winsorized_doubly_robust_action_advantages(
+                row, maximum_abs_correction=12.0
+            ),
+            (0.0, 19.0),
+        )
+        with self.assertRaisesRegex(ValueError, "有限正数"):
+            winsorized_doubly_robust_action_advantages(
+                row, maximum_abs_correction=0.0
+            )
 
     def test_rejects_invalid_support_and_reports_zero_weight_ess(self):
         with self.assertRaisesRegex(ValueError, "归一化"):

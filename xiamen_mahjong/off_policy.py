@@ -119,6 +119,44 @@ def doubly_robust_action_advantages(
     return tuple(advantages)
 
 
+def winsorized_doubly_robust_action_advantages(
+    observation: LoggedIntervention,
+    *,
+    maximum_abs_correction: float,
+) -> tuple[float, ...]:
+    """Return bounded, explicitly biased DR pseudo-advantages versus Teacher.
+
+    Each importance-weighted residual is winsorized to the supplied point
+    scale before the action-minus-Teacher subtraction.  This has a finite
+    influence bound but is intentionally *not* generally unbiased.  It is a
+    training-label primitive only: any policy learned from it must still pass
+    a new, unshrunk IPS and DR evaluation on wall groups the learner never
+    used.  Keeping this separate from :func:`doubly_robust_action_advantages`
+    prevents a variance-reduction heuristic from being misrepresented as an
+    unbiased evaluator.
+    """
+
+    if not math.isfinite(maximum_abs_correction) or maximum_abs_correction <= 0.0:
+        raise ValueError("maximum_abs_correction 必须为有限正数")
+    if observation.direct_values is None:
+        raise ValueError("doubly robust 估计需要 held-out direct_values")
+    values = observation.direct_values
+    logged_residual = observation.reward - values[observation.logged_index]
+
+    def correction(index: int) -> float:
+        if observation.logged_index != index:
+            return 0.0
+        raw = logged_residual / observation.propensities[index]
+        return max(-maximum_abs_correction, min(maximum_abs_correction, raw))
+
+    baseline = observation.baseline_index
+    baseline_correction = correction(baseline)
+    return tuple(
+        value - values[baseline] + correction(index) - baseline_correction
+        for index, value in enumerate(values)
+    )
+
+
 def grouped_mean_stderr(
     values: Iterable[tuple[str, float]],
 ) -> dict[str, float | int]:
