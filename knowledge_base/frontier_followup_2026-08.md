@@ -140,6 +140,27 @@ structural ESS 只有 15.5%，因此没有 collector 授权。这是有价值的
 - 不把四人一般和的经验方法描述成纳什/最优性保证。
 - 不在没有历史粒子过滤和吞吐基础设施前投入全局 CFR、MuZero 或深度 MCTS。
 
+## 2026-08-07：单点干预后的 DR 相对优势路线
+
+Teacher 单点弃牌 v1 的 5-member absolute-score LCB 在 selection 中只以 1.73% override rate
+通过、却在独立 terminal 失败。这不是「校准 outcome 无用」的结论：五个成员的 logged-action
+MAE 均优于零预测；更直接的诊断是，绝对终局分数排序并没有产生可泛化的**相对 Teacher**
+改进。接下来不在已消耗的 selection/terminal 上改阈值，而是用全新墙组考察一个不同的候选族。
+
+新基元为每个合法动作构造相对 Teacher 行动的 doubly-robust 伪优势：直接模型差
+`q(a)-q(Teacher)` 加上 logged action 和 Teacher action各自一次的 inverse-propensity residual。
+该形式来自 contextual-bandit DR 的「奖励模型或 propensity 只要一方正确仍可校正」思想，适用于本项目的
+**单次替换后恢复 Teacher**收集契约，而不适用于多步策略修改。参考
+[Dudík et al. 2011](https://arxiv.org/abs/1103.4601)、
+[Wang et al. 2017](https://proceedings.mlr.press/v70/wang17a.html) 以及
+[Farajtabar et al. 2018](https://proceedings.mlr.press/v80/farajtabar18a.html)。
+
+实现只新增 `doubly_robust_action_advantages` 数学基元与精确单位测试；尚未训练 action head、
+未读取新 terminal、未生成新策略。真正实验必须：(1) 按完整物理墙做 K-fold cross-fitting，令每行 direct
+prediction 不接触本行墙组；(2) 仅在 train fold 拟合相对优势 learner；(3) 在独立 validation 先报告伪优势残差、
+action-gap 与 clipping/ESS；(4) 以全新四层墙组和预注册的低 override-rate policy 进行 IPS/DR，再决定是否打开
+terminal。不能因为 DR target 在代数上无偏，就跳过 finite-sample OPE 或把它当成完整对局价值。
+
 ## 下一次实验的最小规格
 
 在实施新网络前，先做一个最小实验：冻结 `Teacher` 对手池，串行与批量 collector 对同 32

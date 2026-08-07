@@ -75,17 +75,48 @@ def ips_delta(observation: LoggedIntervention) -> float:
 def doubly_robust_delta(observation: LoggedIntervention) -> float:
     """DR estimate of target minus baseline, using a held-out direct model."""
 
+    return doubly_robust_action_advantages(observation)[observation.target_index]
+
+
+def doubly_robust_action_advantages(
+    observation: LoggedIntervention,
+) -> tuple[float, ...]:
+    """Return a DR pseudo-advantage for every legal action versus Teacher.
+
+    For action ``a`` and frozen baseline ``b`` this is the contextual-bandit
+    pseudo-outcome
+
+    ``q(a)-q(b) + 1[A=a](R-q(A))/p(a) - 1[A=b](R-q(A))/p(b)``.
+
+    Its expectation is the one-intervention return difference whenever the
+    logged propensity is correct; a separate, wall-group-disjoint direct model
+    supplies ``q``.  The vector is useful for a *future* relative-advantage
+    learner because every legal action is centered on the deployed Teacher,
+    rather than learning an uncentered terminal score.  It is not a complete
+    Mahjong value target: the logged continuation must still be Teacher after
+    the single intervention, and high-variance pseudo-outcomes must not be
+    used for action selection without new held-out OPE.
+    """
+
     if observation.direct_values is None:
         raise ValueError("doubly robust 估计需要 held-out direct_values")
     values = observation.direct_values
     logged_residual = observation.reward - values[observation.logged_index]
-    target = values[observation.target_index]
-    if observation.logged_index == observation.target_index:
-        target += logged_residual / observation.propensities[observation.target_index]
-    baseline = values[observation.baseline_index]
-    if observation.logged_index == observation.baseline_index:
-        baseline += logged_residual / observation.propensities[observation.baseline_index]
-    return target - baseline
+    baseline = observation.baseline_index
+    baseline_residual = (
+        logged_residual / observation.propensities[baseline]
+        if observation.logged_index == baseline
+        else 0.0
+    )
+    advantages: list[float] = []
+    for action_index, value in enumerate(values):
+        action_residual = (
+            logged_residual / observation.propensities[action_index]
+            if observation.logged_index == action_index
+            else 0.0
+        )
+        advantages.append(value - values[baseline] + action_residual - baseline_residual)
+    return tuple(advantages)
 
 
 def grouped_mean_stderr(

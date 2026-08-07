@@ -2,6 +2,7 @@ import unittest
 
 from xiamen_mahjong.off_policy import (
     LoggedIntervention,
+    doubly_robust_action_advantages,
     doubly_robust_delta,
     effective_sample_size,
     intervention_estimates,
@@ -61,6 +62,7 @@ class OffPolicyTests(unittest.TestCase):
 
         self.assertEqual(ips_delta(rows[0]), 20.0)
         self.assertEqual(doubly_robust_delta(rows[0]), 10.0)
+        self.assertEqual(doubly_robust_action_advantages(rows[0]), (0.0, 10.0))
         report = intervention_estimates(rows)
         self.assertEqual(report["ips"]["groups"], 2)
         self.assertAlmostEqual(report["ips"]["mean"], 10.0)
@@ -80,6 +82,38 @@ class OffPolicyTests(unittest.TestCase):
         )
         self.assertEqual(ips_delta(row), 0.0)
         self.assertEqual(doubly_robust_delta(row), 0.0)
+
+    def test_dr_action_advantages_apply_each_importance_residual_once(self):
+        row = LoggedIntervention(
+            group_id="wall-a",
+            logged_index=2,
+            propensities=(0.2, 0.3, 0.5),
+            reward=14.0,
+            baseline_index=0,
+            target_index=2,
+            direct_values=(3.0, 6.0, 10.0),
+        )
+        # Residual is +4 on action 2; its only correction is 4 / 0.5.
+        self.assertEqual(
+            doubly_robust_action_advantages(row),
+            (0.0, 3.0, 15.0),
+        )
+        self.assertEqual(doubly_robust_delta(row), 15.0)
+
+        baseline_logged = LoggedIntervention(
+            group_id="wall-b",
+            logged_index=0,
+            propensities=(0.5, 0.5),
+            reward=7.0,
+            baseline_index=0,
+            target_index=1,
+            direct_values=(3.0, 8.0),
+        )
+        # Baseline residual is subtracted from every non-baseline action.
+        self.assertEqual(
+            doubly_robust_action_advantages(baseline_logged),
+            (0.0, -3.0),
+        )
 
     def test_rejects_invalid_support_and_reports_zero_weight_ess(self):
         with self.assertRaisesRegex(ValueError, "归一化"):
