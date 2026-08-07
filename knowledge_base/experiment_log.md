@@ -781,3 +781,19 @@ selection 仅比较预注册 LCB 优势阈值 `{0,8,16,24}`（5 成员均值减 
 `knowledge_base/teacher_discard_intervention_v1_protocol.md`、
 `artifacts/teacher-discard-intervention-classic-v1/coverage.json` 与
 `artifacts/teacher-discard-intervention-classic-v1-heldout/selection-result.json`。
+
+## 2026-08-07：原始 DR 相对优势诊断（拒绝直接训练）
+
+为给下一候选族建立正确统计基元，新增每个合法动作相对 Teacher 的 DR 伪优势：直接模型差
+`q(a)−q(Teacher)`，再对 logged action 与 Teacher action各加一次已知 propensity 的 residual。五个 outcome 模型均只
+见过 train 墙，因此在 v1 validation 的 727 个随机弃牌干预／228 个墙组上可以安全做 aggregate-only 审计；没有读取
+selection/terminal、没有训练 advantage head 或选择动作。
+
+结果否决了朴素的未缩减伪标签：7,135 个非 Teacher 动作的直接模型 gap 标准差仅 **11.33** 分（p99 **14.40**），
+而 DR 伪优势标准差为 **206.66** 分，范围 **[−1,737.25, +3,251.66]**；logged action 伪优势标准差更为 **628.66**。
+相应非 Teacher propensity 的中位数为 **0.0333**，范围 **0.0235–0.2**，重要性残差尾部放大与此一致。故不以原始 DR
+向量训练 action head、不做 AWR/PPO 或网页选择。完整无私有特征报告为
+`artifacts/teacher-discard-intervention-classic-v1/dr-advantage-validation-audit.json`。
+
+未来若再研究相对优势，必须使用按物理墙 cross-fitting 的 direct model，并在**全新**四层墙组上预注册有限的
+shrinkage／SWITCH 类方差控制与偏差审计；不能在已消耗 v1 selection/terminal 上调 clipping 或 threshold。

@@ -1,0 +1,61 @@
+{
+  "status": "diagnostic_only_no_advantage_learner_or_action_selection",
+  "intervention_phase": "discard",
+  "outcome_checkpoints": [
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed702/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed703/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed704/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed705/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed706/policy-value.pt"
+  ],
+  "data": [
+    "artifacts/teacher-discard-intervention-classic-v1/validation.trajectories.jsonl"
+  ],
+  "value_scale": 80.0,
+  "decisions": 727,
+  "wall_groups": 228,
+  "direct_model_scope": "all listed outcome models must exclude every audited wall group",
+  "pseudo_advantage_points": {
+    "non_teacher_actions": {
+      "count": 7135,
+      "mean": -3.3015275068714875,
+      "std": 206.66412156881833,
+      "p50": 1.944344162940979,
+      "p90": 49.83456001783672,
+      "p99": 120.42671501636504,
+      "minimum": -1737.2535972595213,
+      "maximum": 3251.6611270904536
+    },
+    "logged_actions": {
+      "count": 727,
+      "mean": -2.451198551542495,
+      "std": 628.6554465793245,
+      "p50": 0.0,
+      "p90": 99.64863538742065,
+      "p99": 2806.461268901825,
+      "minimum": -1737.2535972595213,
+      "maximum": 3251.6611270904536
+    },
+    "direct_model_non_teacher_gap": {
+      "count": 7135,
+      "mean": -3.5948681052479197,
+      "std": 11.32892234649749,
+      "p50": -1.623950719833374,
+      "p90": 5.834651827812195,
+      "p99": 14.40404200553894,
+      "minimum": -100.32791376113892,
+      "maximum": 44.503589391708374
+    }
+  },
+  "non_teacher_propensity": {
+    "count": 7135,
+    "mean": 0.036524668007334234,
+    "std": 0.011446337653439885,
+    "p50": 0.03333333333333333,
+    "p90": 0.05,
+    "p99": 0.06666666666666667,
+    "minimum": 0.023529411764705882,
+    "maximum": 0.2
+  },
+  "warning": "These are per-row DR pseudo-outcome diagnostics, not an OPE result. They cannot select actions, train a deployable policy, or justify a strength claim."
+}

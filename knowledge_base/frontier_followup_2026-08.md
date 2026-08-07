@@ -161,6 +161,13 @@ prediction 不接触本行墙组；(2) 仅在 train fold 拟合相对优势 lear
 action-gap 与 clipping/ESS；(4) 以全新四层墙组和预注册的低 override-rate policy 进行 IPS/DR，再决定是否打开
 terminal。不能因为 DR target 在代数上无偏，就跳过 finite-sample OPE 或把它当成完整对局价值。
 
+这个门槛已在 v1 validation 实测：5 个只见过 train 的 outcome 模型对 727 个 validation 干预产生 7,135 个
+非 Teacher DR 伪优势，其标准差 **206.66** 分、范围 **[−1737.25,+3251.66]**；相同直接模型 gap 的标准差仅
+**11.33** 分。非 Teacher propensity 中位数为 0.0333，低 propensity residual 造成极端尾部。因而**未缩减** DR
+伪优势 learner 在训练前即拒绝。下一版若使用 shrinkage，必须把它当作新的、可能有偏的候选族，预注册 bias/variance
+诊断和新的四层墙组；可参考 [Su et al. 2020](https://proceedings.mlr.press/v119/su20a.html) 的有限样本权重缩减思路，
+但不可将其理论或 benchmark 结果外推为本项目保证。
+
 ## 下一次实验的最小规格
 
 在实施新网络前，先做一个最小实验：冻结 `Teacher` 对手池，串行与批量 collector 对同 32

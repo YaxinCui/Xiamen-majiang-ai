@@ -232,6 +232,11 @@ train/validation/selection/terminal = **3,003/727/579/581**，各分区墙组完
 IPS/DR 下界为 **−0.341/−0.211**，故候选及本 terminal 墙组均已否决。不可据此 ensemble 做网页、PPO 或完整策略。
 下一条改进必须定义新的、可预注册的候选族（而非改此 score-LCB 阈值／z／成员），并收集全新的四层墙组。
 
+相对 Teacher 的 DR 伪优势作为下一候选的数学基元已经审计，但原始标签不能直接训练：在 727 个 validation 随机弃牌
+干预上，非 Teacher 动作的 direct gap 标准差为 **11.33** 分，DR 伪优势却为 **206.66** 分（范围
+**[−1737,+3252]**），低 propensity residual 造成严重尾部。因此未缩减 DR learner 明确拒绝；未来只能以新的、
+预注册 shrinkage/cross-fitting 候选和全新四层墙组继续，不能使用已消耗的 v1 selection/terminal 调 clipping。
+
 ## 实验记录模板
 
 每个实验目录应保存 `config.json`、`metrics.json`、`checkpoint`、`git_commit`、
