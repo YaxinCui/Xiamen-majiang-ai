@@ -828,3 +828,12 @@ score MAE 为 **28.96** 分；原始 DR 非 Teacher 伪优势仍有标准差 **1
 **50.17% / 45.66% / 40.71%**；这些仅为固定模型的诊断，未用于改变 C、阈值、架构或 epoch。下一步只能在 selection
 一次性比较 `(C,T)` 的九个预注册组合，要求未缩减 grouped IPS 与 DR 95% 下界都为正、两侧 ESS ≥75；若全失败，terminal
 必须保持未读。
+
+selection 已执行且**全部拒绝**，状态 `selection_rejected_terminal_unread`。C=20 的 T=0/8/16 的 IPS/DR 下界分别为
+−12.416/−9.977、−1.761/−1.105、−1.792/−0.974 分/局；C=40 为 −15.344/−12.012、−4.069/−2.690、
+−0.535/−0.428；C=80 为 −10.495/−6.921、−4.676/−3.875、**−0.101/+0.061**。后者虽有正 DR 下界且两侧
+ESS 242.2/245.2，仍因 IPS 下界不为正而失败；其余组合也均失败（C=20,T=0 的 target ESS 仅 74.69）。因此没有
+唯一 winner、没有读取 terminal、没有 200 墙实战筛选，也没有模型参数上传为可用 AI。v3 selection 墙组已消耗，禁止
+在其上改变 C、T、网络、训练轮数、direct 成员或 OPE 聚合后重跑；terminal 仍保留，但只可用于未来已通过其自身新协议的
+候选，不能作为本候选的重试集。完整审计为本地
+`artifacts/teacher-advantage-shrinkage-classic-v3-heldout/selection-result.json`。
