@@ -10,6 +10,7 @@ from pathlib import Path
 import threading
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 from .agents import GameAction
 from .game import GameError, XiamenMahjongGame
@@ -56,6 +57,13 @@ class GameStore:
         self._ai_identity = ai_identity or ai_profile
         self._human_log = Path(human_log) if human_log is not None else None
         self._human_recording_purpose = human_recording_purpose
+        # A random, local-only identifier marks one server-run recording
+        # session without asking for a player name, account, device ID, or
+        # network identifier.  Evaluation auditing treats sessions—not hands—
+        # as its independent statistical units.
+        self._human_recording_session_id = (
+            uuid4().hex if self._human_log is not None else None
+        )
         self._human_decisions: list[TeacherDecision] = []
         self._human_hand_written = False
         self._human_log_error = False
@@ -151,6 +159,7 @@ class GameStore:
                 # entering the behavioral-imitation path and lets the human
                 # benchmark require an explicit independent source.
                 "recording_purpose": self._human_recording_purpose,
+                "recording_session_id": self._human_recording_session_id,
                 "opponent_policy": self._ai_identity,
             },
         )

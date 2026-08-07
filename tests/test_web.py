@@ -147,6 +147,9 @@ class WebTests(unittest.TestCase):
                 "excluded_until_separate_quality_review",
             )
             self.assertEqual(record["source_metadata"]["recording_purpose"], "training")
+            self.assertRegex(
+                record["source_metadata"]["recording_session_id"], r"^[0-9a-f]{32}$"
+            )
             self.assertEqual(
                 record["source_metadata"]["opponent_policy"],
                 "sha256:test",
@@ -214,6 +217,19 @@ class WebTests(unittest.TestCase):
             )
             self.assertFalse(duplicate_audit["ready_for_manual_review"])
             self.assertEqual(duplicate_audit["duplicate_hands"], 1)
+            duplicate_new_session = Path(directory) / "human-duplicate-new-session.jsonl"
+            duplicate_new_session_record = json.loads(json.dumps(record))
+            duplicate_new_session_record["trajectory_id"] = "duplicate-new-session"
+            duplicate_new_session_record["split_group_id"] = "duplicate-new-session"
+            duplicate_new_session_record["source_metadata"]["recording_session_id"] = "f" * 32
+            duplicate_new_session.write_text(
+                json.dumps(duplicate_new_session_record) + "\n", encoding="utf-8"
+            )
+            duplicate_cross_session_audit = audit_local_human_trajectories(
+                [output, duplicate_new_session], minimum_hands=1
+            )
+            self.assertFalse(duplicate_cross_session_audit["ready_for_manual_review"])
+            self.assertEqual(duplicate_cross_session_audit["duplicate_hands"], 1)
 
             # Split only complete, audited human hands.  The source fixture
             # has one decision per hand; cloning it with distinct opaque IDs
@@ -256,6 +272,9 @@ class WebTests(unittest.TestCase):
                 evaluation_record["split_group_id"] = f"evaluation-group-{index}"
                 evaluation_record["hand_number"] = index + 1
                 evaluation_record["source_metadata"]["recording_purpose"] = "evaluation"
+                evaluation_record["source_metadata"]["recording_session_id"] = (
+                    f"{index // 10 + 1:032x}"
+                )
                 evaluation_record["outcome"]["scores"] = [-16, 6, 5, 5]
                 evaluation_rows.append(json.dumps(evaluation_record, ensure_ascii=False))
             evaluation_input.write_text(
@@ -268,9 +287,10 @@ class WebTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "不得切分为训练数据"):
                 split_local_human_trajectories([evaluation_input], minimum_hands=100)
             evaluation = audit_local_human_evaluation(
-                [evaluation_input], minimum_hands=100
+                [evaluation_input], minimum_hands=100, minimum_sessions=10
             )
             self.assertTrue(evaluation["ready_for_manual_human_strength_review"])
+            self.assertEqual(evaluation["comparison"]["recording_sessions"], 10)
             self.assertEqual(
                 evaluation["comparison"]["ai_side_score_delta_mean"], 16.0
             )
@@ -278,6 +298,14 @@ class WebTests(unittest.TestCase):
                 evaluation["comparison"]["ai_side_score_delta_95pct_low"], 16.0
             )
             self.assertTrue(evaluation["comparison"]["positive_ai_side_lcb"])
+            insufficient_sessions = audit_local_human_evaluation(
+                [evaluation_input], minimum_hands=100, minimum_sessions=11
+            )
+            self.assertFalse(insufficient_sessions["ready_for_manual_human_strength_review"])
+            self.assertIn(
+                "insufficient_evaluation_sessions",
+                insufficient_sessions["gate_reasons"],
+            )
 
 
 if __name__ == "__main__":

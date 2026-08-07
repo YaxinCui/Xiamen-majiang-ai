@@ -68,10 +68,11 @@ python3 scripts/audit_human_trajectories.py \
 ```bash
 python3 scripts/audit_human_match_strength.py \
   --input local_human_data/frozen-ai-human-evaluation.jsonl \
-  --minimum-hands 200
+  --minimum-hands 200 --minimum-sessions 10
 ```
 
-报告的是“一名真人座位对三份同一 AI”的 AI 方分差及其正态近似 95% 下界。下界为正也只解锁人工复核：仍需验证
+每次启动记录器会生成一个不含姓名、账号或设备信息的随机会话 ID；报告按会话均分而非逐局计数，避免一名玩家
+连续对局被误作许多独立人类样本。下界为正也只解锁人工复核：仍需验证每个会话对应预先声明的独立参与者或区块、
 参与者同意、招募范围和水平、AI 身份在全程冻结，以及这些局从未用于训练、early stop 或选模，才可能作为
 “胜过该真人评测群体”的证据；它不自动证明胜过一般人类。
 

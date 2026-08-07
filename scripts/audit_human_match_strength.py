@@ -20,6 +20,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument("--minimum-hands", type=int, default=200)
+    parser.add_argument("--minimum-sessions", type=int, default=10)
     parser.add_argument("--output", type=Path)
     return parser.parse_args()
 
@@ -29,6 +30,7 @@ def main() -> None:
     report = audit_local_human_evaluation(
         args.input,
         minimum_hands=args.minimum_hands,
+        minimum_sessions=args.minimum_sessions,
     )
     rendered = json.dumps(report, ensure_ascii=False, indent=2)
     if args.output:

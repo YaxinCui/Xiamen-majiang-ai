@@ -8,6 +8,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any, Iterable
+from uuid import UUID
 
 from .training import (
     TrainingTrajectory,
@@ -26,6 +27,18 @@ _FORBIDDEN_PRIVATE_KEYS = {
 HUMAN_SPLIT_VERSION = "xiamen-local-human-hand-split-v1"
 _HUMAN_SPLIT_SALT = "xiamen-local-human-hand-split-v1"
 _RECORDING_PURPOSES = frozenset({"training", "evaluation"})
+
+
+def _is_opaque_session_id(value: Any) -> bool:
+    """Accept only a UUID-shaped random recorder session identity."""
+
+    if not isinstance(value, str):
+        return False
+    try:
+        UUID(hex=value)
+    except (TypeError, ValueError, AttributeError):
+        return False
+    return len(value.replace("-", "")) == 32
 
 
 def _private_key_paths(value: Any, *, prefix: str = "") -> list[str]:
@@ -51,6 +64,12 @@ def _trajectory_fingerprint(trajectory: TrainingTrajectory) -> str:
     payload = trajectory.payload()
     payload.pop("trajectory_id", None)
     payload.pop("split_group_id", None)
+    metadata = payload.get("source_metadata")
+    if isinstance(metadata, dict):
+        # A recorder session is an audit block, not part of the physical hand.
+        # Retaining it here would let the same hand evade duplicate detection
+        # simply by being copied into a newly started browser session.
+        metadata.pop("recording_session_id", None)
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
     return hashlib.blake2b(encoded, digest_size=16).hexdigest()
 
@@ -62,8 +81,13 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
         issues.append("collector_not_local_human_opt_in")
     if metadata.get("training_default") != "excluded_until_separate_quality_review":
         issues.append("missing_training_isolation_marker")
-    if metadata.get("recording_purpose") not in _RECORDING_PURPOSES:
+    purpose = metadata.get("recording_purpose")
+    if purpose not in _RECORDING_PURPOSES:
         issues.append("missing_or_invalid_recording_purpose")
+    elif purpose == "evaluation" and not _is_opaque_session_id(
+        metadata.get("recording_session_id")
+    ):
+        issues.append("missing_or_invalid_evaluation_session_id")
     if not isinstance(metadata.get("opponent_policy"), str):
         issues.append("missing_opponent_policy_identity")
     if trajectory.seed is not None or any(
@@ -132,6 +156,7 @@ def audit_local_human_trajectories(
     rules_versions: Counter[str] = Counter()
     opponent_policies: Counter[str] = Counter()
     recording_purposes: Counter[str] = Counter()
+    recording_sessions: set[str] = set()
     action_counts: Counter[str] = Counter()
     human_scores: list[float] = []
     human_wins = 0
@@ -148,6 +173,9 @@ def audit_local_human_trajectories(
         rules_versions[trajectory.rules_version] += 1
         opponent_policies[str(trajectory.source_metadata["opponent_policy"])] += 1
         recording_purposes[str(trajectory.source_metadata["recording_purpose"])] += 1
+        session_id = trajectory.source_metadata.get("recording_session_id")
+        if isinstance(session_id, str):
+            recording_sessions.add(session_id)
         action_counts.update(decision.chosen_action.kind for decision in trajectory.decisions)
         scores = trajectory.outcome["scores"]
         human_scores.append(float(scores[0]))
@@ -188,6 +216,7 @@ def audit_local_human_trajectories(
         "rules_versions": dict(sorted(rules_versions.items())),
         "opponent_policies": dict(sorted(opponent_policies.items())),
         "recording_purposes": dict(sorted(recording_purposes.items())),
+        "recording_session_count": len(recording_sessions),
         "human_action_counts": dict(sorted(action_counts.items())),
         "human_match_summary": {
             "scope": "structurally_valid_completed_hands_only",
@@ -329,25 +358,61 @@ def audit_local_human_evaluation(
     paths: Iterable[str | Path],
     *,
     minimum_hands: int = 200,
+    minimum_sessions: int = 10,
 ) -> dict[str, Any]:
     """Audit an evaluation-only human-versus-fixed-AI match corpus.
 
     The browser records one human at seat zero and three copies of one frozen
     AI identity.  The AI-side score is therefore the negation of the human
     hand score.  This routine reports a conservative normal-approximation
-    lower bound for that *specific local match corpus*.  It deliberately does
-    not claim population-level human strength or authorize a deployment: the
-    recording purpose only makes leakage into this project's trainers fail
-    closed; participant quality and recruitment still require manual review.
+    lower bound for that *specific local match corpus*, with each local
+    recording session weighted equally. It deliberately does not claim
+    population-level human strength or authorize a deployment: the recording
+    purpose only makes leakage into this project's trainers fail closed;
+    participant quality and recruitment still require manual review.
     """
 
-    audit = audit_local_human_trajectories(paths, minimum_hands=minimum_hands)
+    if minimum_sessions < 2:
+        raise ValueError("minimum_sessions 至少为 2")
+    files = [Path(path) for path in paths]
+    audit = audit_local_human_trajectories(files, minimum_hands=minimum_hands)
     gate_reasons = list(audit["gate_reasons"])
     if set(audit["recording_purposes"]) != {"evaluation"}:
         gate_reasons.append("records_are_not_evaluation_only")
-    summary = audit["human_match_summary"]
-    human_mean = summary["human_score_delta_mean"]
-    human_high = summary["human_score_delta_95pct_high"]
+    session_scores: dict[str, list[float]] = {}
+    for path in files:
+        for trajectory in read_trajectory_jsonl(path):
+            if _validate_human_trajectory(trajectory):
+                continue
+            metadata = trajectory.source_metadata
+            if metadata.get("recording_purpose") != "evaluation":
+                continue
+            session_id = metadata.get("recording_session_id")
+            if not _is_opaque_session_id(session_id):
+                continue
+            scores = trajectory.outcome["scores"]
+            session_scores.setdefault(str(session_id), []).append(float(scores[0]))
+    session_means = [
+        sum(scores) / len(scores)
+        for scores in session_scores.values()
+        if scores
+    ]
+    if len(session_means) < minimum_sessions:
+        gate_reasons.append("insufficient_evaluation_sessions")
+    human_mean = sum(session_means) / len(session_means) if session_means else None
+    human_stderr = (
+        math.sqrt(
+            sum((score - human_mean) ** 2 for score in session_means)
+            / (len(session_means) * (len(session_means) - 1))
+        )
+        if len(session_means) > 1 and human_mean is not None
+        else None
+    )
+    human_high = (
+        human_mean + 1.96 * human_stderr
+        if human_mean is not None and human_stderr is not None
+        else None
+    )
     ai_mean = -float(human_mean) if human_mean is not None else None
     ai_low = -float(human_high) if human_high is not None else None
     return {
@@ -355,7 +420,22 @@ def audit_local_human_evaluation(
         "source": "local_human_opt_in",
         "audit": audit,
         "comparison": {
-            "scope": "one_human_seat_vs_three_copies_of_one_fixed_ai_identity",
+            "scope": (
+                "one_human_seat_vs_three_copies_of_one_fixed_ai_identity; "
+                "session_blocked_equal_weight"
+            ),
+            "recording_sessions": len(session_means),
+            "minimum_sessions": minimum_sessions,
+            "hands_per_session_min": (
+                min(len(scores) for scores in session_scores.values())
+                if session_scores
+                else 0
+            ),
+            "hands_per_session_max": (
+                max(len(scores) for scores in session_scores.values())
+                if session_scores
+                else 0
+            ),
             "ai_side_score_delta_mean": ai_mean,
             "ai_side_score_delta_95pct_low": ai_low,
             "positive_ai_side_lcb": ai_low is not None and ai_low > 0.0,
@@ -365,7 +445,8 @@ def audit_local_human_evaluation(
         "warning": (
             "This is an evaluation-only local match audit, not a claim that an AI "
             "beats humans generally. Before any such claim, manually verify consent, "
-            "participant recruitment/skill, frozen AI identity, and that these hands "
-            "were never read for training or model selection."
+            "that each session corresponds to the intended independent participant or "
+            "pre-registered block, participant recruitment/skill, frozen AI identity, "
+            "and that these hands were never read for training or model selection."
         ),
     }
