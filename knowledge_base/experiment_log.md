@@ -878,3 +878,22 @@ selection 已执行且全部拒绝，状态 `selection_rejected_terminal_unread`
 公开危险代理与本规则及 frozen Teacher 的牌效率权衡不相容，不能解释为“防守增强”。因此整个固定族被拒绝：不重跑
 selection、不读取 terminal、不接入网页，也不将其作为训练教师或模型参数上传。审计汇总仅保留在本地
 `artifacts/risk-aware-teacher-v5/selection-result.json`；协议和实现为 commit `3ec99db`。
+
+## 2026-08-07：从零初始化自博弈联赛 v1-a（selection 拒绝，terminal 未读）
+
+此前所有可部署候选与旧 neural checkpoint 均已失去训练起点资格，故 v1-a 不继承任何历史参数或轨迹：fresh candidate-MLP
+由 `seed=202611800` 初始化（metadata `ancestry=none`），只读取行动者本家手牌和公开信息。固定训练为 classic 下
+8 iteration × 256 个候选席、rollout batch 64、PPO epoch 2、learning rate `5e-5`；每个非候选座位独立以 0.5 概率
+使用冻结 Teacher 或本轮更新前的 current-policy snapshot。没有外部 checkpoint、oracle critic、Q/outcome 标签或中间
+checkpoint 挑选。训练共生成 2,048 个候选席对局；只审计 final iteration-8 checkpoint。
+
+预注册 selection 为 classic `seed=202612500` 起 80 个物理墙、四座轮换（320 局）；唯一门槛是相对三名 Teacher 的
+按墙 paired score delta 95% 下界严格为正。结果为 **−21.750 ± 0.722** 分/局，95% CI
+**[−23.165, −20.335]**，2/320 胜、5/320 流局。下界和点估计均大幅为负，状态
+`selection_rejected_terminal_unread`；独立 terminal `seed=202612700` 起 320 墙从未读取。
+
+这否决的是“随机 actor + 终局净分 PPO + Teacher/current 快照 50:50”这一固定 bootstrap 配置。它表明在当前稀疏终局
+回报中，纯随机自博弈无法获得与规则 Teacher 竞争的初始策略；不再扩增 iteration、调整 PPO 超参、改 snapshot 比例或
+复用该 selection/terminal 墙。checkpoint 和原始报告只留在本地 ignored artifact，不上传为模型参数，也不接入网页。
+下一步必须先建立一个可独立审计的强启动信号（经质量审计的人类对局，或新的、带独立强度证据的规则/搜索教师），而不是
+重复纯随机 PPO。
