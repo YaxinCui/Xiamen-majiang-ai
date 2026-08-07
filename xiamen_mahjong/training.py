@@ -6708,6 +6708,46 @@ def split_heldout_trajectories_by_group(
     return partitions
 
 
+def split_trajectories_by_group_folds(
+    trajectories: Iterable[TrainingTrajectory],
+    *,
+    fold_count: int,
+    split_salt: str,
+) -> tuple[list[TrainingTrajectory], ...]:
+    """Deterministically assign complete physical-wall groups to K folds.
+
+    Unlike the selection/terminal splitter, every output fold is intended for
+    training-time cross-fitting.  A direct outcome model for fold ``i`` must
+    train only on the other folds before supplying pseudo-labels for fold
+    ``i``.  Keeping whole seat-rotation groups together is non-negotiable:
+    otherwise a model can indirectly see the same physical wall it predicts.
+    """
+
+    if fold_count < 2:
+        raise ValueError("cross-fitting fold_count 至少为 2")
+    if not split_salt:
+        raise ValueError("cross-fitting split_salt 不能为空")
+    folds: tuple[list[TrainingTrajectory], ...] = tuple(
+        [] for _ in range(fold_count)
+    )
+    seen_trajectory_ids: set[str] = set()
+    for trajectory in trajectories:
+        if trajectory.trajectory_id in seen_trajectory_ids:
+            raise ValueError("cross-fitting 输入包含重复 trajectory_id")
+        seen_trajectory_ids.add(trajectory.trajectory_id)
+        if not trajectory.split_group_id:
+            raise ValueError("cross-fitting 分割要求 split_group_id")
+        digest = hashlib.blake2b(
+            f"{split_salt}|{trajectory.split_group_id}".encode("utf-8"),
+            digest_size=8,
+        ).digest()
+        fold_index = int.from_bytes(digest, "big") % fold_count
+        folds[fold_index].append(trajectory)
+    if any(not fold for fold in folds):
+        raise ValueError("cross-fitting 产生空 fold；请增加墙组或改变 fold_count")
+    return folds
+
+
 def trajectory_manifest(trajectories: Iterable[TrainingTrajectory]) -> dict[str, Any]:
     """Summarize coverage and outcomes for data-quality gates."""
 

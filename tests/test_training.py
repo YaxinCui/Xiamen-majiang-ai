@@ -59,6 +59,7 @@ from xiamen_mahjong.training import (
     read_trajectory_jsonl,
     read_jsonl,
     split_heldout_trajectories_by_group,
+    split_trajectories_by_group_folds,
     split_trajectories_by_hand,
     public_action_sequence_features,
     trajectory_manifest,
@@ -1404,6 +1405,26 @@ class TrainingTests(unittest.TestCase):
                 for decision in trajectory.decisions
             )
         )
+
+    def test_cross_fitting_folds_keep_every_wall_group_together(self):
+        rows = tuple(
+            SimpleNamespace(
+                trajectory_id=f"trajectory-{index}",
+                split_group_id=f"wall-{index // 4}",
+            )
+            for index in range(48)
+        )
+        folds = split_trajectories_by_group_folds(
+            rows, fold_count=3, split_salt="cross-fit-test-v1"
+        )
+        self.assertEqual(len(folds), 3)
+        self.assertTrue(all(fold for fold in folds))
+        memberships: dict[str, set[int]] = {}
+        for fold_index, fold in enumerate(folds):
+            for row in fold:
+                memberships.setdefault(row.split_group_id, set()).add(fold_index)
+        self.assertEqual(set(memberships), {f"wall-{index}" for index in range(12)})
+        self.assertTrue(all(len(indices) == 1 for indices in memberships.values()))
 
     def test_counterfactual_action_values_are_safe_and_grouped_by_wall(self):
         policy = NeuralRulePolicyModel(hidden_size=4, seed=587)
