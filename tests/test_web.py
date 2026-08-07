@@ -10,6 +10,7 @@ from xiamen_mahjong.agents import HeuristicTeacherAgent
 from xiamen_mahjong.human_data import (
     audit_local_human_trajectories,
     require_local_human_training_approval,
+    split_local_human_trajectories,
 )
 from xiamen_mahjong.web import GameStore, make_handler
 from http.server import ThreadingHTTPServer
@@ -209,6 +210,36 @@ class WebTests(unittest.TestCase):
             )
             self.assertFalse(duplicate_audit["ready_for_manual_review"])
             self.assertEqual(duplicate_audit["duplicate_hands"], 1)
+
+            # Split only complete, audited human hands.  The source fixture
+            # has one decision per hand; cloning it with distinct opaque IDs
+            # and hand numbers creates a deterministic 100-hand test corpus
+            # without adding seeds, other-player hands or value targets.
+            split_input = Path(directory) / "split-input.jsonl"
+            split_rows = []
+            for index in range(100):
+                split_record = json.loads(json.dumps(record))
+                split_record["trajectory_id"] = f"human-split-{index}"
+                split_record["split_group_id"] = f"human-group-{index}"
+                split_record["hand_number"] = index + 1
+                split_rows.append(json.dumps(split_record, ensure_ascii=False))
+            split_input.write_text("\n".join(split_rows) + "\n", encoding="utf-8")
+            partitions, split_audit = split_local_human_trajectories(
+                [split_input], minimum_hands=100
+            )
+            self.assertEqual(sum(len(records) for records in partitions.values()), 100)
+            self.assertTrue(all(partitions[split] for split in partitions))
+            self.assertEqual(split_audit["split_group_overlap"], 0)
+            self.assertEqual(
+                split_audit["split_version"], "xiamen-local-human-hand-split-v1"
+            )
+            split_group_sets = {
+                split: {trajectory.split_group_id for trajectory in records}
+                for split, records in partitions.items()
+            }
+            self.assertFalse(split_group_sets["train"] & split_group_sets["validation"])
+            self.assertFalse(split_group_sets["train"] & split_group_sets["test"])
+            self.assertFalse(split_group_sets["validation"] & split_group_sets["test"])
 
 
 if __name__ == "__main__":

@@ -26,6 +26,11 @@ classic 则为 144 张含花、16／17 张和可吃／游金等规则。因此�
 `>75%` 的“消除塌缩”性质，同时保留 ESS、私有信息隔离和 audit-only 约束。它的 ESS 仍远低于训练门槛，
 不改变该路线「不可用于 collector/Q/网页」的结论。
 
+为补齐未来人类数据的可复现入口，新增 `split_human_trajectories.py`：它先执行本地 opt-in 数据的完整
+结构审计，再按整局／opaque `split_group_id` 确定性切分 train、validation、test，拒绝重复、混合规则／
+对手、私有字段、空 split 或默认覆盖。输出只允许落在 Git 忽略的 `local_human_data/`。这只是将来行为
+模仿前的数据准备；当前该目录为空，尚未训练任何模型。
+
 ## 2026-08-04：监督 v1、DAgger、前瞻 v2
 
 | 检查点 | 训练 | 独立评测种子 | 结果 | 结论 |

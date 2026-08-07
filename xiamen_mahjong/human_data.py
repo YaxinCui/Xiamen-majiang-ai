@@ -9,7 +9,11 @@ import math
 from pathlib import Path
 from typing import Any, Iterable
 
-from .training import TrainingTrajectory, read_trajectory_jsonl
+from .training import (
+    TrainingTrajectory,
+    read_trajectory_jsonl,
+    split_trajectories_by_hand,
+)
 
 
 _FORBIDDEN_PRIVATE_KEYS = {
@@ -19,6 +23,8 @@ _FORBIDDEN_PRIVATE_KEYS = {
     "wall_order",
     "opponent_hands",
 }
+HUMAN_SPLIT_VERSION = "xiamen-local-human-hand-split-v1"
+_HUMAN_SPLIT_SALT = "xiamen-local-human-hand-split-v1"
 
 
 def _private_key_paths(value: Any, *, prefix: str = "") -> list[str]:
@@ -235,4 +241,71 @@ def require_local_human_training_approval(
         "manual_training_approval": True,
         "training_scope": "behavioral_imitation_only; not_human_strength_evidence",
         "audit": audit,
+    }
+
+
+def split_local_human_trajectories(
+    paths: Iterable[str | Path],
+    *,
+    minimum_hands: int = 100,
+) -> tuple[dict[str, list[TrainingTrajectory]], dict[str, Any]]:
+    """Create a deterministic full-hand split only from audited local logs.
+
+    This is intentionally a data-preparation boundary, not a training
+    authorization.  It first applies the same opt-in, privacy, duplicate,
+    rule-profile and opponent-identity checks used by the trainer.  Only then
+    are complete hands assigned by an opaque group identity to train,
+    validation and test.  No state, hand, seed or local pathname appears in
+    the returned audit; callers must keep written files under the ignored
+    ``local_human_data/`` area.
+    """
+
+    if minimum_hands <= 0:
+        raise ValueError("minimum_hands 必须为正数")
+    files = [Path(path) for path in paths]
+    if not files:
+        raise ValueError("至少需要一个人类轨迹文件")
+    audit = audit_local_human_trajectories(files, minimum_hands=minimum_hands)
+    if not audit["ready_for_manual_review"]:
+        reasons = ", ".join(str(item) for item in audit["gate_reasons"])
+        raise ValueError("人类轨迹未通过切分前结构门槛：" + reasons)
+
+    trajectories: list[TrainingTrajectory] = []
+    for path in files:
+        trajectories.extend(read_trajectory_jsonl(path))
+    partitions = split_trajectories_by_hand(
+        trajectories,
+        split_salt=_HUMAN_SPLIT_SALT,
+    )
+    if any(not records for records in partitions.values()):
+        raise ValueError(
+            "按完整牌局切分后 train、validation、test 都必须至少有一局；"
+            "请收集更多独立人类对局"
+        )
+
+    group_sets = {
+        split: {
+            trajectory.split_group_id or trajectory.trajectory_id
+            for trajectory in records
+        }
+        for split, records in partitions.items()
+    }
+    split_names = tuple(group_sets)
+    if any(
+        group_sets[left] & group_sets[right]
+        for index, left in enumerate(split_names)
+        for right in split_names[index + 1 :]
+    ):
+        raise RuntimeError("人类训练切分出现跨集合完整牌局重叠")
+    return partitions, {
+        **audit,
+        "split_version": HUMAN_SPLIT_VERSION,
+        "split_salt": _HUMAN_SPLIT_SALT,
+        "split_hand_counts": {
+            split: len(records) for split, records in partitions.items()
+        },
+        "split_group_counts": {
+            split: len(group_sets[split]) for split in partitions
+        },
+        "split_group_overlap": 0,
     }

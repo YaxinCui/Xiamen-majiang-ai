@@ -56,6 +56,18 @@ python3 scripts/audit_human_trajectories.py \
 平均分差、标准误、正态近似 95% 区间、胡率和流局率。即使结构审计通过，也只表示可以进行人工质量评审；
 这些描述性统计不等同于人类强度结论。要声称对人类变强，仍须使用从未用于训练或调参的真人对局留出集。
 
+审计通过后，用下列命令把**完整牌局**稳定拆成互不重叠的 train / validation / test。输出被限制在
+Git 忽略的 `local_human_data/` 下，已存在的输出默认拒绝覆盖：
+
+```bash
+python3 scripts/split_human_trajectories.py \
+  --input local_human_data/run4-vs-human.jsonl \
+  --minimum-hands 100 \
+  --output-dir local_human_data/run4-split-v1
+```
+
+切分只准备结构合格的人类**行为模仿**输入；它既不代表记录者一定是强人类，也不授权训练或模型晋级。
+
 即使把人类 JSONL 直接传给训练器，它也会默认拒绝。人工确认记录者、对手身份、规则档位和独立留出集后，才可
 在按完整牌局分开的 train/validation/test 文件上显式启用；训练报告只记录聚合审计与
 `<local_human_data>` 占位符，不会写入你的本地路径：
