@@ -837,3 +837,21 @@ ESS 242.2/245.2，仍因 IPS 下界不为正而失败；其余组合也均失败
 在其上改变 C、T、网络、训练轮数、direct 成员或 OPE 聚合后重跑；terminal 仍保留，但只可用于未来已通过其自身新协议的
 候选，不能作为本候选的重试集。完整审计为本地
 `artifacts/teacher-advantage-shrinkage-classic-v3-heldout/selection-result.json`。
+
+## 2026-08-07：Teacher 随机相对优势 v4（训练完成，selection 待审计）
+
+为与 v3 的确定性 argmax+threshold 族严格区分，v4 固定为小概率 stochastic residual：Teacher 仍占主要概率，
+其余概率按 clipped relative-advantage softmax 分配。新 classic seed `202610000` 起的 **3,000** 个物理墙、四座轮换，
+行为仍为一次 `0.8 × uniform + 0.2 × Teacher` 摸后弃牌干预再恢复 Teacher。无标签 coverage 为 train/validation/
+selection/terminal = **5,509 / 1,469 / 1,032 / 1,126**，超过预注册 5,000/1,200/1,000/1,000；selection 和 terminal
+完整墙组为 347/365 且重叠 0。
+
+训练墙按完整物理墙分为 K=3（617/590/600 墙组、重叠 0）。三个固定 epoch direct outcome 模型均只用另两折的
+随机弃牌行动、没有读取 validation/held-out；validation 的三成员 logged-action score MAE 为 **28.32** 分。未缩减
+DR 非 Teacher 伪优势标准差仍为 **162.28** 分、范围 [−1,378.88,+3,793.60]，故未直接学习；C=20/40/80 的 OOF
+截断标签分别训练独立 centered relative MLP。其 validation pseudo-label MAE 为 **7.80 / 13.67 / 23.08**，Teacher
+预测零点均严格为 0；这些诊断没有改变任何 C、beta、temperature、架构或 epoch。
+
+下一步只能在未读 selection 上比较固定 12 个 `(C,beta,tau)`，其中 beta∈{.05,.10}、tau∈{8,16}；随机分布的 OPE
+使用未缩减 stochastic IPS/DR，且两侧 ESS 必须≥100、双 95% 下界为正。若无 winner，terminal 必须保持未读；若有唯一
+winner，脚本才可读取 terminal 一次。
