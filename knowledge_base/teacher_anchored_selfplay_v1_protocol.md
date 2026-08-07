@@ -27,3 +27,16 @@ step 必须持有生成行为时的 prior logits，更新时再次加入同一 p
 
 该候选的目的只是检验“规则锚定的可见信息 residual 是否能安全探索”；它不是把 Teacher 伪装成神经模型，也不以与
 Teacher 初始完全相同作为任何强度证据。
+
+## 首个固定 run（v1-b）
+
+v1-b 唯一初始化为 classic、`seed=202611950`、feature version 3、hidden size 128 的 zero-policy-head fresh actor，
+固定 `margin=5`。训练固定为 8 iteration、每轮 256 个候选席、rollout batch 64、PPO epoch 2、batch 256、learning
+rate `5e-5`、clip ratio `0.15`、value weight `0.25`、entropy weight `0.002`、reward scale `80`。每名非候选座位
+独立以 `0.5` 概率使用 Teacher、`0.5` 概率使用本轮更新前 current-policy snapshot；无外部 checkpoint、无 oracle
+critic，CUDA，训练 seed `202611951`。训练中只记录中间 checkpoint，不选择它们。
+
+仅 final iteration-8 raw residual checkpoint 加 `margin=5` wrapper 参与 selection：classic `seed=202612900` 起 80 个
+物理墙、四座轮换。若 paired score delta 的 95% 下界不严格大于零，terminal `seed=202613100` 起 320 墙必须保持未读；
+若 selection 通过才读取 terminal，且采用同一严格正下界。无论结果如何都不接入网页、不开人类强度主张，也不在本墙组
+上更改 margin、训练预算、PPO 参数或选择其他 iteration。
