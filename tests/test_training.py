@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import unittest
 from collections import Counter
 from itertools import permutations
+import math
 from pathlib import Path
 import random
 
@@ -27,6 +28,7 @@ from xiamen_mahjong.training import (
     _initial_normal_draw_discard_constraint,
     _initial_setup_response_claim_constraint,
     _initial_setup_response_claim_discard_constraint,
+    _linear_policy_discard_tile_factor_weights,
     _sample_multivariate_hand_given_required_tiles,
     _sample_weighted_multivariate_hand_given_required_tiles,
     _sample_latest_discard_conditioned_world,
@@ -188,6 +190,35 @@ class TrainingTests(unittest.TestCase):
         self.assertAlmostEqual(total_weight / samples, 7.0 / 10.0, delta=0.012)
         self.assertAlmostEqual(double_one_weight / total_weight, 1.0 / 7.0, delta=0.02)
         self.assertAlmostEqual(one_two_weight / total_weight, 2.0 / 7.0, delta=0.025)
+
+    def test_linear_discard_energy_maps_only_hand_coefficients_to_factors(self):
+        policy = RulePolicyModel()
+        discard_tile = 7
+        # These are the hand-count coefficients for a fixed discard action;
+        # all public/action bias terms intentionally cancel from q(H).
+        from xiamen_mahjong import training
+
+        policy.weights[
+            training._TARGET_HAND + discard_tile * 34 + 0
+        ] = math.log(4.0)
+        policy.weights[
+            training._TARGET_HAND + discard_tile * 34 + 1
+        ] = -math.log(4.0)
+        factors = _linear_policy_discard_tile_factor_weights(
+            policy,
+            discard_tile=discard_tile,
+            energy_scale=1.0,
+            max_abs_log_factor=1.0,
+        )
+        self.assertAlmostEqual(factors[0], math.e)
+        self.assertAlmostEqual(factors[1], 1.0 / math.e)
+        self.assertEqual(factors[2], 1.0)
+        with self.assertRaises(ValueError):
+            _linear_policy_discard_tile_factor_weights(
+                policy,
+                discard_tile=34,
+                energy_scale=1.0,
+            )
 
     def test_normal_draw_flower_wall_proposal_has_exact_density(self):
         # In [0, 0, 1, 34], observing flower 34 and then a hidden base tile

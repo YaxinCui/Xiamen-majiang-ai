@@ -1596,6 +1596,7 @@ class _OpeningInitialClaimDensityAudit:
     rejection_counts: dict[str, int]
     includes_claimant_discard: bool
     claimant_discard_tile_factor: float
+    uses_explicit_tile_factor_weights: bool
 
     @property
     def acceptance_rate(self) -> float:
@@ -1639,7 +1640,17 @@ class _OpeningInitialClaimDensityAudit:
             "claimant_discard_tile_factor": (
                 self.claimant_discard_tile_factor
                 if self.includes_claimant_discard
+                and not self.uses_explicit_tile_factor_weights
                 else None
+            ),
+            "claimant_tile_factor_mode": (
+                "explicit_tile_factor_mapping"
+                if self.uses_explicit_tile_factor_weights
+                else (
+                    "discard_face_only"
+                    if self.includes_claimant_discard
+                    else "none"
+                )
             ),
             "proposed_particles": self.proposed_particles,
             "initialized_particles": self.initialized_particles,
@@ -3496,6 +3507,7 @@ def _sample_replay_setup_given_opening_initial_claim_and_discard(
     *,
     rng: random.Random,
     claimant_discard_tile_factor: float = 1.0,
+    claimant_tile_factor_weights: Mapping[int, float] | None = None,
 ) -> tuple[_SetupReplayProposal, int] | None:
     """Reconstruct the opening claim prefix through the claimant's discard."""
 
@@ -3508,14 +3520,19 @@ def _sample_replay_setup_given_opening_initial_claim_and_discard(
         or claimant_discard_tile_factor <= 0.0
     ):
         raise ValueError("claimant_discard_tile_factor 必须为正且有限")
+    if claimant_tile_factor_weights is not None and claimant_discard_tile_factor != 1.0:
+        raise ValueError("tile factor mapping 与弃牌单面额 factor 不能同时指定")
+    tile_factor_weights = (
+        dict(claimant_tile_factor_weights)
+        if claimant_tile_factor_weights is not None
+        else {required_initial_tiles[-1]: claimant_discard_tile_factor}
+    )
     proposal = _sample_replay_setup_given_opening_and_initial_hand_constraint(
         snapshot,
         claimant_seat=claimant_seat,
         required_initial_tiles=required_initial_tiles,
         rng=rng,
-        tile_factor_weights={
-            required_initial_tiles[-1]: claimant_discard_tile_factor
-        },
+        tile_factor_weights=tile_factor_weights,
     )
     return (
         (proposal, target_public_action_count)
@@ -5039,6 +5056,7 @@ def _audit_opening_initial_response_claim_density(
     uniform_mixture: float = 0.02,
     include_claimant_discard: bool = False,
     claimant_discard_tile_factor: float = 1.0,
+    claimant_tile_factor_weights: Mapping[int, float] | None = None,
 ) -> _OpeningInitialClaimDensityAudit:
     """Audit the opening-aware exact proposal for one immediate claim.
 
@@ -5057,6 +5075,14 @@ def _audit_opening_initial_response_claim_density(
         raise ValueError("claimant_discard_tile_factor 必须为正且有限")
     if not include_claimant_discard and claimant_discard_tile_factor != 1.0:
         raise ValueError("claimant_discard_tile_factor 仅适用于 claim 后弃牌前缀")
+    if not include_claimant_discard and claimant_tile_factor_weights is not None:
+        raise ValueError("claimant_tile_factor_weights 仅适用于 claim 后弃牌前缀")
+    if claimant_tile_factor_weights is not None:
+        if claimant_discard_tile_factor != 1.0:
+            raise ValueError("tile factor mapping 与弃牌单面额 factor 不能同时指定")
+        for tile, factor in claimant_tile_factor_weights.items():
+            if not is_base_tile(tile) or not math.isfinite(float(factor)) or float(factor) <= 0.0:
+                raise ValueError("claimant_tile_factor_weights 必须为正且仅含基础牌")
     accepted_log_likelihoods: list[float] = []
     importance_weights: list[float] = []
     prior_over_proposals: list[float] = []
@@ -5068,6 +5094,7 @@ def _audit_opening_initial_response_claim_density(
                 snapshot,
                 rng=rng,
                 claimant_discard_tile_factor=claimant_discard_tile_factor,
+                claimant_tile_factor_weights=claimant_tile_factor_weights,
             )
             if include_claimant_discard
             else _sample_replay_setup_given_opening_and_initial_response_claim(
@@ -5128,6 +5155,7 @@ def _audit_opening_initial_response_claim_density(
         rejection_counts=dict(sorted(rejection_counts.items())),
         includes_claimant_discard=include_claimant_discard,
         claimant_discard_tile_factor=claimant_discard_tile_factor,
+        uses_explicit_tile_factor_weights=claimant_tile_factor_weights is not None,
     )
 
 
@@ -6863,6 +6891,45 @@ class RulePolicyModel:
 
     def _score(self, vector: Sequence[tuple[int, float]]) -> float:
         return sum(self.weights[index] * value for index, value in vector)
+
+
+def _linear_policy_discard_tile_factor_weights(
+    policy: RulePolicyModel,
+    *,
+    discard_tile: int,
+    energy_scale: float,
+    max_abs_log_factor: float = 2.0,
+) -> dict[int, float]:
+    """Convert a linear discard action's hand coefficients into tile factors.
+
+    ``RulePolicyModel`` scores a discard of face ``d`` with a sum of public
+    terms plus ``theta[d, t] * hand_count[t]``.  For a fixed public discard,
+    the public terms cancel from a hand proposal, leaving the exact
+    tile-factor energy ``exp(scale * theta[d, t])``.  Deterministic clipping
+    keeps the count-DP partition numerically stable; it changes only the
+    proposal, whose p/q correction remains exact.
+
+    This is deliberately a proposal adapter, not an opponent policy.  The
+    frozen Teacher likelihood is still evaluated independently in replay.
+    """
+
+    if not is_base_tile(discard_tile):
+        raise ValueError("discard_tile 必须是基础牌")
+    if not math.isfinite(energy_scale) or energy_scale < 0.0:
+        raise ValueError("energy_scale 必须为非负有限数")
+    if not math.isfinite(max_abs_log_factor) or max_abs_log_factor <= 0.0:
+        raise ValueError("max_abs_log_factor 必须为正且有限")
+    weights: dict[int, float] = {}
+    for hand_tile in range(BASE_TILE_COUNT):
+        coefficient = policy.weights[
+            _TARGET_HAND + discard_tile * BASE_TILE_COUNT + hand_tile
+        ]
+        log_factor = min(
+            max(energy_scale * coefficient, -max_abs_log_factor),
+            max_abs_log_factor,
+        )
+        weights[hand_tile] = math.exp(log_factor)
+    return weights
 
 
 class NeuralRulePolicyModel:

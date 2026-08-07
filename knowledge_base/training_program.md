@@ -160,6 +160,18 @@ structural ESS fraction 依次为 **97.87%、96.55%、94.41%、88.01%**，total 
 因此这条“只偏置弃牌同面额”的 action proposal 家族整体否决；不会因 1.5 的微小同组均值差而选择它、重跑或接入任何
 collector。保留 DP primitive 作为未来经独立数据训练的、预注册线性能量 proposal 的正确密度基础。
 
+该线性能量后继实验只使用独立 core Teacher 自博弈（seed `202608520`，300 训练局／10,476 决策，100 验证局／3,558
+决策）训练 `RulePolicyModel`；验证动作一致率 **67.09%**。对一个固定公开弃牌，线性模型的“弃牌目标 × 暗手面额计数”
+项可精确转换为 tile factor，公共项自然抵消；factor 的 DP 校正仍为严格 `p/q`。模型仅作为 audit proposal，SHA-256
+`80587fcbc108888b884a39b59b4462040c6d54e618e88aa69093042adc0edfd3`，不是可选牌 checkpoint。
+
+新的 selection 墙组固定为 core `390, 492, 499, 585`，与模型训练及前一因子实验无交集；开启前固定 scale
+`{0, 0.25, 0.5, 1}`、log-factor clip `2`、每墙 256 粒子。平均 total ESS fraction 为
+**23.58%、31.87%、33.19%、23.95%**，故按预注册的“最大平均 total ESS”选择 scale **0.5**；不得再在这些墙上
+调 scale 或 clip。随后只在新 core `seed=707` 的原子 prefix 上做 1,024 粒子终检：接受 1,023/1,024，total ESS
+**226.17/1,023 (22.1%)**，但 structural ESS **158.26/1,023 (15.5%)**，未通过 structural 与 total ESS 均至少 20%
+的 joint health gate。该线性能量 proposal 因此拒绝；不会进入 SMC、collector、Q、训练、网页或下一轮模型初始化。
+
 因此该路径继续停留在 audit：不接入 SMC、collector、Q、训练或网页。下一项研究必须先为行为相容的隐藏手牌
 proposal 给出可计算密度与 toy exact posterior；不能对确定性 Teacher 的“选中动作”直接 rejection 后把未知接受率
 当作 `p/q`，也不能以这三个短前缀的高 structural ESS 声称已得到全历史 posterior。

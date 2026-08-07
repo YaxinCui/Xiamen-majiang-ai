@@ -714,3 +714,17 @@ ESS **246.33/255**、total ESS **187.88/255**，但覆盖范围仅两条动作�
 每个 factor/墙 256 粒子。平均 structural ESS fraction 为 **0.9787、0.9655、0.9441、0.8801**；平均 total ESS
 fraction 为 **0.1334、0.1399、0.1252、0.0979**。所有候选都有远低于 20% 的单墙 total ESS，故此 tile-only family
 整体失败；1.5 的小幅同组差异不用于选择或二次调参。没有生成训练数据、模型参数或网页行为。
+
+## 2026-08-07：独立线性行为能量 proposal（终检否决）
+
+以独立 core Teacher 数据（seed `202608520`，300 训练局 10,476 决策；独立 100 局 3,558 决策）训练
+`RulePolicyModel`。其验证 top-1 为 **67.09%**、loss **1.0179**。对固定公开弃牌，模型的 `target × hand_tile`
+线性系数被转换为 clipped `exp(scale × coefficient)` tile factors；DP 精确返回条件 hand proposal 的归一化和 `p/q`。
+公共特征不会进入 factor，原始训练 JSONL 保持 Git 忽略；仅模型参数、报告和 SHA-256
+`80587fcbc108888b884a39b59b4462040c6d54e618e88aa69093042adc0edfd3` 可复核。
+
+selection 墙 `390,492,499,585` 与训练及旧 audit 墙不重叠。预先固定 scale `{0,0.25,0.5,1}`、clip=2、每墙 256：
+平均 total ESS fraction 分别为 **0.2358、0.3187、0.3319、0.2395**，据此唯一选择 0.5。全新 terminal core `seed=707`
+以 1,024 粒子复核，接受 1,023，total ESS **226.17/1,023 (22.1%)**，但 structural ESS 仅
+**158.26/1,023 (15.5%)**。joint structural+total ESS ≥20% 门槛失败，故整条线性能量 proposal 路线拒绝；不导出
+belief world、不生成训练数据、不训练/部署任何选牌模型。
