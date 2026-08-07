@@ -67,6 +67,7 @@ class PpoStep:
 # seat assigned by the simulator.  The vector intentionally contains hidden
 # hands and wall composition, so its scope is strictly in-memory PPO training.
 PRIVILEGED_CRITIC_FEATURE_DIM = BASE_TILE_COUNT * 5 + 4 + 4 + 4 + 2 + (BASE_TILE_COUNT + 1) * 2
+PROGRESSIVE_HIDING_STAGES = ("oracle", "hide_wall", "visible")
 
 
 class PrivilegedCritic(nn.Module):
@@ -88,28 +89,47 @@ class PrivilegedCritic(nn.Module):
         return self.network(features).squeeze(-1)
 
 
-def privileged_critic_features(
-    game: XiamenMahjongGame, candidate_seat: int
+def progressive_hiding_features(
+    game: XiamenMahjongGame,
+    candidate_seat: int,
+    *,
+    stage: str,
 ) -> tuple[float, ...]:
-    """Encode complete simulator state for a PPO baseline only.
+    """Encode a training-only oracle vector with an explicit hiding stage.
 
-    The actor never calls this function.  Keeping it in this training script,
-    rather than the deployable policy module, makes the security boundary
-    explicit: returned vectors may contain opponent hands and wall counts but
-    exist only until the current PPO process finishes.
+    At ``oracle`` the vector has every simulator-only card count. ``hide_wall``
+    removes wall composition while retaining opponent hands; ``visible`` also
+    zeros every opponent hand segment.  The latter is deliberately a
+    *training diagnostic encoding*, not an actor input: its only purpose is to
+    prove that a future progressive-hiding student can be supplied a final
+    stage that is invariant to hidden hands and wall order.
+
+    No caller may attach the return value to ``TeacherDecision``, an exported
+    trajectory, an actor checkpoint or a web payload. The deployable policy
+    module does not import this script.
     """
 
+    if stage not in PROGRESSIVE_HIDING_STAGES:
+        raise ValueError("未知 progressive hiding stage")
     if game.rules.player_count != 4:
-        raise ValueError("privileged critic 当前仅支持四人厦门麻将")
+        raise ValueError("progressive hiding 当前仅支持四人厦门麻将")
     if not 0 <= candidate_seat < game.rules.player_count:
         raise ValueError("candidate_seat 超出范围")
     features: list[float] = []
     for offset in range(game.rules.player_count):
         player = game.players[(candidate_seat + offset) % game.rules.player_count]
         counts = Counter(player.hand)
-        features.extend(counts[tile] / 4.0 for tile in range(BASE_TILE_COUNT))
+        features.extend(
+            0.0
+            if stage == "visible" and offset != 0
+            else counts[tile] / 4.0
+            for tile in range(BASE_TILE_COUNT)
+        )
     wall_counts = Counter(game.wall)
-    features.extend(wall_counts[tile] / 4.0 for tile in range(BASE_TILE_COUNT))
+    features.extend(
+        0.0 if stage in {"hide_wall", "visible"} else wall_counts[tile] / 4.0
+        for tile in range(BASE_TILE_COUNT)
+    )
     features.extend(len(player.flowers) / 8.0 for player in game.players)
     features.extend(player.score / 80.0 for player in game.players)
     features.extend(
@@ -122,8 +142,16 @@ def privileged_critic_features(
             1.0 if tile == index else 0.0 for index in range(BASE_TILE_COUNT + 1)
         )
     if len(features) != PRIVILEGED_CRITIC_FEATURE_DIM:
-        raise RuntimeError("privileged critic 特征维度不匹配")
+        raise RuntimeError("progressive hiding 特征维度不匹配")
     return tuple(features)
+
+
+def privileged_critic_features(
+    game: XiamenMahjongGame, candidate_seat: int
+) -> tuple[float, ...]:
+    """Return the all-information stage for the legacy training-only critic."""
+
+    return progressive_hiding_features(game, candidate_seat, stage="oracle")
 
 
 @dataclass(frozen=True)

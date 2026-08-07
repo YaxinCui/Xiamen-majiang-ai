@@ -728,3 +728,10 @@ selection 墙 `390,492,499,585` 与训练及旧 audit 墙不重叠。预先固�
 以 1,024 粒子复核，接受 1,023，total ESS **226.17/1,023 (22.1%)**，但 structural ESS 仅
 **158.26/1,023 (15.5%)**。joint structural+total ESS ≥20% 门槛失败，故整条线性能量 proposal 路线拒绝；不导出
 belief world、不生成训练数据、不训练/部署任何选牌模型。
+
+## 2026-08-07：Progressive hiding 字段隔离（基础设施）
+
+训练脚本新增固定维度的 `oracle → hide_wall → visible` 遮蔽向量，作用域仅为训练进程；visible stage 把三家暗手及
+墙组成的片段置零。对同一 actor-visible core 局面重采样不同未知世界：oracle 向量不同、visible 向量严格一致，且
+unknown stage 直接报错。actor `TeacherDecision`、轨迹、checkpoint、网页均未新增该向量；legacy privileged critic
+仍保持 oracle-only。没有进行 progressive-hiding 模型训练、PPO、数据导出或强度评测。

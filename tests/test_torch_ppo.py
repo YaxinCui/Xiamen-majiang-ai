@@ -238,6 +238,50 @@ class TorchPpoTests(unittest.TestCase):
             )
         )
 
+    def test_progressive_hiding_visible_stage_is_invariant_to_hidden_world(self):
+        import random
+
+        from scripts.train_torch_ppo import (
+            PRIVILEGED_CRITIC_FEATURE_DIM,
+            progressive_hiding_features,
+        )
+        from xiamen_mahjong.game import XiamenMahjongGame
+        from xiamen_mahjong.rules import XiamenRules
+        from xiamen_mahjong.tiles import BASE_TILE_COUNT
+        from xiamen_mahjong.training import _resample_private_world_for_actor
+
+        game = XiamenMahjongGame(
+            seed=911,
+            rules=XiamenRules.from_profile("core"),
+            dealer=0,
+            auto_advance=False,
+            human_seat=-1,
+        )
+        resampled = _resample_private_world_for_actor(
+            game, actor_seat=0, rng=random.Random(91_101)
+        )
+        self.assertIsNotNone(resampled)
+        assert resampled is not None
+        oracle = progressive_hiding_features(game, 0, stage="oracle")
+        visible = progressive_hiding_features(game, 0, stage="visible")
+        self.assertEqual(len(oracle), PRIVILEGED_CRITIC_FEATURE_DIM)
+        self.assertEqual(len(visible), PRIVILEGED_CRITIC_FEATURE_DIM)
+        self.assertNotEqual(
+            oracle,
+            progressive_hiding_features(resampled, 0, stage="oracle"),
+        )
+        self.assertEqual(
+            visible,
+            progressive_hiding_features(resampled, 0, stage="visible"),
+        )
+        # Actor hand occupies the first segment. The three hidden opponent
+        # hands and hidden wall composition immediately after it are zero.
+        self.assertTrue(
+            all(value == 0.0 for value in visible[BASE_TILE_COUNT : BASE_TILE_COUNT * 5])
+        )
+        with self.assertRaisesRegex(ValueError, "未知 progressive hiding"):
+            progressive_hiding_features(game, 0, stage="invalid")
+
 
 if __name__ == "__main__":
     unittest.main()

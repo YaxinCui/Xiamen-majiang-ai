@@ -176,6 +176,16 @@ collector。保留 DP primitive 作为未来经独立数据训练的、预注册
 proposal 给出可计算密度与 toy exact posterior；不能对确定性 Teacher 的“选中动作”直接 rejection 后把未知接受率
 当作 `p/q`，也不能以这三个短前缀的高 structural ESS 声称已得到全历史 posterior。
 
+### Progressive hiding：字段隔离前置检查（2026-08-07）
+
+根据本地前沿复盘，新增训练脚本内的三阶段特权向量：`oracle`（完整暗手/墙）、`hide_wall`（保留暗手、遮蔽墙）与
+`visible`（遮蔽三家暗手和墙，仅保留本家/公开成分）。维度保持固定，部署 actor 不导入该脚本；现有 privileged critic
+仍只调用 `oracle`，没有恢复 PPO 或改变任何 checkpoint。
+
+core 固定局面通过从同一 actor-visible 信息集重采样未知世界验证：`oracle` 向量随暗手/墙变化，而 `visible` 向量
+严格相同，且后三家暗手与墙的连续片段全为零。单测同时确认未知 stage 被拒绝。此项只证明课程所需的字段隔离，不证明
+full-state oracle 有效、更不证明可见 student 更强；下一步须在缩小 toy 规则上比较逐步遮蔽与从开始全遮蔽的可见模型。
+
 ### Teacher 单点干预 response 数据（当前因果来源）
 
 run4-based response outcome ensemble 已被全新实战否决，不能再把 run4 作为改善 Teacher 的桥梁。collector 现支持
