@@ -29,3 +29,15 @@ run3/run4 权重、历史训练轨迹或 outcome/Q 标签。每一 PPO iteration
 每一阶段失败即停止该固定 run：不在其 selection/terminal 墙上改 learning rate、熵权重、对手比例、iteration、
 checkpoint 或评测种子重试。原始 PPO actor checkpoint 与中间结果保留为本地 ignored artifact，只有通过完整门槛的
 模型才可能提交为可部署参数。
+
+## 首个固定 run（v1-a）
+
+在本协议提交后，v1-a 唯一初始化为 classic、`seed=202611800`、feature version 3、hidden size 128 的 fresh actor。
+训练固定为 8 个 iteration、每轮 256 个候选座位 episode、rollout batch 64、PPO epoch 2、batch 256、learning rate
+`5e-5`、clip ratio `0.15`、value weight `0.25`、entropy weight `0.002`、reward scale `80`。每个非候选座位独立以
+`0.5` 机率使用 Teacher、`0.5` 机率使用本轮更新前的 current-policy snapshot；不加载外部 checkpoint，也不启用
+privileged critic。全部训练在 CUDA 上运行，训练 seed 为 `202611801`。
+
+训练只审计最后的 iteration-8 checkpoint。selection 固定 classic `seed=202612500` 起 80 个物理墙（四座轮换）；若其
+配对 score delta 95% 下界不严格大于零，terminal `seed=202612700` 起 320 个墙不得读取。若通过才读取 terminal，且
+同一正下界仍为唯一门槛。无论结果如何，v1-a 都不自动进入网页，也不构成对人类的强度结论。
