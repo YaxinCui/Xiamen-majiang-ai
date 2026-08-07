@@ -64,13 +64,19 @@ def main() -> None:
     for name, records in partitions.items():
         filename = f"{name}.trajectories.jsonl"
         output = args.output_dir / filename
-        report_partitions[name] = {
+        partition_report = {
             "file": filename,
             "hands": write_trajectory_jsonl(records, output),
             "wall_groups": len(group_sets[name]),
-            "manifest": trajectory_manifest(records),
             "sha256": sha256(output),
         }
+        if name == "selection":
+            partition_report["manifest"] = trajectory_manifest(records)
+        else:
+            partition_report["manifest_omitted"] = (
+                "terminal outcome/action summaries stay unread until final OPE"
+            )
+        report_partitions[name] = partition_report
     report = {
         "status": "selection_and_terminal_groups_created",
         "input": str(args.input),
