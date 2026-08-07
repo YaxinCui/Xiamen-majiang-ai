@@ -219,6 +219,19 @@ IPS/DR 95% 下界为 −7.7110/−7.5706（override 35.63%）；12 分为 −1.5
 36 分均退化成无 override、下界 0。所有候选失败，选择器状态为 `selection_rejected_terminal_unread`，terminal
 墙组从未读取。不得基于这一 selector 再新增阈值或改模型后重试；下一条路径须是新的历史表示／候选定义及全新四层墙组。
 
+### Teacher 单点弃牌干预 v1（2026-08-07，terminal 否决）
+
+为覆盖占绝大多数的摸后决策，OPE 与 selector 现可显式要求 `intervention_phase=discard`；输入数据的 metadata phase
+若不匹配即拒绝，避免 response 与弃牌 propensity 混用。新 classic v1 预注册 1,600 个全新物理墙、四座轮换，前 8 个
+摸后决策随机取一处，以 `0.4 × uniform + 0.6 × Teacher` 进行且仅进行一次替换，随后恢复 Teacher。随机干预覆盖为
+train/validation/selection/terminal = **3,003/727/579/581**，各分区墙组完全隔离。
+
+五个 fresh-anchor outcome 成员只从随机弃牌行动及 train/validation 学习，validation score MAE 均为
+**29.03–29.36** 分，优于零预测 **33.99**；这只允许预注册 selection，而非选牌。固定 LCB 阈值
+`{0,8,16,24}` 中仅 16 分以 1.73% override rate 通过 selection（IPS/DR 下界 +0.049/+0.099）；随后独立 terminal
+IPS/DR 下界为 **−0.341/−0.211**，故候选及本 terminal 墙组均已否决。不可据此 ensemble 做网页、PPO 或完整策略。
+下一条改进必须定义新的、可预注册的候选族（而非改此 score-LCB 阈值／z／成员），并收集全新的四层墙组。
+
 ## 实验记录模板
 
 每个实验目录应保存 `config.json`、`metrics.json`、`checkpoint`、`git_commit`、

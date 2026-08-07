@@ -754,3 +754,30 @@ direct 为 Huber **0.1707421**、MAE **0.4069980**；课程为 **0.1715056**、*
 这否决的是该预注册的 core/9-epoch 课程作为进入策略训练的依据，并不把小样本差异解释为 progressive hiding 的一般
 定理。若日后重访，必须先建立真正缩小规则的独立基准和新的预注册 schedule／墙组；不得在本报告的训练或验证墙上
 调节阶段比例、学习率后声称通过，也不得以此报告为依据训练 PPO、导出模型或作任何强度主张。
+
+## 2026-08-07：Teacher 单点弃牌干预 v1（terminal 否决）
+
+此前 response-only 干预覆盖过窄，故新建严格 phase-isolated 的 `discard`（摸后决策阶段，包含可用的胡／杠）
+单点因果路径。预注册先于数据生成提交：经典档连续 1,600 个物理墙 seed `202608700` 起、四座轮换共 6,400 局，
+三名对手和前后缀均为 `HeuristicTeacherAgent`；每局仅在前 8 个该阶段决策随机选一处，以
+`0.4 × uniform + 0.6 × Teacher` 执行并记录 exact propensity。按物理墙分出 train/validation/held-out，后者再按墙组
+拆成 selection/terminal，均无组重叠。原始 JSONL（296 MB）只保留本地；GitHub 只存 manifest、无标签覆盖统计和最终审计。
+
+随机干预数为 train **3,003**（968 墙）、validation **727**（228 墙）、selection **579**（191 墙）、terminal
+**581**（190 墙），均超过预注册最少 2,500/500/500/500。五个相同 fresh policy anchor、不同训练 seed 的 128 隐层
+afterstate outcome 成员只训练独立 outcome encoder/heads，均传 `--skip-test`；validation score MAE 为
+**29.03–29.36** 分，优于零预测 **33.99** 分，因而允许打开 selection。所有五组参数与报告已提交，均明确
+`terminal_test_read=false`。
+
+selection 仅比较预注册 LCB 优势阈值 `{0,8,16,24}`（5 成员均值减 1 倍成员标准差），要求 grouped IPS 和 DR 的
+95% 下界均正、两侧 ESS ≥50。0 与 8 分候选下界为负或 target ESS 不足；24 分同样失败。16 分阈值仅以
+**1.73%** 的 override rate 通过 selection（IPS/DR 下界 **+0.049/+0.099**，ESS **372.6/378.6**），因此按既定规则
+唯一进入 terminal。
+
+独立 terminal 的同一阈值立即失败：IPS **−0.0148 ± 0.1665** 分/局，95% CI **[−0.3411,+0.3115]**；DR
+**+0.1392 ± 0.1788**，**[−0.2113,+0.4897]**；target/base ESS **372.7/376.7**。支持度充足而双下界为负，
+故拒绝该静态 score-LCB 单点弃牌候选，不做 200 墙实战筛选、PPO、网页接入或强度主张。terminal 墙组已消耗，
+不得在此数据上更换阈值、成员、LCB z 值或模型后重跑。完整 protocol、覆盖与选择报告分别为
+`knowledge_base/teacher_discard_intervention_v1_protocol.md`、
+`artifacts/teacher-discard-intervention-classic-v1/coverage.json` 与
+`artifacts/teacher-discard-intervention-classic-v1-heldout/selection-result.json`。
