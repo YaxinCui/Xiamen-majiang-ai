@@ -1,0 +1,65 @@
+{
+  "status": "selection_and_terminal_groups_created",
+  "input": "artifacts/teacher-advantage-shrinkage-classic-v2/test.trajectories.jsonl",
+  "input_sha256": "22ac835c8ef95c958cc9719e7b88ca0bee77ffd32679fe4e01cea11394953f8f",
+  "selection_fraction": 0.5,
+  "split_salt": "teacher-advantage-shrinkage-v2-heldout",
+  "group_overlap": 0,
+  "protocol": "selection may choose only a pre-registered candidate; terminal must remain unopened until that choice is recorded and is final-OPE only",
+  "partitions": {
+    "selection": {
+      "file": "selection.trajectories.jsonl",
+      "hands": 896,
+      "wall_groups": 224,
+      "sha256": "925efba323fd16f032c2abb5b48b025756c00e8f8170f713b88e922ff70c13ae",
+      "manifest": {
+        "version": "xiamen-training-trajectory-v3",
+        "hands": 896,
+        "decisions": 9950,
+        "rules_versions": {
+          "xiamen-classic-full-v2": 896
+        },
+        "agent_profiles": {
+          "candidate_policy": 896,
+          "heuristic_teacher": 2688
+        },
+        "action_counts": {
+          "add_kan": 33,
+          "an_kan": 11,
+          "chi": 1199,
+          "discard": 7554,
+          "hu": 199,
+          "ming_kan": 78,
+          "pong": 876
+        },
+        "phase_counts": {
+          "discard": 7745,
+          "response": 2205
+        },
+        "outcome_counts": {
+          "discard": 235,
+          "draw": 2,
+          "opening_gold": 4,
+          "self_draw": 650,
+          "three_gold": 5
+        },
+        "score_mean": 0.0,
+        "score_min": -76,
+        "score_max": 228,
+        "action_value_decisions": 0,
+        "mean_action_value_span": null,
+        "action_value_stderr_observations": 0,
+        "mean_action_value_stderr": null,
+        "action_value_gap_stderr_observations": 0,
+        "mean_action_value_gap_stderr": null
+      }
+    },
+    "terminal": {
+      "file": "terminal.trajectories.jsonl",
+      "hands": 1048,
+      "wall_groups": 262,
+      "sha256": "e7c4ecbe24cea1b7a02da41835563b299f1c0dd05cf5ddfea22877ae31d3691f",
+      "manifest_omitted": "terminal outcome/action summaries stay unread until final OPE"
+    }
+  }
+}

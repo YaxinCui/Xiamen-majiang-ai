@@ -797,3 +797,15 @@ selection/terminal、没有训练 advantage head 或选择动作。
 
 未来若再研究相对优势，必须使用按物理墙 cross-fitting 的 direct model，并在**全新**四层墙组上预注册有限的
 shrinkage／SWITCH 类方差控制与偏差审计；不能在已消耗 v1 selection/terminal 上调 clipping 或 threshold。
+
+## 2026-08-07：Teacher 相对优势 shrinkage v2 覆盖门槛（拒绝，未训练）
+
+为降低非 Teacher action 的低 propensity，v2 预注册把单点摸后干预的 epsilon 从 0.4 提至 0.8，并使用全新 classic
+seed `202608900` 起的 2,000 个物理墙、四座轮换。其余契约不变：每局只在前 8 个 `discard` phase 决策中干预一次，
+随后恢复 Teacher；train/validation/held-out 按整墙隔离，held-out 进一步分 selection/terminal。原始轨迹 372 MB
+仅在本地，GitHub 只保存 manifest 和无标签覆盖统计。
+
+得到的随机干预覆盖为 train **3,673**、validation **931**、selection **693**、terminal **787**。预注册门槛为
+3,500/800/700/700，因此 selection 少 **7** 条即失败。即使其余三项通过，也不允许事后降低门槛、改变 split salt、
+合并 v1 数据或开始 K-fold/direct/shrinkage learner；terminal 只作无结局的覆盖计数，不导出动作/得分汇总。该墙组
+整体拒绝，完整统计见 `artifacts/teacher-advantage-shrinkage-classic-v2/coverage.json`。下一份协议必须使用全新墙组。

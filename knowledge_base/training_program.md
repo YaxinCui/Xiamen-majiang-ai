@@ -237,6 +237,10 @@ IPS/DR 下界为 **−0.341/−0.211**，故候选及本 terminal 墙组均已�
 **[−1737,+3252]**），低 propensity residual 造成严重尾部。因此未缩减 DR learner 明确拒绝；未来只能以新的、
 预注册 shrinkage/cross-fitting 候选和全新四层墙组继续，不能使用已消耗的 v1 selection/terminal 调 clipping。
 
+预注册的 shrinkage v2 也已在**数据覆盖**阶段失败：2,000 个全新 classic 墙、epsilon=0.8 的 train/validation/
+selection/terminal 随机干预为 **3,673/931/693/787**，selection 未达到最少 700。故不创建 K-fold direct model、
+不训练相对优势头、不读取 terminal 结局，且禁止把 693 条 selection 与 v1 或其他墙合并。后续需全新的墙组和协议。
+
 ## 实验记录模板
 
 每个实验目录应保存 `config.json`、`metrics.json`、`checkpoint`、`git_commit`、
