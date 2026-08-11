@@ -3,11 +3,37 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import dataclass
 from functools import lru_cache
 from collections.abc import Callable
-from typing import Iterable
+from typing import Iterable, Sequence
 
 from .tiles import BASE_TILE_COUNT, is_suited
+
+
+@dataclass(frozen=True)
+class DrawImprovementProfile:
+    """Exact structural shanten plus public live improvement coverage."""
+
+    shanten: int
+    draws_to_win: int
+    improving_faces: tuple[int, ...]
+    improving_live_copies: int
+    immediate_winning_faces: tuple[int, ...]
+    immediate_winning_live_copies: int
+
+
+@dataclass(frozen=True)
+class HandQualityComponents:
+    """Auditable linear components used by the rule Teacher scorer."""
+
+    fixed_melds: int
+    gold_tiles: int
+    triplet_groups: int
+    pair_remainders: int
+    adjacent_overlap: int
+    gap_overlap: int
+    sequence_overlap: int
 
 
 def is_winning_hand(
@@ -265,6 +291,36 @@ def hand_quality(
 ) -> float:
     """A deterministic structure score for the Teacher's discard lookahead."""
 
+    parts = hand_quality_components(
+        tiles,
+        gold_tile,
+        meld_count=meld_count,
+        wildcard_tiles=wildcard_tiles,
+        proxy_tile=proxy_tile,
+        proxy_as=proxy_as,
+    )
+    return float(
+        parts.fixed_melds * 28
+        + parts.gold_tiles * 12
+        + parts.triplet_groups * 14
+        + parts.pair_remainders * 5
+        + parts.adjacent_overlap * 2.5
+        + parts.gap_overlap * 1.25
+        + parts.sequence_overlap * 5
+    )
+
+
+def hand_quality_components(
+    tiles: Sequence[int],
+    gold_tile: int | None,
+    *,
+    meld_count: int = 0,
+    wildcard_tiles: Iterable[int] | None = None,
+    proxy_tile: int | None = None,
+    proxy_as: int | None = None,
+) -> HandQualityComponents:
+    """Return the frozen Teacher's structure score as integer features."""
+
     wildcards = _wildcard_set(gold_tile, wildcard_tiles)
     counter = Counter(
         _proxy_value(tile, proxy_tile, proxy_as)
@@ -272,15 +328,235 @@ def hand_quality(
         if tile not in wildcards
     )
     gold_count = len(tiles) - sum(counter.values())
-    score = meld_count * 28 + gold_count * 12
-    score += sum((count // 3) * 14 + (count % 3 == 2) * 5 for count in counter.values())
+    triplet_groups = sum(count // 3 for count in counter.values())
+    pair_remainders = sum(count % 3 == 2 for count in counter.values())
+    adjacent_overlap = 0
+    gap_overlap = 0
+    sequence_overlap = 0
     for base in (0, 9, 18):
         suit_counts = [counter[base + offset] for offset in range(9)]
         for index in range(7):
-            score += min(suit_counts[index], suit_counts[index + 1]) * 2.5
-            score += min(suit_counts[index], suit_counts[index + 2]) * 1.25
-        score += sum(min(suit_counts[index : index + 3]) * 5 for index in range(7))
-    return float(score)
+            adjacent_overlap += min(suit_counts[index], suit_counts[index + 1])
+            gap_overlap += min(suit_counts[index], suit_counts[index + 2])
+        sequence_overlap += sum(
+            min(suit_counts[index : index + 3]) for index in range(7)
+        )
+    return HandQualityComponents(
+        fixed_melds=meld_count,
+        gold_tiles=gold_count,
+        triplet_groups=triplet_groups,
+        pair_remainders=pair_remainders,
+        adjacent_overlap=adjacent_overlap,
+        gap_overlap=gap_overlap,
+        sequence_overlap=sequence_overlap,
+    )
+
+
+def standard_hand_shanten(
+    tiles: Sequence[int],
+    gold_tile: int | None,
+    *,
+    meld_count: int = 0,
+    melds_required: int = 4,
+    wildcard_tiles: Iterable[int] | None = None,
+    proxy_tile: int | None = None,
+    proxy_as: int | None = None,
+) -> int:
+    """Return exact regular-hand shanten for four/five-meld variants.
+
+    ``-1`` is a complete hand and ``0`` is tenpai.  Actual gold tiles are
+    enumerated as flexible logical faces; a white-dragon proxy is first mapped
+    to the gold's fixed face value and never becomes an extra wildcard.
+
+    This is deliberately the regular meld-plus-pair distance used by classic
+    Xiamen.  Seven pairs is not mixed into this primitive because the classic
+    profile disables it and its hand-size contract differs from five melds.
+    """
+
+    if not 0 <= meld_count <= melds_required:
+        raise ValueError("meld_count 必须位于 0 和 melds_required 之间")
+    wildcards = _wildcard_set(gold_tile, wildcard_tiles)
+    counts = [0] * BASE_TILE_COUNT
+    jokers = 0
+    for tile in tiles:
+        if tile in wildcards:
+            jokers += 1
+            continue
+        logical = _proxy_value(tile, proxy_tile, proxy_as)
+        if not 0 <= logical < BASE_TILE_COUNT:
+            raise ValueError("向听计算只接受基础牌")
+        counts[logical] += 1
+    return _standard_shanten_with_jokers(
+        tuple(counts), jokers, meld_count, melds_required
+    )
+
+
+@lru_cache(maxsize=250_000)
+def _standard_shanten_with_jokers(
+    counts: tuple[int, ...],
+    jokers: int,
+    meld_count: int,
+    melds_required: int,
+) -> int:
+    if jokers < 0:
+        raise ValueError("jokers 不能为负数")
+    natural = _standard_shanten_natural(counts, meld_count, melds_required)
+    # Regular-hand shanten is the minimum number of useful tile additions
+    # needed to reach tenpai (and -1 for complete).  A wildcard can realize
+    # any one such missing face, so each existing joker removes exactly one
+    # unit until completion.  This is equivalent to enumerating every logical
+    # assignment but avoids 34**j repeated decompositions at every ukeire leaf.
+    return max(-1, natural - jokers)
+
+
+@lru_cache(maxsize=500_000)
+def _standard_shanten_natural(
+    counts: tuple[int, ...],
+    fixed_melds: int,
+    melds_required: int,
+) -> int:
+    """Enumerate meld/head/incomplete-block decompositions exactly."""
+
+    @lru_cache(maxsize=None)
+    def search(
+        state: tuple[int, ...],
+        melds: int,
+        incomplete: int,
+        has_pair: bool,
+    ) -> int:
+        total_melds = fixed_melds + melds
+        if total_melds > melds_required:
+            return 2 * melds_required
+        incomplete = min(incomplete, melds_required - total_melds)
+        try:
+            tile = next(index for index, count in enumerate(state) if count)
+        except StopIteration:
+            usable_incomplete = min(incomplete, melds_required - total_melds)
+            return (
+                2 * melds_required
+                - 2 * total_melds
+                - usable_incomplete
+                - int(has_pair)
+            )
+
+        candidates: list[int] = []
+
+        def branch(removals: Sequence[int], *, meld: int = 0, block: int = 0, pair: bool = has_pair) -> None:
+            mutable = list(state)
+            for removed in removals:
+                mutable[removed] -= 1
+            candidates.append(
+                search(tuple(mutable), melds + meld, incomplete + block, pair)
+            )
+
+        count = state[tile]
+        if count >= 3:
+            branch((tile, tile, tile), meld=1)
+        if is_suited(tile) and tile % 9 <= 6 and all(
+            state[value] for value in (tile, tile + 1, tile + 2)
+        ):
+            branch((tile, tile + 1, tile + 2), meld=1)
+        if count >= 2:
+            if not has_pair:
+                branch((tile, tile), pair=True)
+            branch((tile, tile), block=1)
+        if is_suited(tile):
+            for other in (tile + 1, tile + 2):
+                if other // 9 == tile // 9 and other < BASE_TILE_COUNT and state[other]:
+                    branch((tile, other), block=1)
+
+        # Leave this face unused by the selected decomposition.
+        branch((tile,))
+        return min(candidates)
+
+    return search(counts, 0, 0, False)
+
+
+def public_draw_improvement_profile(
+    tiles: Sequence[int],
+    live_counts: Sequence[int],
+    gold_tile: int | None,
+    *,
+    meld_count: int = 0,
+    melds_required: int = 4,
+    wildcard_tiles: Iterable[int] | None = None,
+    proxy_tile: int | None = None,
+    proxy_as: int | None = None,
+    legal_discards: Callable[[list[int]], Iterable[int]] | None = None,
+) -> DrawImprovementProfile:
+    """Count publicly live draws that strictly reduce regular-hand shanten.
+
+    ``tiles`` is the concealed post-discard hand.  For each publicly unseen
+    base-tile face, the routine draws it and chooses the best legal follow-up
+    discard.  It does not inspect a wall or opponent hand and makes no claim
+    that public remaining copies are in the live wall; the result is an
+    actor-visible tile-efficiency statistic, not a win probability.
+    """
+
+    if len(live_counts) != BASE_TILE_COUNT or any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in live_counts
+    ):
+        raise ValueError("live_counts 必须是 34 个非负整数")
+    shanten = standard_hand_shanten(
+        tiles,
+        gold_tile,
+        meld_count=meld_count,
+        melds_required=melds_required,
+        wildcard_tiles=wildcard_tiles,
+        proxy_tile=proxy_tile,
+        proxy_as=proxy_as,
+    )
+    improving: list[int] = []
+    immediate: list[int] = []
+    for drawn, copies in enumerate(live_counts):
+        if not copies:
+            continue
+        after_draw = [*tiles, drawn]
+        if is_winning_hand(
+            after_draw,
+            gold_tile,
+            meld_count=meld_count,
+            melds_required=melds_required,
+            allow_seven_pairs=False,
+            wildcard_tiles=wildcard_tiles,
+            proxy_tile=proxy_tile,
+            proxy_as=proxy_as,
+        ):
+            immediate.append(drawn)
+            improving.append(drawn)
+            continue
+        discard_faces = (
+            legal_discards(list(after_draw))
+            if legal_discards is not None
+            else set(after_draw)
+        )
+        best_after = None
+        for discarded in sorted(set(discard_faces)):
+            if discarded not in after_draw:
+                raise ValueError("legal_discards 返回了不在手牌中的牌")
+            after_discard = list(after_draw)
+            after_discard.remove(discarded)
+            candidate = standard_hand_shanten(
+                after_discard,
+                gold_tile,
+                meld_count=meld_count,
+                melds_required=melds_required,
+                wildcard_tiles=wildcard_tiles,
+                proxy_tile=proxy_tile,
+                proxy_as=proxy_as,
+            )
+            best_after = candidate if best_after is None else min(best_after, candidate)
+        if best_after is not None and best_after < shanten:
+            improving.append(drawn)
+    return DrawImprovementProfile(
+        shanten=shanten,
+        draws_to_win=shanten + 1,
+        improving_faces=tuple(improving),
+        improving_live_copies=sum(live_counts[tile] for tile in improving),
+        immediate_winning_faces=tuple(immediate),
+        immediate_winning_live_copies=sum(live_counts[tile] for tile in immediate),
+    )
 
 
 def is_travelling_ready(

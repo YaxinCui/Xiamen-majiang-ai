@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a4037" />
+    <title>厦门麻将 · 专家纠错审阅</title>
+    <link rel="stylesheet" href="/review.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="kicker">LOCAL · ACTOR-VISIBLE · TEACHER HIDDEN</p>
+          <h1>厦门麻将 <span>专家纠错审阅</span></h1>
+          <p>把自己当作当时的出牌者，独立选择最好的弃牌。提交前不会显示规则 Teacher 的答案。</p>
+        </div>
+        <div class="progress-card">
+          <strong id="progress-count">– / –</strong>
+          <span id="progress-note">正在载入</span>
+        </div>
+      </header>
+
+      <section id="notice" class="notice">正在读取本地题目…</section>
+
+      <section id="review-area" class="review-grid hidden">
+        <aside class="context-panel">
+          <article class="card">
+            <p class="kicker">公开状态</p>
+            <dl class="facts">
+              <div><dt>金牌</dt><dd id="gold-tile">–</dd></div>
+              <div><dt>金牌指示</dt><dd id="gold-indicator">–</dd></div>
+              <div><dt>剩余牌墙</dt><dd id="wall-remaining">–</dd></div>
+              <div><dt>回合</dt><dd id="turn-count">–</dd></div>
+              <div><dt>庄家</dt><dd id="dealer-seat">–</dd></div>
+              <div><dt>当前玩家</dt><dd>你</dd></div>
+              <div><dt>待响应弃牌</dt><dd id="last-discard">—</dd></div>
+            </dl>
+            <p id="gold-note" class="muted"></p>
+          </article>
+          <article class="card">
+            <p class="kicker">最近公开动作</p>
+            <ol id="history-list" class="history-list"></ol>
+          </article>
+        </aside>
+
+        <section class="table-card">
+          <div id="opponents" class="opponents"></div>
+          <div class="center-mark">厦门麻将<br /><small>选择最佳弃牌</small></div>
+          <article id="actor-seat" class="player-card actor-card"></article>
+        </section>
+
+        <aside class="decision-panel card">
+          <p class="kicker">独立判断</p>
+          <h2>你会怎么做？</h2>
+          <p class="muted">弃牌题点击手牌；响应题在下方选择过、吃或碰。</p>
+          <p class="shortcut-note">快捷键：←/→ 选牌，Enter 确认或下一题，U 不确定，S 跳过。</p>
+          <div id="action-options" class="action-options hidden"></div>
+          <div id="selected-answer" class="selected-answer">尚未选择</div>
+          <button id="confirm-button" class="primary" type="button" disabled>确认：这是我的最佳选择</button>
+          <button id="uncertain-button" class="secondary" type="button" disabled>提交，但我不确定</button>
+          <button id="skip-button" class="ghost" type="button">暂时跳过</button>
+          <div id="feedback" class="feedback hidden"></div>
+          <button id="next-button" class="primary hidden" type="button">下一题</button>
+          <p class="privacy-note">只保存当前玩家可见状态、选择和置信度；没有牌墙顺序、随机种子、对手暗牌或赛果。</p>
+        </aside>
+      </section>
+    </main>
+    <script src="/review.js" defer></script>
+  </body>
+</html>

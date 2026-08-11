@@ -12,8 +12,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 from uuid import uuid4
 
-from .agents import GameAction
+from .agents import GameAction, HeuristicTeacherAgent
 from .game import GameError, XiamenMahjongGame
+from .human_data import is_eligible_human_teacher_discard_correction
 from .rules import XiamenRules
 from .training import (
     TeacherDecision,
@@ -23,6 +24,7 @@ from .training import (
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = ROOT / "web_game_static"
+HUMAN_REFERENCE_POLICY = "heuristic_teacher_v1"
 
 
 class GameStore:
@@ -72,7 +74,11 @@ class GameStore:
         self._human_recording_session_id = (
             uuid4().hex if self._human_log is not None else None
         )
+        self._human_reference_teacher = HeuristicTeacherAgent()
         self._human_decisions: list[TeacherDecision] = []
+        self._human_session_completed_hands = 0
+        self._human_session_eligible_discard_decisions = 0
+        self._human_session_discard_disagreements = 0
         self._human_hand_written = False
         self._human_log_error = False
         self.game = self._new_engine_game(
@@ -121,7 +127,16 @@ class GameStore:
         )
 
     def _public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
-        state = self.game.public_state(reveal_ai_hands=reveal_ai_hands)
+        recording_enabled = (
+            self._human_log is not None and self.table_mode == "solo_vs_ai"
+        )
+        # Human labels must be generated from the same information available
+        # to a deployed actor. A query-string debug request cannot override
+        # this boundary while either training or evaluation recording is on.
+        debug_ai_hands_allowed = not recording_enabled
+        state = self.game.public_state(
+            reveal_ai_hands=reveal_ai_hands and debug_ai_hands_allowed
+        )
         state["rule_profiles"] = XiamenRules.available_profiles()
         state["table_mode"] = self.table_mode
         state["table_modes"] = [
@@ -135,12 +150,20 @@ class GameStore:
             if self.table_mode == "four_player_manual"
             else self._ai_profile
         )
+        state["debug_ai_hands_allowed"] = debug_ai_hands_allowed
         state["local_human_recording"] = {
-            "enabled": self._human_log is not None and self.table_mode == "solo_vs_ai",
+            "enabled": recording_enabled,
             "purpose": self._human_recording_purpose,
             "pending_decisions": len(self._human_decisions),
             "completed_hand_written": self._human_hand_written,
             "write_failed": self._human_log_error,
+            "session_completed_hands": self._human_session_completed_hands,
+            "session_eligible_discard_decisions": (
+                self._human_session_eligible_discard_decisions
+            ),
+            "session_discard_disagreements": (
+                self._human_session_discard_disagreements
+            ),
             "scope": (
                 "completed_hand_actor_visible_only"
                 if self._human_log is not None and self.table_mode == "solo_vs_ai"
@@ -170,6 +193,18 @@ class GameStore:
         if action not in legal:
             raise GameError("该动作不是当前可执行的操作")
         action_index = legal.index(action)
+        if self.game.phase == "discard":
+            reference_action = self._human_reference_teacher.choose_turn_action(
+                self.game, self.game.human_seat
+            )
+        elif self.game.phase == "response":
+            reference_action = self._human_reference_teacher.choose_response(
+                self.game, self.game.human_seat, list(legal)
+            )
+        else:
+            raise GameError("当前状态无法记录人类决策")
+        if reference_action not in legal:
+            raise RuntimeError("冻结 Teacher 给出了当前状态下的非法参考动作")
         return TeacherDecision(
             profile=self.game.rules.profile,
             seed=None,
@@ -181,6 +216,7 @@ class GameStore:
             chosen_index=action_index,
             executed_index=action_index,
             executed_probability=None,
+            reference_teacher_index=legal.index(reference_action),
         )
 
     def _write_completed_human_hand(self) -> None:
@@ -213,6 +249,9 @@ class GameStore:
                 "recording_purpose": self._human_recording_purpose,
                 "recording_session_id": self._human_recording_session_id,
                 "opponent_policy": self._ai_identity,
+                "opponent_hand_reveal": "server_forced_disabled",
+                "reference_policy": HUMAN_REFERENCE_POLICY,
+                "reference_label": "same_state_frozen_teacher_action_index",
             },
         )
         payload = trajectory.payload()
@@ -236,6 +275,14 @@ class GameStore:
             self._human_log_error = True
             return
         self._human_hand_written = True
+        self._human_session_completed_hands += 1
+        for decision in self._human_decisions:
+            if not is_eligible_human_teacher_discard_correction(decision):
+                continue
+            self._human_session_eligible_discard_decisions += 1
+            self._human_session_discard_disagreements += (
+                decision.reference_teacher_index != decision.chosen_index
+            )
 
     def _reset_human_recorder(self) -> None:
         self._human_decisions = []

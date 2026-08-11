@@ -35,7 +35,14 @@ from xiamen_mahjong.torch_policy import (
     ResidualPublicSequencePolicyValueNetwork,
     TorchPolicyValueAgent,
 )
-from xiamen_mahjong.human_data import require_local_human_training_approval
+from xiamen_mahjong.human_data import (
+    is_eligible_human_teacher_discard_correction,
+    require_local_human_training_approval,
+)
+from xiamen_mahjong.human_review import read_confirmed_review_decisions
+from xiamen_mahjong.response_review import (
+    read_confirmed_response_review_decisions,
+)
 from xiamen_mahjong.training import (
     NEURAL_FEATURE_DIMS,
     PUBLIC_ACTION_SEQUENCE_DIM,
@@ -154,6 +161,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--reserve-local-human-test-for-gate",
+        action="store_true",
+        help=(
+            "真人数据只传 train/validation，把完整真人 test 文件留给后续 Teacher gate "
+            "一次性终检；训练器此时拒绝任何 human additional-test"
+        ),
+    )
+    parser.add_argument(
         "--human-minimum-hands",
         type=int,
         default=100,
@@ -164,6 +179,79 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=1.0,
         help="通过人工复核的 local_human_opt_in 行为模仿样本权重",
+    )
+    parser.add_argument(
+        "--human-teacher-disagreement-weight",
+        type=float,
+        default=1.0,
+        help=(
+            "真人动作与同状态冻结 Teacher 不同时的额外乘数；默认 1 不改变旧行为，"
+            "仅应在完整牌局切分的验证集上选择"
+        ),
+    )
+    parser.add_argument(
+        "--human-discard-corrections-only",
+        action="store_true",
+        help=(
+            "只把普通弃牌覆盖弃牌范围内的真人决策编码为训练/验证样本；"
+            "响应、胡、杠、游金和金牌锁仍由 Teacher 语料维持"
+        ),
+    )
+    parser.add_argument(
+        "--human-review-train",
+        type=Path,
+        action="append",
+        default=[],
+        help="经 group 切分且只含 confirmed 的专家纠错 train review JSONL",
+    )
+    parser.add_argument(
+        "--human-review-validation",
+        type=Path,
+        action="append",
+        default=[],
+        help="经 group 切分且只含 confirmed 的专家纠错 validation review JSONL",
+    )
+    parser.add_argument(
+        "--allow-local-human-review-data",
+        action="store_true",
+        help=(
+            "显式确认专家纠错标签已通过独立审计和 group 切分；"
+            "review test 没有对应参数，必须留给后续 gate"
+        ),
+    )
+    parser.add_argument(
+        "--human-review-weight",
+        type=float,
+        default=1.0,
+        help="confirmed local_human_review_opt_in 行为标签的样本权重",
+    )
+    parser.add_argument(
+        "--human-response-review-train",
+        type=Path,
+        action="append",
+        default=[],
+        help="经 group 切分且只含 confirmed 的吃／碰／过 train review JSONL",
+    )
+    parser.add_argument(
+        "--human-response-review-validation",
+        type=Path,
+        action="append",
+        default=[],
+        help="经 group 切分且只含 confirmed 的吃／碰／过 validation review JSONL",
+    )
+    parser.add_argument(
+        "--allow-local-human-response-review-data",
+        action="store_true",
+        help=(
+            "显式确认响应标签已通过独立审计和 group 切分；"
+            "response review test 没有训练器参数，必须留给后续 gate"
+        ),
+    )
+    parser.add_argument(
+        "--human-response-review-weight",
+        type=float,
+        default=1.0,
+        help="confirmed local_human_response_review_opt_in 行为标签的样本权重",
     )
     parser.add_argument(
         "--action-value-weight",
@@ -259,9 +347,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-class-weight", type=float, default=6.0)
     parser.add_argument(
         "--checkpoint-selection-source",
-        choices=("overall", "counterfactual_action_value_rollout"),
+        choices=(
+            "overall",
+            "counterfactual_action_value_rollout",
+            "local_human_opt_in",
+            "local_human_review_opt_in",
+            "local_human_response_review_opt_in",
+        ),
         default="overall",
-        help="best checkpoint 使用的验证来源；动作价值微调应选择专属留出集",
+        help=(
+            "best checkpoint 使用的验证来源；动作价值或经审核真人微调应选择"
+            "各自专属留出来源，避免被大规模 Teacher 样本淹没"
+        ),
     )
     parser.add_argument(
         "--checkpoint-selection-metric",
@@ -295,6 +392,10 @@ def parse_args() -> argparse.Namespace:
 def source_weight(source: str, args: argparse.Namespace) -> float:
     if source == "local_human_opt_in":
         return args.human_weight
+    if source == "local_human_review_opt_in":
+        return args.human_review_weight
+    if source == "local_human_response_review_opt_in":
+        return args.human_response_review_weight
     if source == "random_legal_teacher_labeled":
         return args.exploration_weight
     if source in {
@@ -379,6 +480,12 @@ def iter_examples(path: Path, args: argparse.Namespace) -> Iterable[Example]:
         synthetic = bool(trajectory.outcome.get("synthetic"))
         scores = trajectory.outcome.get("scores", [])
         for decision in trajectory.decisions:
+            if (
+                source == "local_human_opt_in"
+                and getattr(args, "human_discard_corrections_only", False)
+                and not is_eligible_human_teacher_discard_correction(decision)
+            ):
+                continue
             vectors = tuple(
                 tuple(
                     _dense_action_features(
@@ -400,6 +507,12 @@ def iter_examples(path: Path, args: argparse.Namespace) -> Iterable[Example]:
             }:
                 value_target = float(scores[decision.seat]) / args.value_scale
             sample_weight = source_weight(source, args)
+            if (
+                source == "local_human_opt_in"
+                and decision.reference_teacher_index is not None
+                and decision.reference_teacher_index != decision.chosen_index
+            ):
+                sample_weight *= args.human_teacher_disagreement_weight
             if decision.action_values is not None and args.action_value_margin_scale > 0:
                 action_value_span = max(decision.action_values) - min(
                     decision.action_values
@@ -437,6 +550,98 @@ def load_examples(path: Path, args: argparse.Namespace) -> list[Example]:
     return list(iter_examples(path, args))
 
 
+def iter_review_examples(path: Path, args: argparse.Namespace) -> Iterable[Example]:
+    """Encode confirmed actor-visible review labels without outcome targets."""
+
+    if not getattr(args, "allow_local_human_review_data", False):
+        raise ValueError(
+            "检测到 local_human_review_opt_in；默认禁止训练。"
+            "请先审计并显式传入 --allow-local-human-review-data"
+        )
+    history_window = int(
+        getattr(args, "history_window", PUBLIC_ACTION_SEQUENCE_LENGTH)
+    )
+    for _group_id, decision in read_confirmed_review_decisions(path):
+        vectors = tuple(
+            tuple(
+                _dense_action_features(
+                    decision.state, action, feature_version=args.feature_version
+                )
+            )
+            for action in decision.legal_actions
+        )
+        sample_weight = source_weight("local_human_review_opt_in", args)
+        if decision.reference_teacher_index != decision.chosen_index:
+            sample_weight *= args.human_teacher_disagreement_weight
+        yield Example(
+            candidates=vectors,
+            public_events=public_action_sequence_features(
+                decision.state, length=history_window
+            ),
+            chosen_index=decision.chosen_index,
+            action_kind=decision.chosen_action.kind,
+            source="local_human_review_opt_in",
+            action_values=None,
+            action_value_stderrs=None,
+            action_value_gap_stderrs=None,
+            value_target=None,
+            sample_weight=sample_weight,
+        )
+
+
+def load_review_examples(path: Path, args: argparse.Namespace) -> list[Example]:
+    return list(iter_review_examples(path, args))
+
+
+def iter_response_review_examples(
+    path: Path, args: argparse.Namespace
+) -> Iterable[Example]:
+    """Encode confirmed actor-visible pass/chi/pong labels without outcomes."""
+
+    if not getattr(args, "allow_local_human_response_review_data", False):
+        raise ValueError(
+            "检测到 local_human_response_review_opt_in；默认禁止训练。"
+            "请先审计并显式传入 --allow-local-human-response-review-data"
+        )
+    history_window = int(
+        getattr(args, "history_window", PUBLIC_ACTION_SEQUENCE_LENGTH)
+    )
+    for _group_id, decision in read_confirmed_response_review_decisions(path):
+        vectors = tuple(
+            tuple(
+                _dense_action_features(
+                    decision.state, action, feature_version=args.feature_version
+                )
+            )
+            for action in decision.legal_actions
+        )
+        sample_weight = source_weight(
+            "local_human_response_review_opt_in", args
+        )
+        if decision.reference_teacher_index != decision.chosen_index:
+            sample_weight *= args.human_teacher_disagreement_weight
+        yield Example(
+            candidates=vectors,
+            public_events=public_action_sequence_features(
+                decision.state, length=history_window
+            ),
+            chosen_index=decision.chosen_index,
+            action_kind=decision.chosen_action.kind,
+            source="local_human_response_review_opt_in",
+            action_values=None,
+            action_value_stderrs=None,
+            action_value_gap_stderrs=None,
+            value_target=None,
+            sample_weight=sample_weight,
+        )
+
+
+def load_response_review_examples(
+    path: Path, args: argparse.Namespace
+) -> list[Example]:
+    return list(iter_response_review_examples(path, args))
+
+
 def summarize_training_examples(
     paths: Sequence[Path], args: argparse.Namespace
 ) -> tuple[int, Counter[str], bool]:
@@ -461,6 +666,12 @@ def summarize_training_examples(
                     "请先完成独立审计/人工复核，并显式传入 --allow-local-human-data"
                 )
             for decision in trajectory.decisions:
+                if (
+                    source == "local_human_opt_in"
+                    and getattr(args, "human_discard_corrections_only", False)
+                    and not is_eligible_human_teacher_discard_correction(decision)
+                ):
+                    continue
                 decision_count += 1
                 action_counts[decision.chosen_action.kind] += 1
                 has_action_value_targets |= decision.action_values is not None
@@ -485,6 +696,43 @@ def local_human_input_paths(paths: Iterable[Path]) -> tuple[Path, ...]:
             )
         human_paths.append(path)
     return tuple(human_paths)
+
+
+def validate_local_human_split_contract(
+    human_paths_by_split: Mapping[str, Sequence[Path]],
+    *,
+    reserve_test_for_gate: bool,
+) -> None:
+    """Keep a human gate test physically unread by the model trainer."""
+
+    expected = {"train", "validation", "test"}
+    if set(human_paths_by_split) != expected:
+        raise ValueError("人类 split 契约必须包含 train、validation、test")
+    if reserve_test_for_gate:
+        missing = [
+            split
+            for split in ("train", "validation")
+            if not human_paths_by_split[split]
+        ]
+        if missing:
+            raise ValueError(
+                "保留真人 gate test 时仍需人类 train/validation；缺少 "
+                + ", ".join(missing)
+            )
+        if human_paths_by_split["test"]:
+            raise ValueError(
+                "--reserve-local-human-test-for-gate 要求训练器完全不接收真人 test"
+            )
+        return
+    missing = [
+        split for split in ("train", "validation", "test")
+        if not human_paths_by_split[split]
+    ]
+    if missing:
+        raise ValueError(
+            "人类行为数据必须按完整牌局独立覆盖 train、validation、test；缺少 "
+            + ", ".join(missing)
+        )
 
 
 def report_input_path(path: Path, human_paths: set[Path]) -> str:
@@ -521,6 +769,8 @@ def iter_training_batches(
     batch_size: int,
     stream_shards: bool,
     in_memory_examples: list[Example] | None,
+    review_paths: Sequence[Path] = (),
+    response_review_paths: Sequence[Path] = (),
 ) -> Iterable[list[Example]]:
     """Yield deterministic batches without retaining a whole train shard.
 
@@ -545,16 +795,27 @@ def iter_training_batches(
             ]
         return
 
-    shard_order = list(enumerate(paths))
+    sources = (
+        [("trajectory", path) for path in paths]
+        + [("review", path) for path in review_paths]
+        + [("response_review", path) for path in response_review_paths]
+    )
+    shard_order = list(enumerate(sources))
     random.Random(args.seed + epoch).shuffle(shard_order)
     shuffle_buffer = int(getattr(args, "stream_shuffle_buffer", 4096))
     if shuffle_buffer <= 0:
         raise ValueError("stream_shuffle_buffer 必须为正数")
-    for source_index, path in shard_order:
+    for source_index, (source_kind, path) in shard_order:
         rng = random.Random(args.seed + epoch * 1_000_003 + source_index)
         buffer: list[Example] = []
         batch: list[Example] = []
-        for example in iter_examples(path, args):
+        if source_kind == "review":
+            iterator = iter_review_examples(path, args)
+        elif source_kind == "response_review":
+            iterator = iter_response_review_examples(path, args)
+        else:
+            iterator = iter_examples(path, args)
+        for example in iterator:
             if len(buffer) < shuffle_buffer:
                 buffer.append(example)
                 continue
@@ -1178,9 +1439,12 @@ def main() -> None:
         or args.synthetic_weight <= 0
         or args.human_minimum_hands <= 0
         or args.human_weight <= 0
+        or args.human_review_weight <= 0
+        or args.human_response_review_weight <= 0
         or args.action_value_weight < 0
         or args.action_value_regression_weight < 0
         or args.action_value_regression_sample_weight < 0
+        or args.human_teacher_disagreement_weight < 0
         or args.action_value_rank_loss_weight < 0
         or args.action_value_target_scale <= 0
         or args.action_value_temperature <= 0
@@ -1211,6 +1475,111 @@ def main() -> None:
         "validation": (args.validation, *args.additional_validation),
         "test": (args.test, *args.additional_test),
     }
+    review_paths_by_split = {
+        "train": tuple(args.human_review_train),
+        "validation": tuple(args.human_review_validation),
+        # Intentionally no CLI input exists for review test.  The trainer is
+        # structurally unable to inspect it before the post-training gate.
+        "test": (),
+    }
+    response_review_paths_by_split = {
+        "train": tuple(args.human_response_review_train),
+        "validation": tuple(args.human_response_review_validation),
+        # Deliberately no response-review test CLI parameter.  The post-train
+        # gate is the first process allowed to open those bytes.
+        "test": (),
+    }
+    supplied_review_paths = tuple(
+        path for paths in review_paths_by_split.values() for path in paths
+    )
+    if supplied_review_paths and not args.allow_local_human_review_data:
+        raise ValueError(
+            "--human-review-train/validation 要求显式指定 "
+            "--allow-local-human-review-data"
+        )
+    if args.allow_local_human_review_data and not supplied_review_paths:
+        raise ValueError(
+            "--allow-local-human-review-data 已指定，但没有 review train/validation"
+        )
+    if supplied_review_paths and (
+        not review_paths_by_split["train"]
+        or not review_paths_by_split["validation"]
+    ):
+        raise ValueError("专家纠错训练必须同时提供 train 和 validation")
+    local_review_root = (ROOT / "local_human_data").resolve()
+    for path in supplied_review_paths:
+        resolved = path.resolve()
+        if resolved != local_review_root and local_review_root not in resolved.parents:
+            raise ValueError("专家纠错输入必须位于 Git 忽略的 local_human_data/")
+    review_groups_by_split: dict[str, set[str]] = {
+        "train": set(),
+        "validation": set(),
+        "test": set(),
+    }
+    review_counts_by_split = {"train": 0, "validation": 0, "test": 0}
+    for split in ("train", "validation"):
+        for path in review_paths_by_split[split]:
+            rows = read_confirmed_review_decisions(path)
+            review_counts_by_split[split] += len(rows)
+            review_groups_by_split[split].update(group for group, _decision in rows)
+    review_group_overlap = review_groups_by_split["train"] & review_groups_by_split[
+        "validation"
+    ]
+    if review_group_overlap:
+        raise ValueError("专家纠错 train/validation 存在物理牌局 group 重叠")
+    supplied_response_review_paths = tuple(
+        path
+        for paths in response_review_paths_by_split.values()
+        for path in paths
+    )
+    if (
+        supplied_response_review_paths
+        and not args.allow_local_human_response_review_data
+    ):
+        raise ValueError(
+            "--human-response-review-train/validation 要求显式指定 "
+            "--allow-local-human-response-review-data"
+        )
+    if (
+        args.allow_local_human_response_review_data
+        and not supplied_response_review_paths
+    ):
+        raise ValueError(
+            "--allow-local-human-response-review-data 已指定，但没有 response "
+            "review train/validation"
+        )
+    if supplied_response_review_paths and (
+        not response_review_paths_by_split["train"]
+        or not response_review_paths_by_split["validation"]
+    ):
+        raise ValueError("响应专家纠错训练必须同时提供 train 和 validation")
+    for path in supplied_response_review_paths:
+        resolved = path.resolve()
+        if resolved != local_review_root and local_review_root not in resolved.parents:
+            raise ValueError("响应专家纠错输入必须位于 Git 忽略的 local_human_data/")
+    response_review_groups_by_split: dict[str, set[str]] = {
+        "train": set(),
+        "validation": set(),
+        "test": set(),
+    }
+    response_review_counts_by_split = {
+        "train": 0,
+        "validation": 0,
+        "test": 0,
+    }
+    for split in ("train", "validation"):
+        for path in response_review_paths_by_split[split]:
+            rows = read_confirmed_response_review_decisions(path)
+            response_review_counts_by_split[split] += len(rows)
+            response_review_groups_by_split[split].update(
+                group for group, _decision in rows
+            )
+    response_review_group_overlap = (
+        response_review_groups_by_split["train"]
+        & response_review_groups_by_split["validation"]
+    )
+    if response_review_group_overlap:
+        raise ValueError("响应专家纠错 train/validation 存在物理牌局 group 重叠")
     human_paths_by_split = {
         split: local_human_input_paths(paths)
         for split, paths in input_paths_by_split.items()
@@ -1218,20 +1587,20 @@ def main() -> None:
     human_paths = tuple(
         path for paths in human_paths_by_split.values() for path in paths
     )
+    if args.reserve_local_human_test_for_gate and not args.allow_local_human_data:
+        raise ValueError(
+            "--reserve-local-human-test-for-gate 必须与 --allow-local-human-data 一起使用"
+        )
     if args.allow_local_human_data and not human_paths:
         raise ValueError(
             "--allow-local-human-data 已指定，但 train/validation/test 中没有 "
             "local_human_opt_in 轨迹"
         )
     if human_paths:
-        missing_human_splits = [
-            split for split, paths in human_paths_by_split.items() if not paths
-        ]
-        if missing_human_splits:
-            raise ValueError(
-                "人类行为数据必须按完整牌局独立覆盖 train、validation、test；"
-                "缺少 " + ", ".join(missing_human_splits)
-            )
+        validate_local_human_split_contract(
+            human_paths_by_split,
+            reserve_test_for_gate=args.reserve_local_human_test_for_gate,
+        )
     human_training_provenance = (
         require_local_human_training_approval(
             human_paths,
@@ -1249,17 +1618,38 @@ def main() -> None:
                 split: len(paths)
                 for split, paths in human_paths_by_split.items()
             },
+            "human_test_contract": (
+                "physically_unread_reserved_for_teacher_gate"
+                if args.reserve_local_human_test_for_gate
+                else "loaded_for_model_test_reporting"
+            ),
         }
     train_paths = input_paths_by_split["train"]
     if args.stream_train_shards:
         train_decisions, train_action_counts, train_has_action_value_targets = (
             summarize_training_examples(train_paths, args)
         )
+        for path in review_paths_by_split["train"]:
+            review_examples = load_review_examples(path, args)
+            train_decisions += len(review_examples)
+            train_action_counts.update(
+                example.action_kind for example in review_examples
+            )
+        for path in response_review_paths_by_split["train"]:
+            review_examples = load_response_review_examples(path, args)
+            train_decisions += len(review_examples)
+            train_action_counts.update(
+                example.action_kind for example in review_examples
+            )
         train: list[Example] | None = None
     else:
         train = load_examples(args.train, args)
         for path in args.additional_train:
             train.extend(load_examples(path, args))
+        for path in review_paths_by_split["train"]:
+            train.extend(load_review_examples(path, args))
+        for path in response_review_paths_by_split["train"]:
+            train.extend(load_response_review_examples(path, args))
         train_decisions = len(train)
         train_action_counts = Counter(example.action_kind for example in train)
         train_has_action_value_targets = any(
@@ -1268,6 +1658,10 @@ def main() -> None:
     validation = load_examples(args.validation, args)
     for path in args.additional_validation:
         validation.extend(load_examples(path, args))
+    for path in review_paths_by_split["validation"]:
+        validation.extend(load_review_examples(path, args))
+    for path in response_review_paths_by_split["validation"]:
+        validation.extend(load_response_review_examples(path, args))
     test = load_examples(args.test, args)
     for path in args.additional_test:
         test.extend(load_examples(path, args))
@@ -1416,6 +1810,8 @@ def main() -> None:
             batch_size=args.batch_size,
             stream_shards=args.stream_train_shards,
             in_memory_examples=train,
+            review_paths=review_paths_by_split["train"],
+            response_review_paths=response_review_paths_by_split["train"],
         ):
             (
                 candidates,
@@ -1646,22 +2042,81 @@ def main() -> None:
                 report_input_path(path, human_path_set) for path in args.additional_test
             ],
             "init_checkpoint": str(args.init_checkpoint) if args.init_checkpoint else None,
+            "local_human_review": {
+                "train_files": len(review_paths_by_split["train"]),
+                "validation_files": len(review_paths_by_split["validation"]),
+                "test": "physically_unread_no_trainer_cli_parameter",
+            },
+            "local_human_response_review": {
+                "train_files": len(response_review_paths_by_split["train"]),
+                "validation_files": len(
+                    response_review_paths_by_split["validation"]
+                ),
+                "test": "physically_unread_no_trainer_cli_parameter",
+            },
         },
         "local_human_data": human_training_provenance,
+        "reserve_local_human_test_for_gate": args.reserve_local_human_test_for_gate,
+        "local_human_review": (
+            {
+                "source": "local_human_review_opt_in",
+                "confirmed_decisions": review_counts_by_split,
+                "group_counts": {
+                    split: len(groups)
+                    for split, groups in review_groups_by_split.items()
+                },
+                "train_validation_group_overlap": 0,
+                "review_test_contract": "physically_unread_reserved_for_teacher_gate",
+                "privacy": "aggregate_only_no_local_path_state_hand_history_or_action_face",
+            }
+            if supplied_review_paths
+            else None
+        ),
+        "local_human_response_review": (
+            {
+                "source": "local_human_response_review_opt_in",
+                "confirmed_decisions": response_review_counts_by_split,
+                "group_counts": {
+                    split: len(groups)
+                    for split, groups in response_review_groups_by_split.items()
+                },
+                "train_validation_group_overlap": 0,
+                "review_test_contract": (
+                    "physically_unread_reserved_for_response_gate"
+                ),
+                "privacy": (
+                    "aggregate_only_no_local_path_state_hand_history_or_action_face"
+                ),
+            }
+            if supplied_response_review_paths
+            else None
+        ),
         "class_weights": weights,
         "source_weights": {
             "teacher_self_play": 1.0,
             "candidate_vs_teacher_dagger": 1.0,
             "local_human_opt_in": args.human_weight,
+            "local_human_review_opt_in": args.human_review_weight,
+            "local_human_response_review_opt_in": (
+                args.human_response_review_weight
+            ),
             "random_legal_teacher_labeled": args.exploration_weight,
             "physical_response_pass_search": args.synthetic_weight,
             "engine_validated_tour_curriculum": args.synthetic_weight,
             "engine_validated_gold_lock_curriculum": args.synthetic_weight,
             "counterfactual_action_value_rollout": args.action_value_weight,
         },
+        "human_teacher_disagreement_weight": args.human_teacher_disagreement_weight,
+        "human_discard_corrections_only": args.human_discard_corrections_only,
         "policy_targets": {
             "teacher_and_curriculum": "hard_teacher_action",
             "local_human_opt_in": "hard_executed_human_action_after_manual_review",
+            "local_human_review_opt_in": (
+                "hard_confirmed_expert_discard_without_terminal_value_target"
+            ),
+            "local_human_response_review_opt_in": (
+                "hard_confirmed_expert_pass_chi_pong_without_terminal_value_target"
+            ),
             "counterfactual_action_value_rollout": (
                 "softmax(conservative_action_value_preference / temperature)"
             ),

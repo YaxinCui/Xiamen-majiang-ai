@@ -13,6 +13,7 @@
 - [`xiamen_rules_engine/`](xiamen_rules_engine/)：厦门麻将规则、状态机、动作合法性和结算事实源。
 - [`data_and_evaluation/`](data_and_evaluation/)：数据来源、切分、指标、物理墙种子和统计解释。
 - [`experiments_and_reproduction/`](experiments_and_reproduction/)：预注册协议、命令、版本、失败实验和复现清单。
+- [`technical_routes/`](technical_routes/)：从项目反证与前沿方法推演候选路线、依赖、最小证伪实验和预计失败方式。
 
 各分区内的 `landscape_2026-08.md` 与 `technique_matrix_2026-08.md` 是本轮扩展后的横向索引；它们记录的是可核验资料池，
 不代表所有方法都已在厦门规则下复现或通过强度门槛。
@@ -41,4 +42,7 @@
 
 本知识库不把抚州的模型参数、规则代码或训练牌谱当作厦门项目的可直接输入；规则、版权和隐藏信息边界必须单独审计。
 
-最后更新：2026-08-07。
+完整的下一阶段路线树见[《厦门麻将深度训练：问题分解、推理链、候选与失败路线》](technical_routes/xiamen_deep_training_route_space_2026-08.md)。
+受当前机器和数据约束，实际执行顺序以[《厦门麻将 AI 资源受限训练计划》](technical_routes/resource_constrained_training_plan_2026-08-08.md)为准。
+
+最后更新：2026-08-08。

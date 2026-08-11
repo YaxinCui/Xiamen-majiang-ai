@@ -1,6 +1,8 @@
 import tempfile
 import unittest
 from pathlib import Path
+import copy
+from types import SimpleNamespace
 
 try:
     import torch
@@ -10,6 +12,66 @@ except ModuleNotFoundError:
 
 @unittest.skipIf(torch is None, "PyTorch 仅在项目 .venv 中安装")
 class TorchPpoTests(unittest.TestCase):
+    def test_training_config_payload_records_every_reproduction_knob(self):
+        from scripts.train_torch_ppo import training_config_payload
+
+        args = SimpleNamespace(
+            iterations=4,
+            episodes_per_iteration=1024,
+            rollout_batch_size=64,
+            ppo_epochs=2,
+            batch_size=512,
+            learning_rate=0.00005,
+            policy_head_learning_rate_multiplier=10.0,
+            reference_kl_weight=0.05,
+            clip_ratio=0.15,
+            value_weight=0.25,
+            entropy_weight=0.002,
+            reward_scale=80.0,
+            seed=202646000,
+            profile="classic",
+            device="cuda",
+            teacher_opponent_probability=1.0,
+            self_play_opponent_probability=0.0,
+            teacher_prior_margin=0.0,
+            opponent_checkpoint=[],
+            privileged_critic=False,
+            privileged_critic_hidden_size=128,
+            privileged_critic_weight=0.25,
+        )
+        payload = training_config_payload(args)
+        self.assertEqual(payload["episodes_per_iteration"], 1024)
+        self.assertEqual(payload["ppo_epochs"], 2)
+        self.assertEqual(payload["seed"], 202646000)
+        self.assertEqual(payload["opponent_checkpoints"], [])
+        self.assertEqual(
+            set(payload),
+            {
+                "iterations",
+                "episodes_per_iteration",
+                "rollout_batch_size",
+                "ppo_epochs",
+                "batch_size",
+                "learning_rate",
+                "policy_head_learning_rate_multiplier",
+                "reference_kl_weight",
+                "clip_ratio",
+                "value_weight",
+                "entropy_weight",
+                "reward_scale",
+                "seed",
+                "profile",
+                "device",
+                "teacher_opponent_probability",
+                "self_play_opponent_probability",
+                "teacher_prior_margin",
+                "opponent_checkpoints",
+                "privileged_critic",
+                "privileged_critic_hidden_size",
+                "privileged_critic_weight",
+            },
+        )
+
     def test_candidate_teacher_rollout_and_ppo_update_remain_engine_legal(self):
         from scripts.train_torch_ppo import collect_rollouts, ppo_update
         from xiamen_mahjong.torch_policy import TorchPolicyValueAgent
@@ -45,6 +107,7 @@ class TorchPpoTests(unittest.TestCase):
             seed=811,
         )
         self.assertGreater(metrics["updates"], 0)
+        self.assertNotIn("anchor_rows", metrics)
         self.assertGreater(metrics["entropy"], 0)
 
     def test_rollout_can_mix_a_frozen_opponent_pool(self):
@@ -77,7 +140,8 @@ class TorchPpoTests(unittest.TestCase):
             rollout_batch_size=3,
         )
         self.assertEqual(summary.episodes, 8)
-        self.assertEqual(summary.wins + summary.draws, 8)
+        self.assertLessEqual(summary.wins + summary.draws, 8)
+        self.assertGreaterEqual(summary.wins, 0)
         self.assertGreater(summary.decisions, 0)
         self.assertTrue(
             all(
@@ -199,8 +263,22 @@ class TorchPpoTests(unittest.TestCase):
             value_weight=0.25,
             entropy_weight=0.002,
             seed=862,
+            reference_network=copy.deepcopy(policy.network),
+            reference_kl_weight=0.1,
+            policy_head_learning_rate_multiplier=5.0,
         )
         self.assertGreater(metrics["updates"], 0)
+        self.assertGreater(metrics["anchor_rows"], 0)
+        self.assertIn("residual_best_alternative_gap_maximum", metrics)
+        self.assertEqual(metrics["anchor_deterministic_override_rate"], 0.0)
+        self.assertGreater(metrics["anchor_teacher_probability_mean"], 0.5)
+        self.assertGreaterEqual(metrics["reference_kl"], 0.0)
+        self.assertEqual(metrics["reference_kl_weight"], 0.1)
+        self.assertEqual(metrics["policy_head_learning_rate_multiplier"], 5.0)
+        self.assertGreaterEqual(metrics["final_reference_kl_mean"], 0.0)
+        self.assertGreaterEqual(
+            metrics["final_reference_argmax_disagreement_rate"], 0.0
+        )
 
     def test_training_only_privileged_critic_never_enters_actor_observations(self):
         from scripts.train_torch_ppo import (

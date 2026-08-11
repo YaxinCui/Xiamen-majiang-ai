@@ -4,6 +4,20 @@
 评测均为「每个初始牌墙让候选轮换四座、其余三座为冻结 Teacher」；标准误以每个
 牌墙四座均分为独立样本计算。
 
+## 2026-08-08：Teacher 响应因果错误地图 v1（validation 拒绝）
+
+为避免继续用局部牌效代理修改吃碰，新增 aggregate-only 因果错误地图。它只读已有 response-v2 单点随机干预，在 train
+按 `chi × 三阶段`、`pong × 三阶段 × 荣／序数牌` 建立互斥类别，目标统一为 `pass−Teacher claim`。2,332 次随机
+response／939 个墙组中，`pong→pass` 汇总为 **−8.913**、95% CI **[−16.091,−1.735]**；荣牌碰为
+**−13.614**、**[−25.309,−1.920]**。因此削弱碰牌有直接反证。`chi→pass` 汇总为 +2.450，但区间
+`[−5.017,+9.917]`，只用于冻结一个待筛选假设。
+
+在读取 validation 前固定唯一候选：只把随机选中的 Teacher-chi 改为 pass，随后恢复 Teacher；门槛要求 100 次
+override、75 组、conditional 双侧 ESS≥30，且 conditional 与全部响应位置 IPS 的 95% 下界均正。v2 validation 有
+338 次 override／194 个 conditional 墙组，ESS 64.69/262.49；conditional 点估计 **+7.406**，95% CI
+**[−6.905,+21.718]**，全部位置为 **+5.511**、**[−4.519,+15.540]**。覆盖通过但双下界失败，状态
+`validation_rejected_no_targeted_collection`。不收集新二元干预、不细分 validation、不读取 terminal、不部署或训练。
+
 ## 2026-08-07：可观察牌桌与吃碰后续牌效 Teacher v1
 
 网页新增服务端单步 AI 推进：可选即时、5 秒、10 秒、15 秒。慢速时每次仅结算一项 AI 决策，
@@ -64,6 +78,12 @@ classic 则为 144 张含花、16／17 张和可吃／游金等规则。因此�
 `recording_session_id`。真人评测审计按 session 均分计算 AI 方分差及其下界，并要求至少 10 个 session；它不导出
 session ID。本项目不能据此自动证明这些 session 就是不同玩家，故报告仍要求人工核验预注册的参与者／区块映射。
 重复牌局指纹刻意排除 session ID，防止复制同一局到新会话来绕过重复审计。没有真人数据、模型参数或强度结论改变。
+
+2026-08-08 复核又修正了报告解释口径：原 `ai_side_score_delta_*` 实际是三张相同 AI 座位的零和合计，并非单个 AI
+座位分差。审计器保留旧字段兼容，同时新增 `ai_team_*` 和除以三的 `ai_per_seat_*`；正式人工复核只解释每席指标。
+这不改变正下界的符号，却防止把强度幅度夸大三倍。独立
+[真人强度基准协议](human_strength_benchmark_v1_protocol.md) 同时把“超过本地预注册群体”与“超过一般人类”分开；当前
+没有候选通过 Teacher 400 墙，因此没有启动真人终评。
 
 同日也审计了一个看似可用于「公开事件表征预训练」的候选：MahjongLM 的处理后 Tenhou 日麻数据集及其
 100M 权重。数据卡明确标为 `source-data-terms-apply` 并要求接受访问条件，模型卡也要求下游核验原始
@@ -1053,3 +1073,404 @@ Teacher 的一摸听牌摸入牌种数均值为 2.074，只有 47 次（**4.43%*
 
 此时只授权开始 GPU 离线模仿训练和固定留出集比较；尚未产生新 checkpoint 指标，也没有进行实战筛选、400 墙终检、网页
 接入或“超过 Teacher”的声明。
+
+## 2026-08-08：full-history Transformer 完成并按资源政策退休
+
+`policy-value-v4-full-history-transformer-run1` 已完成：`public_sequence_transformer`、hidden 128、4 heads、
+160 事件、8 epochs，使用 724,243 / 91,808 / 84,538 个 train/validation/test 决策；验证集选择 epoch 7。
+validation 动作一致率为 **98.68%**、policy loss **0.06838**；独立 test 动作一致率为 **98.72%**、policy loss
+**0.07030**。游金、金牌锁课程 test 一致率均为 100%，`physical_response_pass_search` 为 100%。checkpoint
+约 1.62 MB，训练在 RTX 2080 Ti 上实际运行接近 3 小时。
+
+这些指标只证明模型能高精度复制冻结 Teacher。训练目标没有 Teacher 之外的动作优势标签，且当前机器、数据和项目目标
+不支持继续投入大序列模型。根据 2026-08-08 资源约束决策，该 checkpoint 固定标记为
+`diagnostic_only_retired_by_resource_policy`：**不做 100/400 墙实战、不接入网页、不作为新 Teacher、不用于
+Transformer/GRU 续训，也不上传为可用模型参数。** 原 checkpoint/report 只保留本地供复核。
+
+下一阶段停止采集同源 Teacher 百万级模仿数据，转向现有语料中的低 margin/分歧状态：先建立只用公开信息的
+`SlowExpertTeacher` 单类局部 oracle，再比较 linear、GBDT 和不超过约 50 万参数的小 MLP residual。第一版只允许
+1%–5% 高置信 override，其余状态严格回退 `HeuristicTeacherAgent`；完整协议见
+[`resource_constrained_training_plan_2026-08-08.md`](research/technical_routes/resource_constrained_training_plan_2026-08-08.md)。
+
+## 2026-08-08：公开听牌价值 SlowExpert v1（selection 拒绝）
+
+首个资源受限局部 oracle 从 1,000 副已有 v4 natural Teacher 轨迹出发，只做聚合审计，不导出手牌、历史、牌墙、
+种子或逐决策候选。33,043 次普通非游金弃牌中，946 次存在 Teacher 分差不超过 2 的多个直接听牌选择；229 次
+替代项具有更高的“公开剩余张数 × 可见立即自摸结算”，覆盖普通弃牌 **0.693%**、近分听牌选择 **24.2%**。
+224/229 次差异主要是更多公开剩余张数。审计 1,000 副耗时 2 分 29.77 秒、峰值 RSS 约 283 MiB，符合轻量预算。
+
+据此只实现唯一 `PublicTenpaiValueTeacherAgent`：胡、杠、响应、游金、金牌锁和非听牌弃牌均严格回退 frozen
+Teacher；只有 frozen 选择已直接听牌、另一听牌弃牌分差不超过 2，且上述公开加权值严格增加至少 1 时才覆盖。
+实现不读对手暗手、真实牌墙、未来随机数或他家暗杠牌面。预注册协议与参数在强度筛选前写入
+[`public_tenpai_value_teacher_v1_protocol.md`](public_tenpai_value_teacher_v1_protocol.md)。
+
+全新 classic `seed=202616000` 起 100 副物理牌墙、每墙四座轮换的 selection 中，候选 97/400 胜，均分
+**−0.7275**；相对同墙 frozen Teacher 的 paired delta 95% CI 为 **[−1.8200, +0.3650]**。未通过严格正下界
+门槛，故 `seed=202616200` 起 400 墙 terminal 保持未读，候选不接入网页、不成为训练 Teacher。这个反证表明
+“可见余牌 × 立即胡牌分”能发现结构差异，但不能单独近似整局 Q；下一类 SlowExpert 必须直接针对规则错误或使用
+经过校准的局部价值证据，不能继续手调同一代理。
+
+## 2026-08-08：Teacher + 小 MLP 约 2% 置信门控（selection 拒绝）
+
+为检验规则与纯神经网络之间的中间态，复用历史上唯一在独立 Teacher 对局中出现正点估计的 compact run3，而不
+重新训练网络。固定 checkpoint 为 feature-v3、hidden 128 的 `candidate_mlp`，文件 218,453 字节，SHA-256
+`01616a38ff34af71f1774995d5d3f9e08c4408fd85757ad563d9dfa339b19f70`。候选只允许模型覆盖普通弃牌；response、
+胡、杠、游金和金牌锁均严格回退 frozen Teacher。
+
+门控 margin 不用实战收益选择。v4 part-01 validation 的 14,851 个合格普通弃牌中，以严格 logit advantage
+`> 2.4152190685272217` 覆盖 297 个（1.9999%）；未参与阈值选择的 test 为 251/13,519（1.8566%），通过预设
+0.5%–3.5% 覆盖稳定带。聚合审计不导出手牌、历史、动作 trace、牌墙、对手暗手或种子，耗时 2 分 20.19 秒，
+峰值 RSS 约 1.04 GiB。该步骤只校准行为覆盖，不作为强度证据。
+
+预注册后在全新 classic `seed=202619000` 起 100 副物理牌墙、每墙四座轮换执行 selection。真实访问状态覆盖
+41/2,866（1.4306%）；候选 98/400 胜，均分 **−0.7125**，paired delta 95% CI
+**[−2.3297, +0.9047]**。未通过严格正下界门槛，故 `seed=202619200` 起 400 墙 terminal 未读取，候选不接入
+网页、不进入真人评测、不产生新的训练标签。
+
+这一反证说明旧 MLP 的“高置信”只表示其自身 logit 尺度，不是动作优势校准。Teacher 模仿准确率、logit gap 和
+低覆盖 gate 三者组合仍没有独立强度来源。下一轮停止从同源 Teacher logits 构造 residual 标签；只接受经审计真人
+数据，或至少 32 个共享 belief worlds 的局部 paired advantage 作为新标签候选，并先做标签稳定性诊断再训练。
+
+## 2026-08-08：run3 override 的 32-world paired 标签门槛（未通过）
+
+为区分“模型动作本身无优势”和“100 墙评测方差过大”，在强度筛选失败后另行预注册一个只读标签质量试验。
+classic `seed=202620000` 起 50 副新物理墙、四座观察者，共扫描 1,388 次普通弃牌并命中 35 个固定 run3 gate
+状态。每状态从行动者公开信息集重采样 32 个 private worlds；同一 world 分别强制模型替代牌和 Teacher 牌，之后
+均由 frozen Teacher 完成。产物只保存聚合 paired delta，不保存状态、手牌、历史、动作 trace、world、牌墙、暗手
+或 RNG。
+
+1,120/1,120 个 world 均通过合法集合一致性检查。35 个状态中只有 **1** 个替代项 95% 下界严格为正，**4** 个
+上界严格为负，剩余 **30** 个跨 0；跨状态均值 **−1.9143 ± 2.5612**，95% CI
+**[−6.9343, +3.1058]**。预注册门槛要求至少 5 个显著正例、5 个显著反例，因此
+`paired_label_pilot_not_ready`：不导出训练行、不训练 linear/GBDT/MLP，不以 noisy argmax 伪造优势标签。
+
+工程上这证明 32-world shared-belief paired 管线可用且本轮 world 接受率为 100%；科学上它否决的是 run3 高
+logit-gap 作为候选来源。下一数据试验若继续使用该管线，必须换成独立、已有正向依据的候选规则，而不是调 run3
+margin；优先级是精确一摸候选，其次是经授权真人纠错数据。
+
+## 2026-08-08：精确一摸 public-fix v2 的 32-world 标签门槛（未通过）
+
+复核 `ExactOneDrawTenpaiTieBreakTeacherAgent` 时发现旧 v1 把他家暗杠的具体牌面计入“公开”余牌；trajectory-v4
+明确只公开暗杠事件、不公开其 face。实现已修为忽略他家暗杠牌面，并加入替换该隐藏 face 后决策不变的回归测试。
+因此旧 160/400 墙正点估计只保留为候选来源的方向性先验，不能证明修正版 v2 强度。
+
+在全新 classic `seed=202622000` 起 50 副物理墙、四座观察者上，扫描 705 个候选普通弃牌并取得 40 个
+v2/Teacher 分歧状态。每状态 32 个共享 actor-visible belief worlds，1,280/1,280 个 world 可用。仅 **2** 个状态
+的 v2 paired delta 95% 下界为正、**2** 个上界为负，**36** 个不确定；跨状态均值 **−0.9000 ± 1.7625**，
+95% CI **[−4.3546,+2.5546]**。未达到正负各 5 个的标签可辨识门槛，故不导出逐状态样本、不训练任何模型，
+也不追加 world 数来精化一个尚未按完整历史校准的近似 belief。
+
+## 2026-08-08：真人—Teacher 分歧记录契约 v1（基础设施就绪，尚无真人数据）
+
+由于两个独立候选来源的 32-world 标签试验均未通过，下一项监督来源改为经明确授权的真人训练局。网页记录器现在
+在每个真人决策旁保存 `reference_teacher_index`：它是同一合法动作集合中 frozen `heuristic_teacher_v1` 的动作
+索引；`chosen_index`/`executed_index` 仍是人类实际选择。该字段不进入观察特征、不保存 Teacher 的隐藏状态，且
+记录仍不含牌墙、种子、他家暗手、账号、网络标识或时间戳。
+审计同时发现仅在导出 JSON 中删掉暗手仍不够：网页原有调试开关可能让人类在行动时看见三家暗手。记录模式现由
+服务端强制拒绝暗手揭示，并要求 metadata 为 `opponent_hand_reveal=server_forced_disabled`；缺少该标记的旧记录
+直接判无效，防止 privileged human label 污染。
+
+新聚合审计要求至少 100 个完整 training 牌局、500 个可表示的普通弃牌参考决策、其中 50 个真人/Teacher 弃牌
+分歧、全部真人动作 100% 参考覆盖、
+单一规则/对手/参考 Teacher 身份。当前 `local_human_data/` 没有可用记录，所以状态只是
+`collector_ready_no_human_data`，没有启动模型训练。训练器增加显式 `--human-teacher-disagreement-weight`，默认
+1.0；它只允许在完整牌局 train/validation/test 切分后比较轻量候选，不能把 evaluation 对局或这项基础设施本身
+解释为人类强度证据。
+
+### 真人纠错 residual gate v1：选门和网页一致性基础设施
+
+新增 `select_human_teacher_residual_gate.py`。它只比较另一张普通弃牌，validation 阈值固定为 1%/2%/5% 三个覆盖
+目标；每项必须至少 20 override/20 个完整牌局 group、override 真人精度 Wilson 95% 下界 >50%，且按牌局等权的
+gated−Teacher 动作准确率 95% 下界 >0。validation 没有 winner 时，程序不会打开 test 文件；专项测试验证了这一
+物理未读边界。通过后 test 仍重复相同下界，且覆盖不得超过 7.5%，只能解锁全新 100 墙 Teacher 筛选。
+
+`ConfidenceGatedTeacherAgent` 现同时限制 Teacher 动作和替代动作都必须为 `discard`，避免未来模型把高 logit 的杠、
+胡或响应误当成普通弃牌 override。网页增加显式 `--ai-teacher-gate-margin`，identity 写入 checkpoint SHA、wrapper
+版本和精确 margin；不传时默认仍为规则 Teacher。当前没有真人完整局，也没有 fresh checkpoint，故状态为
+`infrastructure_ready_human_test_unread`，不能作任何强度结论。
+
+训练入口也已补上物理隔离：`train_policy_value.py --reserve-local-human-test-for-gate` 要求人类 train/validation
+存在、同时要求训练命令中完全没有人类 test；报告标记 test 为 `physically_unread_reserved_for_teacher_gate`。
+固定 wrapper `train_human_teacher_residual_v1.py` 使用 fresh seed 202623100、candidate MLP 128、12 epoch、真人分歧
+权重 2.0，并按 `local_human_opt_in` validation 选 epoch；命令不含 `--init-checkpoint`。单测核对固定命令不包含
+人类 test 路径或旧 checkpoint。
+
+随后把数据门槛与部署域进一步对齐：响应、胡、杠、游金或金牌锁分歧不再计入 500/50 门槛；审计只统计普通
+“discard→discard”可表示决策。固定训练命令加入 `--human-discard-corrections-only`，gate scanner 复用同一个
+eligibility 函数，避免“审计通过但真正可部署纠错为零”的假阳性。
+网页状态同步增加本次 recording session 的完成局数、可表示普通弃牌数与弃牌分歧数，便于采集者看到有效进度；
+它不替代跨会话去重审计，也不把未完成牌局写入文件。
+
+## 2026-08-08：低分歧专家纠错审阅 v1（题库就绪，等待人工标签）
+
+完整对局纠错采集效率较低，因此新增独立 actor-visible 审阅路径。固定 Teacher v4 train 输入扫描 789 局、34,456 个
+决策；离线复算 frozen Teacher 规则评分的选择不一致为 **0**。Teacher top-2 规则分数差不超过 2.0 的候选共有
+17,844 条，按每个物理牌局 group 最多两题，确定性抽取 600 题、443 个 opaque group。额外 100 题为
+500-confirmed 门槛提供 `uncertain`/跳过缓冲；扩容前后前 500 题逐项一致。题库不含赛果、wall、seed、
+对手暗手、原 trajectory/group ID 或源路径；服务端在提交前不发送 Teacher 索引、分差或 group。
+
+本地审阅服务已在 `127.0.0.1:51861` 启动，当前 confirmed 标签 **0/500**，故没有训练 checkpoint。追加 label 带
+immutable queue digest，可断点恢复；`uncertain` 不进入训练。总量门槛固定为 500 confirmed、50 个 Teacher 分歧和
+100 个 group，并按原始牌局 group 做 80/10/10 切分。
+
+训练与 gate 基础设施同时就绪但未运行：fresh feature-v3 candidate MLP、hidden 128、CPU、12 epochs，只把 confirmed
+人类选择作为 policy target，明确没有终局 value target；review test 没有训练器 CLI 参数。validation gate 固定覆盖率
+10%/20%/30%，失败时 test 字节保持未读；test 通过仍只解锁 100 墙 Teacher 筛选，不形成超过 Teacher 或人类的结论。
+## 2026-08-08：公开知识向听 Teacher v1
+
+- 路线：只在 frozen Teacher 近分、双方均未听牌的普通弃牌中，用五面子加一对的精确标准向听数做严格门控；公开有效进张只破同向听平局。
+- 前置：40 组 1/2 金牌随机手牌与通配枚举完全一致；20 墙覆盖率诊断为 24/608（3.95%）；真实回放确认从二向听严格降到一向听。
+- 固定 selection：classic，`seed=202625000..202625099`，100 个物理墙、400 局四座轮换。
+- 结果：candidate 103 胜、均分 +0.2675；覆盖 129/3,187（4.05%）；paired delta 95% CI `[−1.4671, +2.0021]`。
+- 结论：点估计略正但未通过 `95% CI low > 0`，状态 `selection_rejected`；不部署、不产训练标签、不在同墙调参重跑。
+- 推断：精确向听数应保留为状态特征，但“严格降一向听”不能单独充当动作价值；下一步应估计公开可达性、金牌/游金价值和有限视野结算，而不是扩大模型。
+
+## 2026-08-08：参数化弃牌规则 Teacher v1
+
+- 模型：只暴露 frozen Teacher 普通弃牌评分中的刻子、对子、相邻、隔张、等待和弃金惩罚 6 个线性权重；其余规则与响应逻辑不变。
+- 训练：CPU CEM 固定 4 代 × 12 候选；两个 20 墙训练段，以较差分段均分为 fitness。
+- 训练最优：两个分段 +5.175 / +1.975，表面上都优于 frozen。
+- 独立 validation：`seed=202627000` 起 100 墙，93/400 胜，总分 −612，均分 **−1.53 ± 1.1566**，胜率 23.25%。
+- 结论：`validation_rejected_selection_unread`；正式 `202628000..202628099` 未读取。40 墙稀疏终局回报对 6 个非连续排序权重明显过拟合，后续改用同状态配对反事实标签降低方差。
+
+## 2026-08-08：两摸听牌可达性 SlowExpert v1
+
+- 路线：只在 frozen 近分非听牌弃牌中，用 32 个共同分层公开摸牌场景估计两次本家摸牌内进入听牌的概率；候选不得增加向听，且概率至少提高 5 个百分点。
+- 前置：10 墙覆盖 19/293（6.48%），没有向听恶化；固定真实状态的分层估计与精确枚举排序一致。
+- 正式 selection：classic，`seed=202630000..202630099`，100 个物理墙、400 局四座轮换。
+- 结果：106 胜，总分 +534，均分 **+1.335**，胜率 26.5%；覆盖 182/3,221（5.65%）；paired 95% CI **[−0.9195, +3.5895]**。
+- 结论：方向为正但置信下界未过 0，`selection_rejected`。该特征比单步向听更有希望，但 552.82 秒／100 墙过慢且没有新标签证据；不部署、不在同墙调门槛。
+
+### 盲主动审阅优先级（只优化采集效率，不是新强度实验）
+
+在不修改 600 题 immutable queue 的前提下，对每题从 actor-visible 快照离线运行上述已拒绝 SlowExpert。它与 frozen
+Teacher 在 **51/600** 题上选择不同；priority 将这些题排在前面，再按两摸概率优势和原始 index 稳定排序。queue
+SHA-256 在生成前后均为 `9477e7a5099a46616ebbfd217fad1b08500031e21ca1f3f37ceebb4b9ad43ce6`，priority 自身
+SHA-256 为 `a1a652144db48c161de6d7a5624cf7af42afde2b1b1862acea176c8267012bfd`，600 条绑定审计无异常。
+
+网页 GET 在人工提交前不返回 priority、SlowExpert 或 Teacher 字段；提交后只显示对照，追加 label 不含两种自动答案。
+服务已用该 priority 在 `127.0.0.1:51861` 重启，人工标签仍为 **0**。因为选题是主动而非随机，早期标签分歧率不得
+外推总体；训练和强度门槛仍是 500 confirmed、50 个真人/Teacher 分歧、100 groups、group-held-out gate 和全新
+100/400 墙实战。
+
+## 2026-08-08：精确向听吃碰响应 Teacher v1（selection 拒绝）
+
+对 1,236 局安全 natural Teacher 轨迹的聚合审计显示，10,061 次 response 中 frozen 选择 chi 5,389、pong
+3,970、pass 仅 110；响应阶段足够自然且 Teacher 极度激进。新候选真实执行吃碰后强制弃牌，并按精确五面子向听、
+直接听口面数、frozen hand shape 的唯一词典序比较 pass/chi/pong；只有严格改善 frozen profile 才覆盖。胡、明杠、
+游金、金牌锁、天听和普通摸打完全冻结，不读 wall 或对手暗手。
+
+10 墙覆盖诊断为 1/94 次候选座 response，耗时 1.74 秒；随后执行预注册 classic `seed=202632000` 起 100 墙、
+四座轮换。正式覆盖 23/966（2.38%），方向为 `chi→chi` 1、`chi→pass` 5、`pong→chi` 9、`pong→pass` 8，特殊
+状态违规为 0。候选 98/400 胜、总分 −207、均分 **−0.5175**；paired 95% CI **[−1.6406,+0.6056]**，未过
+严格正下界，状态 `selection_rejected`。产物
+`artifacts/deficiency-meld-teacher-v1/selection.json` SHA-256 为
+`69588fae85e26eb2b3db05e9cf3d10be58600df753f15851f56cdd967bf317b5`。
+
+该结果与旧响应后形分阈值族一致地说明：局部牌效不能单独识别吃碰过的长期价值。候选不部署、不产标签、不在同墙添加
+有效牌或 tie-break 重跑。下一数据入口是单独的 actor-visible 人工响应审阅；现有 600 题弃牌 queue 不可修改，响应题库
+须使用新版本和独立文件。
+
+### 独立 response 人工审阅 queue v1（基础设施就绪，0 标签）
+
+固定 Teacher v4 train 扫描 789 局／34,456 决策，筛得 7,312 个仅含 pass/chi/pong 的普通 actor-visible 响应；
+Teacher 从导出快照复现不一致为 0。已拒绝精确向听候选与 frozen 分歧 221 个，按每物理局最多两题后保留 219 个并
+优先排列；总 queue 为 400 题、319 groups，Teacher 动作分布 pong 220、chi 176、pass 4。
+
+queue SHA-256 `653e1063d3d46603abf6dd2f43850a9844723f3f19c34681921395848301062d`；报告 SHA-256
+`397ec6e7495212d6c5459537009b009c00af15cb91cbbe4f36eb2f5e4fd4ddaa`。独立服务已在
+`127.0.0.1:51862` 启动，预提交 API 不含 Teacher／SlowExpert／group／priority；append-only label 仍为 0。
+门槛固定为 300 confirmed、50 个真人／Teacher 分歧、100 groups，之后才按 group 80/10/10 切分并考虑 CPU 小型
+response residual。主动排列的部分样本不得估计总体错误率。
+
+响应训练与选门基础设施现已完成但仍未运行：standalone split loader 只接受 confirmed 普通 pass/chi/pong，并拒绝
+重复、越界、私有字段及伪造 Q/value target。固定 wrapper 使用 fresh seed 202633000、feature-v3 candidate MLP、
+hidden 128、CPU、12 epoch；响应标签权重 4，真人／Teacher 分歧再乘 2，仅以响应 validation 选 epoch，不加载旧
+checkpoint。训练器没有 response-test 参数。validation 只比较预声明 10%/20%/30% 覆盖门；失败时 test 字节保持
+未读，单测验证只调用一次 validation scanner。test 通过仍只解锁全新 100 墙四座轮换。当前人工标签为 **0**，因此
+没有 checkpoint、没有 gate 结果，也没有新强度结论。
+
+100/400 墙执行层也已预注册但没有运行：response gate report 和 checkpoint 均须 SHA-256 精确匹配；包装器只在
+classic 普通 pass/chi/pong 合法集合内调用模型，hu、杠、游金、金牌锁、天听、非响应和普通弃牌全部回退 frozen
+Teacher。selection 固定 `seed=202634000` 起 100 墙，严格正下界通过后才读取 `202634200` 起 400 墙 terminal。
+这补齐了“人工 test gate 能判定却无法实战”的执行缺口，不改变当前 0 标签状态。
+
+## 2026-08-08：两摸听牌 exact-DP 确认 v2（selection 拒绝）
+
+两摸 v1 与首分歧二元随机干预都只有正点估计、置信区间跨零。本轮不调其 2.0 近分范围、5% 优势阈值或 32 场景，
+而新增只做减法的确认层：v1 先提议唯一替代，随后只对该动作和 frozen Teacher 动作精确枚举两次公开未见副本的
+无放回本家摸牌；第一摸后按第二摸前“已胡或进入听牌”的精确概率选择弃牌。算法不读真实墙、seed、对手暗手或未来
+RNG。既有 actor-visible queue 前 100 题的只读诊断中，12 个 v1 proposal 被确认 8 个、否决 4 个，耗时 156.20 秒。
+
+预注册 classic `seed=202636100` 起 100 墙、四座轮换已完成。3,207 次弃牌调用中 v1 proposal 184 次，exact 确认
+102、否决 82，实际覆盖 3.18%，向听恶化 0。候选 104/400 胜、1 流局、总分 +170，均分 **+0.425**；paired
+95% CI **[−1.4590,+2.3090]**，未通过严格正下界。候选耗时 2,031.86 秒，Teacher baseline 15.82 秒。
+
+状态固定为 `selection_rejected`：不部署、不蒸馏、不产标签、不追加墙或重调同族 utility。TwoDraw 局部牌效族
+至此冻结。报告 `artifacts/exact-two-draw-tenpai-reach-v2/selection-report.json` SHA-256 为
+`3173fd8e076c6e8f94614c4eb1cba68c613176738bcbba6c1a762fc221065e27`。
+
+## 2026-08-08：首杠机会二元干预 v1（覆盖失败，方向不支持跳过杠）
+
+游金升级的自然覆盖审计发现，小 v4 与 5,000 墙 part-01 的 `advance_tour` 全来自合成课程，自然 Teacher 轨迹为 0，
+故没有把合成频率当强度机会。真实 natural train 则有明杠 255、补杠 104、暗杠 44，因此改在每条候选座轨迹首个
+Teacher 杠机会，以 0.5/0.5 随机执行杠或 frozen 非杠 fallback，随后恢复 Teacher。三种杠类型在打开结果前固定，
+类型选择采用 Bonferroni family α=0.05。
+
+全新 classic `seed=202637000` 起 100 墙得到 65 次干预，低于预注册 100：fallback/Teacher=32/33，100 个墙组
+完整，审计问题 0。overall `skip-kan − Teacher-kan` 为 **−3.705**，95% CI **[−7.475,+0.065]**；暗／补／明杠
+point estimate 分别为 −0.590/−0.710/−2.405，三类校正区间均跨零。状态
+`selection_rejected_no_kan_training_labels`：覆盖不足不能宣称正式显著，但所有方向均不支持跳过杠，因此不追加墙、
+不构造少杠候选、不产标签。安全数据 SHA-256
+`c64511a1a43251af5fa3fe4485f1a3b20de1405a650703e52898ea74633d18c2`。
+
+## 2026-08-08：公开向听—有效进张 Pareto v2（空策略拒绝）
+
+为避免向听 v1 用大量有效进张交换少一向听，已有 `PublicParetoDeficiencyTeacherAgent` 被固定为只减法确认层：向听
+必须严格下降，同时公开下一摸有效进张张数不能低于 frozen。全新 classic `seed=202638000` 起 100 墙中，3,263 次
+弃牌产生 70 个 v1 proposal，但 70 个全部被 Pareto 条件拒绝，实际 override 为 0，候选与 Teacher 完全一致。
+
+这说明当前真实访问状态中的 v1 进一向听动作系统性牺牲有效进张；v2 是结构性空策略而非可部署平局。状态
+`selection_rejected`，不放宽条件、不产标签。报告 SHA-256
+`7a60f963220ea5c536ec7e42e4f5e4feea6ba1e4af571f88e696b1d78092dca7`。
+
+## 2026-08-08：Teacher 完全并列公开进展消歧 v1（selection 拒绝）
+
+源码级复核抚州 commit `53f73d2495c4a49790ab2af7c064906cd5d9fd2b` 后发现，其生产 hybrid 的网络几乎不
+推翻 lookahead reference；主要差异来自 reference 最高分并列时的 `progress_static_risk`。据此实现厦门独立翻译：
+只在 frozen 最高分完全相等的普通弃牌中，选择向听不高、公开有效进张不低且至少一项严格改善的 Pareto 动作。
+
+10 墙只读覆盖为 78/332（23.49%），随后按冻结协议运行全新 classic `seed=202638300` 起 100 墙。正式覆盖
+814/3,318（24.53%），1,742 次最高分完全并列；814 次改动均保持向听不变，累计增加 5,879 张公开有效进张。
+候选 103/400 胜、总分 −32、均分 **−0.08**，paired 95% CI **[−3.5633,+3.4033]**。候选耗时 944.51 秒，
+Teacher 15.62 秒，慢 60.46 倍。
+
+未通过正下界，且公开进张的大幅增加没有转化为长期收益。本族 `exact score tie + shanten/ukeire Pareto` 冻结：不部署、
+不蒸馏、不追加风险或巡数门控。报告 SHA-256
+`c4be7590ff52b5efcb52214329ad301482fa02224edc8e5282febdaea43e8adf`。
+
+## 2026-08-08：完全并列盲态二选一数据入口 v1（题库与训练器就绪，0 标签）
+
+exact-tie 自动 progress 候选未过实战门槛，但它暴露了 Teacher 的 52.5% 完全并列率。为获得真正的 tie-break 监督，
+新增 pairwise-only 人工审阅：只展示 Teacher 默认牌和公开进展替代牌，左右顺序按 hash 决定；提交前 API 隐藏双方
+身份、group、margin、原 item、赛果、wall、seed 和暗手。
+
+从 immutable 600 题 queue 复算：600 题均为 top-2 完全同分，候选分歧 253；按每个原物理局 group 最多一题后固定
+227 题／227 groups，source issues 0。queue SHA-256
+`0006b2603bcb32332c4d08b76b5b310d3fde046d6402bf41b944dc9467f747bc`。服务已在 `127.0.0.1:51863` 启动，真实
+GET 审计显示只返回两个动作，Teacher/candidate/group/outcome/wall/seed 均未泄漏；当前 0/227。
+
+数据门槛固定为 100 confirmed、20 个 candidate preference、75 groups。通过后按 group 80/10/10 切分；fresh
+feature-v3 hidden-64 CPU MLP 只对展示动作对做 cross-entropy，未展示动作不是负例，validation 选 epoch，test 训练时
+不读。当前没有标签，因此没有训练 checkpoint，也没有新强度结论。
+
+## 2026-08-08：完全并列 source-world 小模型与高支持因果确认（全族拒绝）
+
+为绕开 0 个人工标签，只在 frozen Teacher 最高分完全并列处使用训练期私有模拟分支：同一自然访问隐藏世界中强制
+每个并列动作，随后恢复 Teacher，导出仅含 actor-visible state 和终局目标。100 墙 pilot 有 398 状态；扩大到 900 墙
+得到 3,550 状态／897 groups／11,501 个分支。feature-v3 五个 hidden-64 MLP 仅在全员一致时覆盖，外层 validation
+为 **−1.418**，95% CI **[−3.550,+0.715]**，test 未读。
+
+加入 59 维显式 Teacher 结构分量、精确向听和完整公开余牌计数后，feature-v4 在全新 100 墙为 **+0.075**，95% CI
+**[−2.222,+2.371]**。再固定同一暗手、重排四次未来墙：500 墙／1,972 公开决策／25,340 分支，平均标签模型在
+97 validation groups 为 **−0.091**，95% CI **[−1.380,+1.198]**，内部排序准确率仅约 51%–52%；final test 未解析。
+
+既有高支持随机弃牌数据中，v2 单点 HT 诊断曾为 +1.920、区间跨零。为排除稀疏 uniform-action 支持，冻结 v2 五个
+checkpoint，在全新 `seed=202644000` 起 100 墙第一次一致分歧处 0.5/0.5 二元随机。得到 229 次干预，
+candidate/Teacher=113/116；低于预注册 250，且 HT **−5.210**，95% CI **[−11.311,+0.891]**。状态
+`selection_rejected_no_deployment`：不做整局 agent、不打开 final test、不继续同族调参。安全数据 SHA-256
+`6a4f9aceafba450a0958c99d7c0964d1fd65c8d417e4c10f250a3cd6160bf53e`。完整推理见
+[协议](exact_tie_source_world_and_causal_v1_protocol.md)。
+
+## 2026-08-08：Teacher-clone reference-KL 小 MLP PPO v2（selection 拒绝）
+
+旧 margin-5 anchored PPO 的 3,000 个 actor-visible 决策审计显示，iteration-8 residual 最佳替代 gap 最大仅
+`0.001572`，与固定 margin 相差约 3,000 倍；严格零实战分歧源于 actor 没有穿透 prior。同期修复 rollout 报告把
+所有非流局误计 candidate win 的错误。基于 96.95% Teacher 一致率的 feature-v3 hidden-128 candidate MLP，冻结训练
+起点 reference，使用 KL 权重 0.05、policy-head 学习率倍率 10，在三家 Teacher 上按预注册运行 4×1,024 classic 局。
+
+正式 artifact 补齐输入模型、源码树、全部超参数与逐轮 seed 的 provenance；两次完整重跑的四个 `state_dict` 逐张量
+相同。45,102 个候选决策动作计数完整。final KL mean `0.0036966`、起点 argmax 分歧 `1.0415%`，mechanics gate
+通过。随后唯一打开 seed `202647500..202647599` 的 100 个物理墙、四座轮换：候选 99/400 胜、总分 −54、均分
+**−0.135**；paired 95% CI **[−1.9748,+1.7048]**。
+
+状态 `selection_rejected_configuration_frozen_not_deployed`：未解锁 250,000 局，不部署，不在该 100 墙调 KL、倍率、
+epoch、规模或挑 checkpoint。结论不是“PPO 永远无效”，而是这组小样本 reference-KL 配置没有越过 Teacher 的可靠证据；
+后续若重开 RL，必须从新候选定义和全新墙集开始，不能把本 selection 当调参 validation。
+
+## 2026-08-08：IJCAI-2026 国标数据／工程只读审计（不接入）
+
+在人工 exact-tie 盲评仍为 0/227 时，定向检索公开厦门牌谱，没有发现同时满足 classic 规则、训练授权和完整可重放
+历史的来源。进一步只读审计 Hugging Face `Dannibal/ijcai-mahjong-round2`、Botzone 2026 官方竞赛页与
+`SuuTTT/IJCAI-mahjong` commit `690848613f34b3ebc0a3547070497e07526c81ea`：它们均面向 MCR 国标麻将，动作空间、
+手牌流程、番种和结算与厦门不兼容；原始格式还可能含牌墙、随机种子和玩家标识。代码仓库根目录未发现覆盖自有代码的
+整体许可证。
+
+状态为 `research_only_rejected_for_ingestion`：没有下载数据或权重，没有复制代码，没有启动跨规则预训练。仅采纳可独立
+实现的实验纪律——三随机种子稳定性、合法动作概率集成、duplicate／matched 评测、计分器黄金测试、小网络优先和扩大
+样本后的假阳性复核。这一审计不产生候选 checkpoint，也不改变人工标签门槛；详见
+[训练数据来源审计](data_source_audit_2026-08.md)和[开源工程地图](research/open_source/landscape_2026-08.md)。
+
+## 2026-08-08：低分差 top-2 因果 residual v1 mechanics pilot（通过）
+
+新增与旧 fixed tie-break、TwoDraw 和 source-world 分支不同的高支持数据入口：每条候选座轨迹只在第一次 Teacher 前两名
+弃牌分差 `<=2.0` 时，以 0.5/0.5 执行 top-2 或 top-1，随后恢复 frozen Teacher。数据记录精确 propensity；动作对必须
+能从 actor-visible 导出状态复算。pilot 在结果前固定 25 墙 `202649000..202649024`、四座轮换和行为 seed
+`202649025`，仅允许决定工程可行性与正式样本量。
+
+100/100 局均有一次干预，alternative/Teacher=57/43，25 墙组完整，终局候选分差范围 `[-44,108]`，审计问题 0；
+93 次完全并列、7 次 margin `(1,2]`。墙级 HT 标准差 **38.1226**。pilot 点估计 `−1.1` 不用于模型或阈值选择。
+机械门槛通过后，依据方差固定正式 train 4,000 墙、validation 2,000 墙；另留全新 2,000 terminal seed，只有
+validation 通过才采集。为控制磁盘和信息边界，正式数据改为每局一条 `xiamen-low-margin-top2-causal-v1` 瘦身记录，
+不保存 seed、墙、他家暗手或无关决策。当前尚未完成正式采集或训练，没有强度结论。
+
+## 2026-08-09：低分差 top-2 因果 residual v1（validation 拒绝；GPU 链路优化）
+
+正式 train 4,000 墙和 validation 2,000 墙均采集完成并通过 actor-visible、完整四座 group、propensity、opaque 顺序和
+chunk SHA 审计。train 为 16,000 条记录／15,901 次干预，validation 为 8,000 条／7,945 次干预，train/validation
+group 重合为 0。
+
+训练前定位到原流程的主要浪费：feature-v4 在每个 epoch／成员上由 CPU 重复计算，GPU 基本空闲。现改为一次 CPU 构造
+39,074,321-byte 特征 cache，全部训练 tensor 常驻 RTX 2080 Ti，三成员复用；validation 也一次构造、三成员复用。监控由
+CPU 单核瓶颈变为 GPU P2、约 34% compute utilization，工作显存约 316 MB。低显存占用符合 4.8 万参数小网络的规模，未为
+填满 22 GB 而改大网络或引入 Transformer。
+
+三成员 train 内选出的 epoch 为 5／6／22。validation 的 1%／2%／5%／10% 覆盖门墙级点估计依次为 -0.093、+0.1005、
++0.1000、+0.38925；Bonferroni 下界依次为 -0.6743、-0.6192、-0.9351、-0.9393，全部不大于零。机械支持门均通过，
+但效果门全部失败。因此状态固定为 `validation_rejected_terminal_not_collected`：terminal 未创建／未读，不部署、不运行
+100 墙实战，也不在同一 validation 上调网络或阈值。
+
+训练报告 SHA-256 `b5adced5412d7d83d50297991b53d8618e212c50bbeb10b6871babe08038e916`；validation 报告 SHA-256
+`b6873839660d2587e20d4ceab3813e39a39e1a1f508ebd79de88b0c13ad3b715`；feature cache SHA-256
+`b6cff35d0fbdf4025d725517fda0b69ab8c494decd6bac8eeed628e0dcc0d2b7`。本轮说明算力链路可以提速，但不能替代低噪声标签和
+稳定条件效应；下一模型族必须先提出不同的可识别性假设并使用全新 validation，而不是继续消费本轮 holdout。
+
+## 2026-08-09：低分差 top-2 同墙控制变量 residual v2（降噪成功，策略仍拒绝）
+
+只用 v1 train 发现并验证一个期望为零的 control variate：当前随机动作与同物理墙另外三条座位轮换的终局结果独立，故可用
+另外三局均分消除墙难度噪声。v2 训练 target 固定为 `本局分数 + 另外三局均分`，三 fresh hidden-64 成员使用 CUDA；gate
+改为三成员最小 effect，防止单 seed 乐观。epoch 7／5／8、四覆盖阈值和 train 最优控制系数均在采集新 validation 前冻结。
+
+全新 `202658000..202659999` 2,000 墙得到 8,000 条／7,946 次干预，分配 3,960/3,986，审计问题 0。独立
+validation 上，control 把 1%／2%／5%／10% 门的标准误从 0.204／0.270／0.396／0.489 降为
+0.095／0.142／0.244／0.351，说明方差方法确实泛化；调整后点估计为 +0.102／-0.075／+0.119／+0.581，但四个
+Bonferroni 下界仍为 -0.135／-0.430／-0.489／-0.296，全部拒绝。
+
+结论是 `wall_control_v2_validation_rejected_terminal_not_collected`：terminal 未创建，不追加墙、不部署、不重调。本轮把
+“估计器太吵”和“候选信号太弱”区分开了；低分差 top-2 residual 家族冻结，下一路线必须改变决策信号而非继续扩大模型。
+训练报告 SHA-256 `24f80ca8efb55cfdbf916f314e21a5899e53caceabe6e6a66cfd527e7ee3d840`，selection SHA-256
+`a593d4e3159872bf215747f5e5dd2bed894e31c90d0daf43bbf7e949ea65c79c`。
+
+## 2026-08-09：低分差 top-2 可解释因果错误地图（无稳定类别）
+
+在 residual v1/v2 都拒绝后，只把已经消耗的 v1 train、v1 validation 和 v2 validation 共 8,000 墙用于探索，不读取两套
+terminal。预先冻结 45 个 actor-visible 类别：阶段、margin、庄家、牌类转换、手牌面数、局部连接、摸切、公开剩余、端张、
+同花色牌号及有限 exact-tie 二重交叉；估计器固定使用同墙 control `c=-2.5`。
+
+36 类在三个分区都有足够支持，22 类三个点估计同为正，但全族 Bonferroni 后无一正下界。最接近的“公开剩余同面张数相同”
+pooled 均值 +1.194、校正下界 -0.393；“不同数牌花色”均值 +0.896、下界 -0.179；“两者均非端张”均值 +0.695、
+下界 -0.105。它们最弱分区均不足约 1.04 个标准误，不能从 45 类中事后挑选。
+
+状态 `no_stable_interpretable_category_top2_family_frozen`：不追加类别、不收集新墙、不训练 gate。报告 SHA-256
+`736e58abaf534a214a7e55a8da64cf973be01be4a598521cafa86f0441d7b1d2`。这完成了对现有 top-2 随机数据的最后一次
+可解释利用；下一可识别信号必须来自盲态真人纠错或结构不同、先经校准的局部 oracle。

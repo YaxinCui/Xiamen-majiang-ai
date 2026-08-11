@@ -1,5 +1,7 @@
 # 厦门麻将 AI
 
+> 当前项目状态、冻结结论、运行入口与下一步接续顺序见 [HANDOFF.md](HANDOFF.md)。
+
 本项目提供一个本机运行的 `1 人 vs 3 个 Teacher AI` 厦门麻将网页桌。默认
 为“经典厦门”档位，同时保留更轻量的“核心教学”档位；两者均不会把 AI
 暗牌或牌墙顺序发送给浏览器。它是后续导出教师轨迹、监督训练、DAgger 和
@@ -37,7 +39,8 @@ python3 scripts/serve_web_game.py \
   --human-log-purpose training
 ```
 
-仅在一局结束后记录：玩家本人可见的手牌与公开状态、当时全部合法动作、实际选择和最终公开结算。
+仅在一局结束后记录：玩家本人可见的手牌与公开状态、当时全部合法动作、实际选择、同状态冻结 Teacher 的参考
+动作索引和最终公开结算。参考索引只用于识别真人/Teacher 分歧，不进入模型观察；真人实际选择仍是训练目标。
 不保存牌墙顺序、三家暗手、随机种子、账号或网络标识；`local_human_data/` 默认被 Git 忽略，也不会自动
 混入 Teacher/DAgger 训练。人类数据必须先按牌局切分、检查规则档位和质量，并在独立人类留出局上验证，才可
 作为新的训练来源。
@@ -61,6 +64,11 @@ python3 scripts/serve_web_game.py \
 独立 400 墙终检也没有通过 Teacher 的正向置信区间门槛，网页默认继续使用 Teacher。
 日常候选筛选统一使用 100 副物理牌墙、四座轮换；历史 160/400 墙实验只作为不可重写的审计记录。
 
+2026-08-08 的低算力规则优化也没有越过晋级线：精确向听候选均分 +0.2675、两摸公开听牌 SlowExpert
+均分 +1.335，但各自的同墙配对 95% 下界分别为 −1.4671 与 −0.9195；六权重演化候选则从训练正收益
+反转为独立 validation 均分 −1.53。三者都不接入网页或训练标签。当前下一条有效主线仍是
+`http://127.0.0.1:51861` 的 600 题盲态人工纠错队列；confirmed 标签为 0 时不启动 residual 训练。
+
 记录达到一定数量后，先运行只读质量审计，而不是直接训练：
 
 ```bash
@@ -73,6 +81,196 @@ python3 scripts/audit_human_trajectories.py \
 平均分差、标准误、正态近似 95% 区间、胡率和流局率。即使结构审计通过，也只表示可以进行人工质量评审；
 这些描述性统计不等同于人类强度结论。要声称对人类变强，仍须使用从未用于训练或调参的真人对局留出集。
 
+要判断是否已经积累了足够的 Teacher 纠错信号，再运行聚合分歧审计（不会输出手牌或逐状态动作）：
+
+```bash
+.venv/bin/python scripts/audit_human_teacher_corrections.py \
+  --input local_human_data/my-training-play.jsonl \
+  --minimum-hands 100 \
+  --minimum-reference-decisions 500 \
+  --minimum-disagreements 50
+```
+
+只有完整参考覆盖、单一 Teacher 身份并达到上述门槛，才值得进行轻量 residual 实验；通过不表示真人每次分歧都正确。
+这里的 500/50 专指普通“弃牌覆盖弃牌”决策；吃碰响应、胡、杠、游金或金牌锁不会用来凑首轮 residual 数量。
+网页记录提示会实时显示本次服务已完成局数、可表示普通弃牌数和弃牌分歧数；这些只是采集进度，正式门槛仍以
+跨重启、去重后的聚合审计为准。
+
+### 更快的本地专家纠错审阅
+
+完整对局每局只能产生几十个有效弃牌判断。若目标是先修正规则 Teacher 的近似平分局面，可从已有安全 Teacher
+轨迹建立独立题库；题目只含当时玩家可见的手牌、牌河、副露、金牌和最近公开动作，不含赛果、牌墙、seed、对手
+暗牌或源文件身份。Teacher 选择在提交前由服务端隐藏：
+
+```bash
+.venv/bin/python scripts/build_human_correction_review_queue.py \
+  --input artifacts/trajectory-contract-audit-classic-v4/train.trajectories.jsonl \
+  --maximum-items 600 --maximum-items-per-group 2 \
+  --maximum-teacher-score-margin 2.0 \
+  --output local_human_data/human-correction-review-v1.queue.jsonl
+
+.venv/bin/python scripts/build_human_correction_review_priority.py \
+  --queue local_human_data/human-correction-review-v1.queue.jsonl \
+  --output local_human_data/human-correction-review-v1.priority.jsonl
+
+.venv/bin/python scripts/serve_human_correction_review.py \
+  --host 127.0.0.1 --port 51861 \
+  --queue local_human_data/human-correction-review-v1.queue.jsonl \
+  --priority local_human_data/human-correction-review-v1.priority.jsonl \
+  --output local_human_data/human-correction-review-v1.labels.jsonl
+```
+
+打开 `http://127.0.0.1:51861`，独立选牌后再看 Teacher 对照；不确定时应选择“不确定”，该行不会进入训练 split。
+可用 ←/→ 选牌、Enter 确认或进入下一题、U 标记不确定、S 暂时跳过。priority 文件只改变出题顺序：它把离线
+TwoDraw SlowExpert 与 Teacher 不同的难题提前，但提交前 API 不发送两者答案，label 也不保存 priority 或 SlowExpert。
+该 SlowExpert 的 100 墙实战门槛已失败，因此只能作主动选题信号，不能作真值。
+当前固定题库含 600 题、443 个原始牌局 group，其中 100 题用于容纳不确定/跳过判断；离线复算 34,456 个 Teacher
+决策时选择不一致数为 0；本地标签仍为
+0，尚未训练候选。
+
+完成后先审计并按原始牌局 group 切分，不能按单题随机切分：
+
+```bash
+.venv/bin/python scripts/audit_human_correction_reviews.py \
+  --input local_human_data/human-correction-review-v1.labels.jsonl \
+  --queue local_human_data/human-correction-review-v1.queue.jsonl
+
+.venv/bin/python scripts/split_human_correction_reviews.py \
+  --input local_human_data/human-correction-review-v1.labels.jsonl \
+  --queue local_human_data/human-correction-review-v1.queue.jsonl \
+  --output-dir local_human_data/human-correction-review-v1-split
+```
+
+固定门槛是 500 个 confirmed 判断、50 个 confirmed Teacher 分歧和 100 个 group。通过只允许启动 CPU 小 MLP
+实验，不证明人工判断必然更优：
+
+```bash
+.venv/bin/python scripts/train_human_review_residual_v1.py \
+  --review-split-dir local_human_data/human-correction-review-v1-split \
+  --output-dir artifacts/human-review-residual-v1 --device cpu
+
+sha256sum artifacts/human-review-residual-v1/policy-value.pt
+
+.venv/bin/python scripts/select_human_review_residual_gate_v1.py \
+  --checkpoint artifacts/human-review-residual-v1/policy-value.pt \
+  --checkpoint-sha256 <冻结检查点的 SHA-256> \
+  --validation-input local_human_data/human-correction-review-v1-split/validation.review.jsonl \
+  --test-input local_human_data/human-correction-review-v1-split/test.review.jsonl \
+  --output artifacts/human-review-residual-v1/gate-selection.json
+```
+
+训练器没有 review-test 参数；validation 未通过时选门脚本也不会打开 test。只有状态达到
+`review_test_gate_passed_ready_for_100_wall_teacher_screen`，才进入全新 100 副物理墙、四座轮换的 Teacher 实战筛选。
+完整契约见 [专家纠错审阅 v1 协议](knowledge_base/human_correction_review_v1_protocol.md)。
+
+### 更快：完全并列动作盲态二选一
+
+源码审计与 100 墙实验发现，Teacher 大量弃牌最高分完全并列，但“公开进张更多”不能自动决定哪张更好。为降低人工
+负担，新增匿名二选一：每题只让你比较 Teacher 按牌号得到的默认牌和一个完全同分替代牌；两者身份及左右顺序在提交
+前隐藏。候选已经被实战拒绝，只负责提出问题，不是真值。
+
+固定题库由现有 600 题安全 queue 派生，包含 227 题／227 个不同 group，服务已运行在
+`http://127.0.0.1:51863`：
+
+```bash
+.venv/bin/python scripts/serve_exact_tie_pairwise_review.py \
+  --host 127.0.0.1 --port 51863 \
+  --queue local_human_data/exact-tie-pairwise-review-v1.queue.jsonl \
+  --output local_human_data/exact-tie-pairwise-review-v1.labels.jsonl
+```
+
+API 只发送这两张可选弃牌；完整手牌仍用于上下文，其余牌不能点击。快捷键 ←/→ 切换、Enter 确认、U 不确定、S 跳过。
+标签只表示两张展示牌的相对偏好，训练器禁止把未展示动作当负例。
+
+达到 100 confirmed、20 个非 Teacher 偏好、75 groups 后，才能审计、切分和训练 fresh hidden-64 CPU pairwise MLP：
+
+```bash
+.venv/bin/python scripts/audit_exact_tie_pairwise_reviews.py \
+  --input local_human_data/exact-tie-pairwise-review-v1.labels.jsonl \
+  --queue local_human_data/exact-tie-pairwise-review-v1.queue.jsonl
+
+.venv/bin/python scripts/split_exact_tie_pairwise_reviews.py \
+  --input local_human_data/exact-tie-pairwise-review-v1.labels.jsonl \
+  --queue local_human_data/exact-tie-pairwise-review-v1.queue.jsonl \
+  --output-dir local_human_data/exact-tie-pairwise-review-v1-split
+
+.venv/bin/python scripts/train_exact_tie_pairwise_residual_v1.py \
+  --pairwise-split-dir local_human_data/exact-tie-pairwise-review-v1-split \
+  --output-dir artifacts/exact-tie-pairwise-residual-v1 --device cpu
+```
+
+训练阶段不会读取 pairwise test，也没有 value/Q/赛果目标。当前标签为 0，因此没有生成 checkpoint。完整契约见
+[完全并列盲态二选一协议](knowledge_base/exact_tie_pairwise_review_v1_protocol.md)。
+
+自动终局标签路线也已独立验证：单自然暗手配对、显式结构 feature-v4、四未来牌序平均以及 100 墙 0.5/0.5 高支持
+因果确认都未通过。最后一次确认得到 229 次干预，候选相对 Teacher 为 −5.21，95% CI `[−11.31,+0.89]`；这些
+checkpoint 只保留作诊断，不接入网页、不打开 final test。详情见
+[完全并列自动标签与因果确认协议](knowledge_base/exact_tie_source_world_and_causal_v1_protocol.md)。
+
+吃／碰／过响应使用另一套不可变题库和端口，不能并入上述弃牌门槛。失败的精确向听响应候选只负责把自动分歧题提前，
+提交前仍隐藏 Teacher 与候选答案：
+
+```bash
+.venv/bin/python scripts/build_human_response_review_queue.py \
+  --input artifacts/trajectory-contract-audit-classic-v4/train.trajectories.jsonl \
+  --maximum-items 400 --maximum-items-per-group 2 \
+  --output local_human_data/human-response-review-v1.queue.jsonl
+
+.venv/bin/python scripts/serve_human_response_review.py \
+  --host 127.0.0.1 --port 51862 \
+  --queue local_human_data/human-response-review-v1.queue.jsonl \
+  --output local_human_data/human-response-review-v1.labels.jsonl
+```
+
+打开 `http://127.0.0.1:51862`。当前固定 queue 为 400 题／319 groups，其中前 219 题是被拒绝 SlowExpert 与
+Teacher 的自动分歧；它们需要人判断，不能当成 219 个正确标签。达到 300 confirmed、50 个人类／Teacher 分歧、
+100 groups 后才运行：
+
+```bash
+.venv/bin/python scripts/audit_human_response_reviews.py \
+  --input local_human_data/human-response-review-v1.labels.jsonl \
+  --queue local_human_data/human-response-review-v1.queue.jsonl
+
+.venv/bin/python scripts/split_human_response_reviews.py \
+  --input local_human_data/human-response-review-v1.labels.jsonl \
+  --queue local_human_data/human-response-review-v1.queue.jsonl \
+  --output-dir local_human_data/human-response-review-v1-split
+```
+
+审计和切分门槛通过后，固定训练只使用 CPU 小型 MLP；训练器只接收 train/validation，不能接收 response test。
+validation 先选低覆盖响应门，失败时测试文件保持物理未读：
+
+```bash
+.venv/bin/python scripts/train_human_response_review_residual_v1.py \
+  --review-split-dir local_human_data/human-response-review-v1-split \
+  --output-dir artifacts/human-response-review-residual-v1 --device cpu
+
+sha256sum artifacts/human-response-review-residual-v1/policy-value.pt
+
+.venv/bin/python scripts/select_human_response_review_residual_gate_v1.py \
+  --checkpoint artifacts/human-response-review-residual-v1/policy-value.pt \
+  --checkpoint-sha256 <冻结检查点的 SHA-256> \
+  --validation-input local_human_data/human-response-review-v1-split/validation.response-review.jsonl \
+  --test-input local_human_data/human-response-review-v1-split/test.response-review.jsonl \
+  --output artifacts/human-response-review-residual-v1/gate-selection.json
+```
+
+response test gate 通过后才可运行固定 100/400 墙 Teacher screen；包装器只允许普通过／吃／碰，特殊响应全部冻结：
+
+```bash
+sha256sum artifacts/human-response-review-residual-v1/gate-selection.json
+
+.venv/bin/python scripts/select_human_response_review_teacher_screen_v1.py \
+  --checkpoint artifacts/human-response-review-residual-v1/policy-value.pt \
+  --checkpoint-sha256 <冻结检查点 SHA-256> \
+  --gate-report artifacts/human-response-review-residual-v1/gate-selection.json \
+  --gate-report-sha256 <冻结 gate report SHA-256> \
+  --output artifacts/human-response-review-residual-v1/teacher-screen.json \
+  --device cpu
+```
+
+完整契约见 [吃／碰／过人工纠错审阅 v1](knowledge_base/human_response_review_v1_protocol.md)。
+
 对于已冻结、已知 SHA-256 身份的候选 AI，只能用 `evaluation` 记录器收集**从未进入训练或选模**的真人局，
 再运行独立只读审计：
 
@@ -83,9 +281,13 @@ python3 scripts/audit_human_match_strength.py \
 ```
 
 每次启动记录器会生成一个不含姓名、账号或设备信息的随机会话 ID；报告按会话均分而非逐局计数，避免一名玩家
-连续对局被误作许多独立人类样本。下界为正也只解锁人工复核：仍需验证每个会话对应预先声明的独立参与者或区块、
+连续对局被误作许多独立人类样本。报告中的 `ai_team_*` 是三张相同 AI 座位的合计，正式解释使用除以三后的
+`ai_per_seat_*`；历史 `ai_side_*` 只是 team aggregate 兼容别名。每 AI 座位下界为正也只解锁人工复核：仍需验证
+每个会话对应预先声明的独立参与者或区块、
 参与者同意、招募范围和水平、AI 身份在全程冻结，以及这些局从未用于训练、early stop 或选模，才可能作为
 “胜过该真人评测群体”的证据；它不自动证明胜过一般人类。
+
+完整声明边界见 [冻结 AI 对真人强度基准 v1](knowledge_base/human_strength_benchmark_v1_protocol.md)。
 
 审计通过后，用下列命令把**完整牌局**稳定拆成互不重叠的 train / validation / test。输出被限制在
 Git 忽略的 `local_human_data/` 下，已存在的输出默认拒绝覆盖：
@@ -109,13 +311,51 @@ python3 scripts/split_human_trajectories.py \
   --validation local_human_data/validation.trajectories.jsonl \
   --test local_human_data/test.trajectories.jsonl \
   --allow-local-human-data --human-minimum-hands 100 --human-weight 1.0 \
+  --human-teacher-disagreement-weight 2.0 \
   --output-dir artifacts/human-reviewed-policy-experiment
 ```
 
 此开关只授权行为模仿，**不**证明这些记录代表强人类，且不会让 checkpoint 自动成为网页默认或“胜过人类”的证据。
 
-牌桌默认展开三位 AI 的调试手牌，右上角的 **隐藏 AI 手牌（调试）** 可切回
-正常暗牌视图。点击 **规则与胡牌教学** 可进入 `/guide.html`，查看牌局流程、
+真人纠错候选训练完成后，先在 validation 上选择严格的低覆盖 Teacher gate；没有通过时 test 文件不会读取：
+
+固定首轮训练使用 fresh 小 MLP，真人 test 不传给训练器：
+
+```bash
+.venv/bin/python scripts/train_human_teacher_residual_v1.py \
+  --human-split-dir local_human_data/human-v1-split \
+  --output-dir artifacts/human-teacher-residual-v1 \
+  --device auto
+```
+
+该入口固定 seed、架构、epoch 和真人分歧权重，拒绝旧 checkpoint；只有真人 train/validation 达到门槛才会运行。
+随后再执行选门：
+
+```bash
+.venv/bin/python scripts/select_human_teacher_residual_gate.py \
+  --checkpoint artifacts/human-teacher-residual-v1/policy-value.pt \
+  --checkpoint-sha256 <冻结检查点的 SHA-256> \
+  --validation-input local_human_data/human-v1-split/validation.trajectories.jsonl \
+  --test-input local_human_data/human-v1-split/test.trajectories.jsonl \
+  --output artifacts/human-teacher-residual-v1/gate-selection.json
+```
+
+只有报告状态达到 `test_gate_passed_ready_for_100_wall_teacher_screen` 后，才可用报告中的严格 margin 显式试玩：
+
+```bash
+.venv/bin/python scripts/serve_web_game.py \
+  --ai-checkpoint artifacts/human-correction-v1/policy-value.pt \
+  --ai-teacher-gate-margin <validation 选出的 strict_margin> \
+  --human-log local_human_data/frozen-gate-evaluation.jsonl \
+  --human-log-purpose evaluation
+```
+
+该 wrapper 只允许弃牌覆盖弃牌；响应、胡、杠、游金和金牌锁均回退 Teacher。独立真人 evaluation 仍须等 100/400
+墙 Teacher 筛选通过后才启动，不能为了试玩提前消耗真人终检。
+
+牌桌默认使用正常暗牌视图，右上角可显式开启 **显示 AI 手牌（调试）**。一旦以
+`--human-log` 启动 training 或 evaluation 记录，服务端会强制禁用该调试能力，防止真人标签被对手暗手污染。
+点击 **规则与胡牌教学** 可进入 `/guide.html`，查看牌局流程、
 五组一对、金牌限制、游金体系、特殊胡法、响应优先级和结算说明。
 
 ## 规则档位

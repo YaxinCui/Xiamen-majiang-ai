@@ -13,7 +13,7 @@ import argparse
 from collections import Counter
 import copy
 from dataclasses import dataclass
-from itertools import chain
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -242,6 +242,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ppo-epochs", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--learning-rate", type=float, default=0.00005)
+    parser.add_argument(
+        "--policy-head-learning-rate-multiplier",
+        type=float,
+        default=1.0,
+        help=(
+            "policy head 相对共享 encoder/value 的学习率倍率；"
+            "默认 1 保持旧训练行为"
+        ),
+    )
+    parser.add_argument(
+        "--reference-kl-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "对训练启动 checkpoint 的冻结策略分布施加 forward KL；"
+            "0 保持旧训练行为"
+        ),
+    )
     parser.add_argument("--clip-ratio", type=float, default=0.15)
     parser.add_argument("--value-weight", type=float, default=0.25)
     parser.add_argument("--entropy-weight", type=float, default=0.002)
@@ -356,6 +374,67 @@ def source_revision() -> str | None:
         return None
     revision = result.stdout.strip()
     return revision or None
+
+
+def file_sha256(path: Path) -> str:
+    """Return a stable content identity for a training input or source file."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def source_tree_sha256() -> str:
+    """Hash the trainer and engine Python sources used by this process.
+
+    ``git rev-parse HEAD`` alone is insufficient in a research worktree with
+    intentional local changes.  Relative paths are included in the digest so
+    the result also commits to the exact module layout.
+    """
+
+    paths = [Path(__file__).resolve(), *sorted((ROOT / "xiamen_mahjong").glob("*.py"))]
+    digest = hashlib.sha256()
+    for path in paths:
+        relative = path.relative_to(ROOT).as_posix().encode("utf-8")
+        digest.update(len(relative).to_bytes(8, "big"))
+        digest.update(relative)
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(chunk)
+    return digest.hexdigest()
+
+
+def training_config_payload(args: argparse.Namespace) -> dict[str, Any]:
+    """Serialize every optimizer/sampling knob needed to reproduce a run."""
+
+    return {
+        "iterations": args.iterations,
+        "episodes_per_iteration": args.episodes_per_iteration,
+        "rollout_batch_size": args.rollout_batch_size,
+        "ppo_epochs": args.ppo_epochs,
+        "batch_size": args.batch_size,
+        "learning_rate": args.learning_rate,
+        "policy_head_learning_rate_multiplier": (
+            args.policy_head_learning_rate_multiplier
+        ),
+        "reference_kl_weight": args.reference_kl_weight,
+        "clip_ratio": args.clip_ratio,
+        "value_weight": args.value_weight,
+        "entropy_weight": args.entropy_weight,
+        "reward_scale": args.reward_scale,
+        "seed": args.seed,
+        "profile": args.profile,
+        "device": args.device,
+        "teacher_opponent_probability": args.teacher_opponent_probability,
+        "self_play_opponent_probability": args.self_play_opponent_probability,
+        "teacher_prior_margin": args.teacher_prior_margin,
+        "opponent_checkpoints": [str(path) for path in args.opponent_checkpoint],
+        "privileged_critic": args.privileged_critic,
+        "privileged_critic_hidden_size": args.privileged_critic_hidden_size,
+        "privileged_critic_weight": args.privileged_critic_weight,
+    }
 
 
 def _sample_opponent(
@@ -682,7 +761,7 @@ def collect_rollouts(
         )
         if game.win_type == "draw":
             draws += 1
-        else:
+        elif game.winner == candidate_seat:
             wins += 1
     mean = sum(rewards) / len(rewards)
     variance = (
@@ -809,7 +888,7 @@ def collect_rollouts_batched(
         )
         if active.game.win_type == "draw":
             draws += 1
-        else:
+        elif active.game.winner == active.candidate_seat:
             wins += 1
 
     for start in range(0, episodes, rollout_batch_size):
@@ -1245,6 +1324,9 @@ def ppo_update(
     seed: int,
     privileged_critic: PrivilegedCritic | None = None,
     privileged_critic_weight: float = 0.25,
+    reference_network: CandidatePolicyValueNetwork | None = None,
+    reference_kl_weight: float = 0.0,
+    policy_head_learning_rate_multiplier: float = 1.0,
 ) -> dict[str, float]:
     if not steps:
         raise ValueError("PPO rollout 没有候选策略决策")
@@ -1257,8 +1339,14 @@ def ppo_update(
         rewards,
         teacher_priors,
     ) = tensors(steps, feature_dim=network.feature_dim, device=device)
-    if privileged_critic_weight < 0:
-        raise ValueError("privileged critic weight 不能为负数")
+    if (
+        privileged_critic_weight < 0
+        or reference_kl_weight < 0
+        or policy_head_learning_rate_multiplier <= 0
+    ):
+        raise ValueError("PPO loss 权重或 policy head 学习率倍率不合法")
+    if reference_kl_weight > 0 and reference_network is None:
+        raise ValueError("reference KL 权重大于 0 时必须提供冻结 reference network")
     privileged_inputs: torch.Tensor | None = None
     if privileged_critic is not None:
         privileged_inputs, _ = _privileged_critic_training_tensors(
@@ -1266,19 +1354,30 @@ def ppo_update(
         )
     advantages = rewards - old_values
     advantages = (advantages - advantages.mean()) / advantages.std(unbiased=False).clamp_min(1e-6)
-    optimizer = torch.optim.AdamW(
-        (
-            chain(network.parameters(), privileged_critic.parameters())
-            if privileged_critic is not None
-            else network.parameters()
-        ),
-        lr=learning_rate,
-        weight_decay=0.0001,
-    )
+    policy_head_parameters = list(network.policy_head.parameters())
+    policy_head_ids = {id(parameter) for parameter in policy_head_parameters}
+    shared_parameters = [
+        parameter
+        for parameter in network.parameters()
+        if id(parameter) not in policy_head_ids
+    ]
+    parameter_groups: list[dict[str, object]] = [
+        {"params": shared_parameters, "lr": learning_rate},
+        {
+            "params": policy_head_parameters,
+            "lr": learning_rate * policy_head_learning_rate_multiplier,
+        },
+    ]
+    if privileged_critic is not None:
+        parameter_groups.append(
+            {"params": list(privileged_critic.parameters()), "lr": learning_rate}
+        )
+    optimizer = torch.optim.AdamW(parameter_groups, weight_decay=0.0001)
     indices = list(range(len(steps)))
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_privileged_critic_loss = 0.0
+    total_reference_kl = 0.0
     total_entropy = 0.0
     updates = 0
     network.train()
@@ -1311,10 +1410,27 @@ def ppo_update(
             )
             probabilities = torch.softmax(logits, dim=1)
             entropy = -(probabilities * log_probabilities).sum(dim=1).mean()
+            if reference_network is not None:
+                reference_network.eval()
+                with torch.no_grad():
+                    reference_logits, _reference_values = reference_network(
+                        candidates[row_indices], action_mask[row_indices]
+                    )
+                    reference_logits = reference_logits + teacher_priors[row_indices]
+                    reference_log_probabilities = F.log_softmax(
+                        reference_logits, dim=1
+                    )
+                reference_kl = (
+                    probabilities
+                    * (log_probabilities - reference_log_probabilities)
+                ).sum(dim=1).mean()
+            else:
+                reference_kl = torch.zeros((), device=device)
             loss = (
                 policy_loss
                 + value_weight * value_loss
                 + privileged_critic_weight * privileged_critic_loss
+                + reference_kl_weight * reference_kl
                 - entropy_weight * entropy
             )
             optimizer.zero_grad(set_to_none=True)
@@ -1324,6 +1440,7 @@ def ppo_update(
             total_policy_loss += float(policy_loss.detach().cpu())
             total_value_loss += float(value_loss.detach().cpu())
             total_privileged_critic_loss += float(privileged_critic_loss.detach().cpu())
+            total_reference_kl += float(reference_kl.detach().cpu())
             total_entropy += float(entropy.detach().cpu())
             updates += 1
     network.eval()
@@ -1334,6 +1451,9 @@ def ppo_update(
         "policy_loss": total_policy_loss / updates,
         "value_loss": total_value_loss / updates,
         "entropy": total_entropy / updates,
+        "reference_kl": total_reference_kl / updates,
+        "reference_kl_weight": reference_kl_weight,
+        "policy_head_learning_rate_multiplier": policy_head_learning_rate_multiplier,
         "advantage_mean_before_normalization": float((rewards - old_values).mean().cpu()),
         "advantage_std_before_normalization": float(
             (rewards - old_values).std(unbiased=False).cpu()
@@ -1341,6 +1461,93 @@ def ppo_update(
     }
     if privileged_critic is not None:
         metrics["privileged_critic_loss"] = total_privileged_critic_loss / updates
+    if reference_network is not None:
+        network.eval()
+        reference_network.eval()
+        with torch.no_grad():
+            final_logits, _final_values = network(candidates, action_mask)
+            reference_logits, _reference_values = reference_network(
+                candidates, action_mask
+            )
+            final_logits = final_logits + teacher_priors
+            reference_logits = reference_logits + teacher_priors
+            final_log_probabilities = F.log_softmax(final_logits, dim=1)
+            reference_log_probabilities = F.log_softmax(reference_logits, dim=1)
+            final_probabilities = final_log_probabilities.exp()
+            reference_probabilities = reference_log_probabilities.exp()
+            final_reference_kl = (
+                final_probabilities
+                * (final_log_probabilities - reference_log_probabilities)
+            ).sum(dim=1).clamp_min(0.0)
+            total_variation = 0.5 * (
+                final_probabilities - reference_probabilities
+            ).abs().sum(dim=1)
+            metrics.update(
+                {
+                    "final_reference_kl_mean": float(
+                        final_reference_kl.mean().cpu()
+                    ),
+                    "final_reference_kl_p95": float(
+                        torch.quantile(final_reference_kl, 0.95).cpu()
+                    ),
+                    "final_reference_total_variation_mean": float(
+                        total_variation.mean().cpu()
+                    ),
+                    "final_reference_argmax_disagreement_rate": float(
+                        (
+                            final_logits.argmax(dim=1)
+                            != reference_logits.argmax(dim=1)
+                        )
+                        .float()
+                        .mean()
+                        .cpu()
+                    ),
+                }
+            )
+    anchored_rows = (teacher_priors < 0.0).any(dim=1)
+    if bool(anchored_rows.any()):
+        network.eval()
+        with torch.no_grad():
+            post_logits, _post_values = network(candidates, action_mask)
+            anchored_logits = post_logits[anchored_rows]
+            anchored_mask = action_mask[anchored_rows]
+            anchored_priors = teacher_priors[anchored_rows]
+            teacher_indices = anchored_priors.argmax(dim=1)
+            teacher_logits = anchored_logits.gather(
+                1, teacher_indices.unsqueeze(1)
+            ).squeeze(1)
+            alternative_mask = anchored_mask.clone()
+            alternative_mask.scatter_(1, teacher_indices.unsqueeze(1), False)
+            alternative_logits = anchored_logits.masked_fill(
+                ~alternative_mask, torch.finfo(anchored_logits.dtype).min
+            ).max(dim=1).values
+            residual_gaps = alternative_logits - teacher_logits
+            combined = anchored_logits + anchored_priors
+            deterministic_overrides = combined.argmax(dim=1) != teacher_indices
+            probabilities = torch.softmax(combined, dim=1)
+            teacher_probabilities = probabilities.gather(
+                1, teacher_indices.unsqueeze(1)
+            ).squeeze(1)
+            metrics.update(
+                {
+                    "anchor_rows": float(anchored_rows.sum().item()),
+                    "residual_best_alternative_gap_mean": float(
+                        residual_gaps.mean().cpu()
+                    ),
+                    "residual_best_alternative_gap_p95": float(
+                        torch.quantile(residual_gaps, 0.95).cpu()
+                    ),
+                    "residual_best_alternative_gap_maximum": float(
+                        residual_gaps.max().cpu()
+                    ),
+                    "anchor_deterministic_override_rate": float(
+                        deterministic_overrides.float().mean().cpu()
+                    ),
+                    "anchor_teacher_probability_mean": float(
+                        teacher_probabilities.mean().cpu()
+                    ),
+                }
+            )
     return metrics
 
 
@@ -1353,6 +1560,8 @@ def main() -> None:
         or args.ppo_epochs <= 0
         or args.batch_size <= 0
         or args.learning_rate <= 0
+        or args.policy_head_learning_rate_multiplier <= 0
+        or args.reference_kl_weight < 0
         or not 0 < args.clip_ratio < 1
         or args.value_weight <= 0
         or args.entropy_weight < 0
@@ -1371,6 +1580,12 @@ def main() -> None:
     if agent.architecture != ARCHITECTURE_CANDIDATE_MLP:
         raise ValueError("首版 PPO 仅支持 candidate_mlp checkpoint")
     assert isinstance(agent.network, CandidatePolicyValueNetwork)
+    reference_network = None
+    if args.reference_kl_weight > 0:
+        reference_network = copy.deepcopy(agent.network).to(agent.device)
+        reference_network.eval()
+        for parameter in reference_network.parameters():
+            parameter.requires_grad_(False)
     privileged_critic = None
     if args.privileged_critic:
         # This object intentionally has no save path.  It survives only for
@@ -1397,10 +1612,21 @@ def main() -> None:
     report: dict[str, Any] = {
         "algorithm": "legal_action_ppo_terminal_score_v1",
         "source_revision": source_revision(),
+        "source_tree_sha256": source_tree_sha256(),
         "profile": args.profile,
         "checkpoint_source": str(args.checkpoint),
+        "checkpoint_source_sha256": file_sha256(args.checkpoint),
         "device": args.device,
+        "training_config": training_config_payload(args),
         "reward_scale": args.reward_scale,
+        "policy_head_learning_rate_multiplier": (
+            args.policy_head_learning_rate_multiplier
+        ),
+        "reference_kl": {
+            "weight": args.reference_kl_weight,
+            "reference": "frozen_training_start_checkpoint",
+            "enabled": args.reference_kl_weight > 0,
+        },
         "rollout_batch_size": args.rollout_batch_size,
         "privileged_critic": {
             "enabled": args.privileged_critic,
@@ -1456,9 +1682,16 @@ def main() -> None:
             seed=args.seed + iteration,
             privileged_critic=privileged_critic,
             privileged_critic_weight=args.privileged_critic_weight,
+            reference_network=reference_network,
+            reference_kl_weight=args.reference_kl_weight,
+            policy_head_learning_rate_multiplier=(
+                args.policy_head_learning_rate_multiplier
+            ),
         )
         iteration_report = {
             "iteration": iteration,
+            "rollout_seed": args.seed + iteration * 100_000,
+            "update_seed": args.seed + iteration,
             "rollout": rollout.payload(),
             "update": update,
         }

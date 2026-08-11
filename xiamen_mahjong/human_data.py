@@ -90,6 +90,8 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
         issues.append("missing_or_invalid_evaluation_session_id")
     if not isinstance(metadata.get("opponent_policy"), str):
         issues.append("missing_opponent_policy_identity")
+    if metadata.get("opponent_hand_reveal") != "server_forced_disabled":
+        issues.append("opponent_hand_reveal_not_forced_disabled")
     if trajectory.seed is not None or any(
         decision.seed is not None for decision in trajectory.decisions
     ):
@@ -109,6 +111,17 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
         issues.append("non_zero_sum_score_delta")
     if not trajectory.decisions:
         issues.append("no_human_decisions")
+    reference_count = sum(
+        decision.reference_teacher_index is not None
+        for decision in trajectory.decisions
+    )
+    if reference_count:
+        if reference_count != len(trajectory.decisions):
+            issues.append("partial_reference_teacher_labels")
+        if not isinstance(metadata.get("reference_policy"), str):
+            issues.append("missing_reference_policy_identity")
+        if metadata.get("reference_label") != "same_state_frozen_teacher_action_index":
+            issues.append("missing_reference_label_contract")
     for decision in trajectory.decisions:
         if decision.seat != 0:
             issues.append("non_human_seat_decision")
@@ -125,6 +138,103 @@ def _validate_human_trajectory(trajectory: TrainingTrajectory) -> list[str]:
     if metadata_private_paths:
         issues.append("private_metadata_key:" + ",".join(sorted(metadata_private_paths)))
     return issues
+
+
+def is_eligible_human_teacher_discard_correction(
+    decision: Any,
+) -> bool:
+    """Match the exact discard-only scope used by the deployed v1 gate."""
+
+    reference = getattr(decision, "reference_teacher_index", None)
+    legal_actions = getattr(decision, "legal_actions", ())
+    if (
+        isinstance(reference, bool)
+        or not isinstance(reference, int)
+        or not 0 <= reference < len(legal_actions)
+    ):
+        return False
+    state = getattr(decision, "state", {})
+    chosen_action = getattr(decision, "chosen_action", None)
+    if not isinstance(state, dict) or chosen_action is None:
+        return False
+    return bool(
+        state.get("phase") == "discard"
+        and legal_actions[reference].kind == "discard"
+        and chosen_action.kind == "discard"
+        and state.get("tour") is None
+        and not bool(state.get("gold_locked", False))
+        and sum(action.kind == "discard" for action in legal_actions) >= 2
+    )
+
+
+def audit_local_human_teacher_corrections(
+    paths: Iterable[str | Path],
+    *,
+    minimum_hands: int = 100,
+    minimum_reference_decisions: int = 500,
+    minimum_disagreements: int = 50,
+) -> dict[str, Any]:
+    """Gate human demonstrations for Teacher-residual model selection.
+
+    A human action is an independent behavioral target; the frozen Teacher
+    index merely identifies the subset on which that target actually corrects
+    the rule policy.  The audit is aggregate-only and requires training-only
+    records, complete reference coverage, one reference identity and enough
+    disagreements to justify a separate residual experiment.
+    """
+
+    if minimum_reference_decisions <= 0:
+        raise ValueError("minimum_reference_decisions 必须为正数")
+    if minimum_disagreements <= 0:
+        raise ValueError("minimum_disagreements 必须为正数")
+    audit = audit_local_human_trajectories(paths, minimum_hands=minimum_hands)
+    gate_reasons = list(audit["gate_reasons"])
+    if set(audit["recording_purposes"]) != {"training"}:
+        gate_reasons.append("records_are_not_training_only")
+    summary = audit["reference_teacher_summary"]
+    total_decisions = sum(audit["human_action_counts"].values())
+    all_reference_decisions = int(summary["decisions_with_reference"])
+    reference_decisions = int(
+        summary["eligible_ordinary_discard_reference_decisions"]
+    )
+    disagreements = int(summary["eligible_ordinary_discard_disagreements"])
+    if all_reference_decisions != total_decisions:
+        gate_reasons.append("incomplete_reference_teacher_coverage")
+    if len(summary["reference_policies"]) != 1:
+        gate_reasons.append("mixed_or_missing_reference_policy")
+    if reference_decisions < minimum_reference_decisions:
+        gate_reasons.append("insufficient_reference_decisions")
+    if disagreements < minimum_disagreements:
+        gate_reasons.append("insufficient_teacher_disagreements")
+    return {
+        "status": "local_human_teacher_correction_audit",
+        "source": "local_human_opt_in",
+        "audit": audit,
+        "correction_summary": {
+            "total_human_decisions": total_decisions,
+            "all_reference_decisions": all_reference_decisions,
+            "reference_decisions": reference_decisions,
+            "minimum_reference_decisions": minimum_reference_decisions,
+            "teacher_disagreements": disagreements,
+            "minimum_teacher_disagreements": minimum_disagreements,
+            "teacher_disagreement_rate": (
+                disagreements / reference_decisions
+                if reference_decisions
+                else None
+            ),
+            "reference_policies": summary["reference_policies"],
+            "disagreement_action_pairs": summary["disagreement_action_pairs"],
+            "scope": "aggregate_only_eligible_ordinary_discard_training_records",
+        },
+        "ready_for_teacher_residual_experiment": not gate_reasons,
+        "gate_reasons": list(dict.fromkeys(gate_reasons)),
+        "warning": (
+            "Passing this gate only makes a lightweight Teacher-residual experiment "
+            "statistically worthwhile. It does not prove that each human correction "
+            "is optimal; use a full-hand held-out human split and independent match "
+            "evaluation before promotion."
+        ),
+    }
 
 
 def audit_local_human_trajectories(
@@ -158,6 +268,12 @@ def audit_local_human_trajectories(
     recording_purposes: Counter[str] = Counter()
     recording_sessions: set[str] = set()
     action_counts: Counter[str] = Counter()
+    reference_policy_counts: Counter[str] = Counter()
+    reference_decisions = 0
+    reference_agreements = 0
+    eligible_discard_reference_decisions = 0
+    eligible_discard_reference_agreements = 0
+    reference_disagreement_pairs: Counter[str] = Counter()
     human_scores: list[float] = []
     human_wins = 0
     draws = 0
@@ -177,6 +293,26 @@ def audit_local_human_trajectories(
         if isinstance(session_id, str):
             recording_sessions.add(session_id)
         action_counts.update(decision.chosen_action.kind for decision in trajectory.decisions)
+        reference_policy = trajectory.source_metadata.get("reference_policy")
+        if isinstance(reference_policy, str):
+            reference_policy_counts[reference_policy] += 1
+        for decision in trajectory.decisions:
+            reference_index = decision.reference_teacher_index
+            if reference_index is None:
+                continue
+            reference_decisions += 1
+            if is_eligible_human_teacher_discard_correction(decision):
+                eligible_discard_reference_decisions += 1
+                if reference_index == decision.chosen_index:
+                    eligible_discard_reference_agreements += 1
+            if reference_index == decision.chosen_index:
+                reference_agreements += 1
+                continue
+            reference_kind = decision.legal_actions[reference_index].kind
+            human_kind = decision.chosen_action.kind
+            reference_disagreement_pairs[
+                f"teacher:{reference_kind}->human:{human_kind}"
+            ] += 1
         scores = trajectory.outcome["scores"]
         human_scores.append(float(scores[0]))
         human_wins += trajectory.outcome.get("winner") == 0
@@ -218,6 +354,31 @@ def audit_local_human_trajectories(
         "recording_purposes": dict(sorted(recording_purposes.items())),
         "recording_session_count": len(recording_sessions),
         "human_action_counts": dict(sorted(action_counts.items())),
+        "reference_teacher_summary": {
+            "reference_policies": dict(sorted(reference_policy_counts.items())),
+            "decisions_with_reference": reference_decisions,
+            "agreements": reference_agreements,
+            "disagreements": reference_decisions - reference_agreements,
+            "agreement_rate": (
+                reference_agreements / reference_decisions
+                if reference_decisions
+                else None
+            ),
+            "disagreement_action_pairs": dict(
+                sorted(reference_disagreement_pairs.items())
+            ),
+            "eligible_ordinary_discard_reference_decisions": (
+                eligible_discard_reference_decisions
+            ),
+            "eligible_ordinary_discard_agreements": (
+                eligible_discard_reference_agreements
+            ),
+            "eligible_ordinary_discard_disagreements": (
+                eligible_discard_reference_decisions
+                - eligible_discard_reference_agreements
+            ),
+            "scope": "aggregate_only_no_state_or_action_face_export",
+        },
         "human_match_summary": {
             "scope": "structurally_valid_completed_hands_only",
             "hands": len(human_scores),
@@ -415,6 +576,13 @@ def audit_local_human_evaluation(
     )
     ai_mean = -float(human_mean) if human_mean is not None else None
     ai_low = -float(human_high) if human_high is not None else None
+    ai_roster_size = 3
+    ai_per_seat_mean = (
+        ai_mean / ai_roster_size if ai_mean is not None else None
+    )
+    ai_per_seat_low = (
+        ai_low / ai_roster_size if ai_low is not None else None
+    )
     return {
         "status": "local_human_evaluation_audit_only",
         "source": "local_human_opt_in",
@@ -436,6 +604,16 @@ def audit_local_human_evaluation(
                 if session_scores
                 else 0
             ),
+            "ai_roster_size": ai_roster_size,
+            "ai_team_score_delta_mean": ai_mean,
+            "ai_team_score_delta_95pct_low": ai_low,
+            "ai_per_seat_score_delta_mean": ai_per_seat_mean,
+            "ai_per_seat_score_delta_95pct_low": ai_per_seat_low,
+            "positive_ai_per_seat_lcb": (
+                ai_per_seat_low is not None and ai_per_seat_low > 0.0
+            ),
+            # Backward-compatible aliases.  Their historical meaning is the
+            # aggregate score of all three identical AI seats, not one seat.
             "ai_side_score_delta_mean": ai_mean,
             "ai_side_score_delta_95pct_low": ai_low,
             "positive_ai_side_lcb": ai_low is not None and ai_low > 0.0,
@@ -447,6 +625,8 @@ def audit_local_human_evaluation(
             "beats humans generally. Before any such claim, manually verify consent, "
             "that each session corresponds to the intended independent participant or "
             "pre-registered block, participant recruitment/skill, frozen AI identity, "
-            "and that these hands were never read for training or model selection."
+            "and that these hands were never read for training or model selection. "
+            "The per-seat AI metric divides the three-seat AI team's zero-sum score "
+            "by three; the legacy ai_side fields are team aggregates."
         ),
     }

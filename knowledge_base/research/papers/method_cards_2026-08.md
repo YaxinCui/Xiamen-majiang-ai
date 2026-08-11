@@ -79,6 +79,58 @@
 - 禁止外推：更多输出头、更多参数或更低的 imitation loss 都不等于更强；任何替换网页默认 AI 的候选必须超过冻结
   `HeuristicTeacherAgent` 的实战晋级门槛。
 
+## 8. 精确 deficiency：低算力下先补结构 oracle
+
+- 来源等级：**A**；Yan、Li、Li，[A Fast Algorithm for Computing the Deficiency Number of a Mahjong Hand](https://arxiv.org/abs/2108.06832)。
+- 论文事实：deficiency／向听数估计完成牌型所需的换牌数，是弃牌等关键决策的基础；论文算法相对其 baseline 通常快约 100 倍，并能尊重智能体对可用牌的知识。
+- 可迁移动作：为厦门五面子加一对结构实现精确向听 primitive；把金牌通配、白板固定代理和公开可用牌分别建模，作为规则专家和小 residual 的可审计特征。
+- 已得反证：本项目 v1 在 100 墙上点估计 +0.2675，但 95% CI `[−1.4671, +2.0021]`，说明“严格低一向听”不能单独代表整局价值。
+- 项目推断：下一步应学习或计算“何时采用结构改善”，而不是把向听数当成全局策略；向听数仍保留为 SlowExpert 的基础坐标。
+
+## 9. Mahjax：吞吐量结果也是资源边界证据
+
+- 来源等级：**A**；[Mahjax: A GPU-Accelerated Mahjong Simulator for Reinforcement Learning in JAX](https://arxiv.org/abs/2605.20577)。
+- 论文事实：Mahjax 是 JAX 向量化日麻环境；论文报告在 **8 张 NVIDIA A100** 上，无赤／有赤规则最高约 200 万／100 万 step/s，并展示从零 RL 可改善对 baseline 的排名。
+- 可迁移动作：借鉴“环境吞吐、规则 parity、可视化调试必须一起验证”的工程思路。
+- 禁止外推：论文吞吐依赖八张 A100，且环境是日麻；本机不能据此规划大规模 tabula-rasa RL，更不能把报告速度当成单卡或 CPU 速度。
+- 项目推断：当前厦门项目应继续用 CPU 做精确局部 oracle 与固定墙评测，GPU 只训练小型表格 residual。
+
+## 10. Big 2 自博弈：PPO 的正结果不等于当前应重启 PPO
+
+- 来源等级：**A**；[Self-Play Reinforcement Learning under Imperfect Information in Big 2](https://arxiv.org/abs/2605.28863v2)。
+- 论文事实：在统一环境、输入、训练预算和评测协议下，该研究中 PPO 优于 Monte Carlo Q、SARSA 和 Q-learning；适度熵正则有帮助，current-policy self-play 在有限预算下优于 checkpoint self-play 或固定对手训练。
+- 可迁移动作：若未来存在可信改进信号，可把“适度熵＋当前策略课程”列为小型 policy-gradient 对照，并固定共同预算。
+- 禁止外推：Big 2 的动作、回报和状态空间与厦门麻将不同；本项目现有 REINFORCE／actor-critic／PPO 路线已经缺少超越 Teacher 的标签与独立收益，不能只因新论文的 PPO 排名重启训练。
+- 项目推断：先提升或校正 Teacher，再谈 RL；否则策略梯度只是在稀疏终局回报下偏离一个更强的规则锚点。
+
+## 11. Kanachan 与 Mortal：强工程的规模和许可证都不可忽略
+
+- 来源等级：**B（项目一手文档）**；[Kanachan](https://github.com/Cryolite/kanachan)、[Mortal](https://github.com/Equim-chan/Mortal)。
+- 项目事实：Kanachan 文档称其 2021 年已收集约 6,500 万个麻将魂四人局 round，并明确选择大数据、高表达模型、课程微调；工程还包含 LOUDS trie 向听计算与 annotation-vs-simulation parity。Mortal 是 Rust＋深度强化学习的日麻项目，代码采用 AGPL-3.0。
+- 可迁移动作：迁移方法而非产物——规则模拟与标注 parity、分阶段目标、快速向听 primitive、模型／数据来源身份记录。
+- 禁止外推：两者都是日麻；Kanachan 的数量级远超本项目，Mortal 的 AGPL 边界需要单独合规审查。不得复制权重、训练数据或规则实现来充当厦门标签。
+- 项目推断：这再次支持“人工结构特征＋小模型 residual”的资源路线，而不是在小数据上模仿其端到端网络规模。
+
+## 12. R-learner：正交化有价值，但已知 0.5 propensity 时不必先堆复杂度
+
+- 来源等级：**A**；Nie、Wager，[Quasi-Oracle Estimation of Heterogeneous Treatment Effects](https://arxiv.org/abs/1712.04912)。
+- 论文事实：R-learner 先估计边际 outcome 与 propensity，再通过残差化目标隔离 conditional treatment effect；可与
+  penalized regression、boosting 或神经网络组合，在 observational nuisance 估计不完美时追求 quasi-oracle 性质。
+- 可迁移动作：厦门 top-2 数据把动作分配固定为 0.5，并用中心化 `T−0.5` 学 effect；若首版 train-only 诊断显示 nuisance
+  明显过拟合或三种子 effect 极不稳定，下一版才预注册按物理墙 cross-fit nuisance 的 R-learner 对照。
+- 禁止外推：R-learner 不能降低麻将终局分差本身的方差，也不能把单次干预估计外推为重复覆盖策略。当前已知 propensity、独立
+  validation 和 CPU 预算下，不因论文名字增加五折神经 nuisance 训练。
+
+## 13. Counterfactual Risk Minimization：propensity 和方差必须进入晋级规则
+
+- 来源等级：**A**；Swaminathan、Joachims，[Counterfactual Risk Minimization: Learning from Logged Bandit Feedback](https://proceedings.mlr.press/v37/swaminathan15.html)。
+- 论文事实：logged bandit feedback 只观察被执行动作的结果；propensity scoring 处理反事实缺失，但重要性加权估计的方差必须
+  进入泛化与优化约束，不能只最大化离线点估计。
+- 可迁移动作：本项目使用严格 0.5/0.5 二元支持，不做低概率全动作探索；validation 对 frozen gate 计算物理墙级 HT
+  policy-minus-Teacher，并对四个覆盖门做 Bonferroni 正下界，而非按训练 loss 或点估计晋级。
+- 禁止外推：CRM 的理论设定不自动证明一局只改一次的麻将轨迹满足重复决策部署假设。即使 validation/terminal 通过，也只解锁
+  “每局第一次机会最多覆盖一次”的独立 100 墙实验。
+
 ## 近期阅读—实验队列
 
 | 顺位 | 要验证的假设 | 最小实验 | 停止条件 |

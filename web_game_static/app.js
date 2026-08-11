@@ -1,7 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 let state = null;
 let sending = false;
-let debugAiHands = true;
+let debugAiHands = false;
 let selectedRulesProfile = null;
 let selectedTableMode = null;
 let aiAdvanceTimer = null;
@@ -281,9 +281,9 @@ function render() {
   } else if (recording.write_failed) {
     recordingNote.textContent = '本地对局记录写入失败；本局不会上传。';
   } else if (recording.completed_hand_written) {
-    recordingNote.textContent = '本局玩家记录已保存在本地。';
+    recordingNote.textContent = `本局已保存 · 本次 ${recording.session_completed_hands} 局 / ${recording.session_eligible_discard_decisions} 个普通弃牌 / ${recording.session_discard_disagreements} 个弃牌分歧`;
   } else {
-    recordingNote.textContent = `本地记录已开启 · 已记录 ${recording.pending_decisions} 次你的选择`;
+    recordingNote.textContent = `本地记录已开启 · AI 暗牌已锁定 · 本局 ${recording.pending_decisions} 次选择 · 本次 ${recording.session_completed_hands} 局 / ${recording.session_eligible_discard_decisions} 个普通弃牌 / ${recording.session_discard_disagreements} 个弃牌分歧`;
   }
   $('#wall-count').textContent = state.wall_remaining;
   $('#turn-count').textContent = state.turn_count;
@@ -380,9 +380,15 @@ function renderAiDelayPicker() {
 function renderDebugToggle() {
   const toggle = $('#toggle-debug');
   const manual = state?.table_mode === 'four_player_manual';
-  toggle.textContent = debugAiHands
-    ? (manual ? '隐藏所有手牌（规则调试）' : '隐藏 AI 手牌（调试）')
-    : (manual ? '显示所有手牌（规则调试）' : '显示 AI 手牌（调试）');
+  const debugAllowed = state?.debug_ai_hands_allowed !== false;
+  if (!debugAllowed) debugAiHands = false;
+  toggle.disabled = !debugAllowed;
+  toggle.title = debugAllowed ? '' : '真人训练/评测记录期间由服务端强制隐藏 AI 手牌';
+  toggle.textContent = !debugAllowed
+    ? '记录模式 · AI 暗牌已锁定'
+    : debugAiHands
+      ? (manual ? '隐藏所有手牌（规则调试）' : '隐藏 AI 手牌（调试）')
+      : (manual ? '显示所有手牌（规则调试）' : '显示 AI 手牌（调试）');
   toggle.setAttribute('aria-pressed', String(debugAiHands));
   toggle.classList.toggle('is-active', debugAiHands);
   const ribbon = $('#debug-ribbon');
@@ -449,6 +455,7 @@ async function requestGameState() {
 
 async function toggleDebugAiHands() {
   if (sending) return;
+  if (state?.debug_ai_hands_allowed === false) return;
   sending = true;
   try {
     debugAiHands = !debugAiHands;

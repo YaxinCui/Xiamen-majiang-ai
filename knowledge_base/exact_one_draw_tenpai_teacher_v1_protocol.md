@@ -42,3 +42,10 @@ selection 已在固定 classic `seed=202614500` 起 160 个物理墙完成（640
 **+2.1203 ± 1.1525** 分/局，175/640 胜；但相对同墙 frozen Teacher 的 paired score delta 95% CI 为
 **[−0.1386, +4.3793]**。下界不严格大于 0，故状态为 `selection_rejected_terminal_unread`：`seed=202614800`
 起的 400 墙终检未读取，候选不进入网页、训练标签或默认 Teacher。selection 墙已消耗，禁止改变本协议参数后重跑。
+
+## 2026-08-08 后续安全审计
+
+后续复核发现 v1 的 `_public_visible_counts` 会把他家暗杠的具体牌面计入余牌统计，而 trajectory-v4 明确隐藏该
+牌面。v1 从未接入默认网页或训练标签，因此没有污染已部署策略；但上述 160/400 墙结果只适用于旧实现，不能作为
+修正版本的强度证明。代码已改为忽略他家暗杠 face，并以 `public-fix v2` 在全新 `seed=202622000` 数据上重新
+开始标签质量审计；详见 `exact_one_draw_belief_advantage_v2_protocol.md`。

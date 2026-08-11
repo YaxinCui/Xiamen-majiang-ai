@@ -107,6 +107,29 @@ class CheckpointSelectionTests(unittest.TestCase):
         self.assertTrue(better_validation_checkpoint(tie_higher_accuracy, lower_loss))
         self.assertFalse(better_validation_checkpoint(lower_loss, tie_higher_accuracy))
 
+    def test_human_test_can_be_physically_reserved_for_gate(self):
+        from scripts.train_policy_value import validate_local_human_split_contract
+
+        reserved = {
+            "train": (Path("human-train.jsonl"),),
+            "validation": (Path("human-validation.jsonl"),),
+            "test": (),
+        }
+        validate_local_human_split_contract(
+            reserved,
+            reserve_test_for_gate=True,
+        )
+        with self.assertRaisesRegex(ValueError, "完全不接收真人 test"):
+            validate_local_human_split_contract(
+                {**reserved, "test": (Path("human-test.jsonl"),)},
+                reserve_test_for_gate=True,
+            )
+        with self.assertRaisesRegex(ValueError, "缺少 test"):
+            validate_local_human_split_contract(
+                reserved,
+                reserve_test_for_gate=False,
+            )
+
     def test_rollout_soft_preference_masks_padding_and_rewards_better_actions(self):
         from scripts.train_policy_value import policy_preference_loss
 
@@ -341,9 +364,23 @@ class CheckpointSelectionTests(unittest.TestCase):
                     "action_value_decisions": 24.0,
                     "action_value_huber_loss": 0.7,
                     "action_value_rank_accuracy": 0.0,
-                }
+                },
+                "local_human_opt_in": {
+                    "decisions": 60.0,
+                    "policy_loss": 0.4,
+                    "accuracy": 0.75,
+                    "action_value_decisions": 0.0,
+                },
             },
         }
+        self.assertEqual(
+            checkpoint_selection_metrics(
+                validation,
+                source="local_human_opt_in",
+                minimum_decisions=50,
+            ),
+            {"policy_loss": 0.4, "accuracy": 0.75},
+        )
         self.assertEqual(
             checkpoint_selection_metrics(
                 validation,

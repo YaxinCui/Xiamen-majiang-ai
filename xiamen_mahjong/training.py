@@ -25,7 +25,12 @@ from .belief import (
     smoothed_policy_likelihood,
 )
 from .game import XiamenMahjongGame
-from .hand import hand_quality, wait_tiles
+from .hand import (
+    hand_quality,
+    hand_quality_components,
+    standard_hand_shanten,
+    wait_tiles,
+)
 from .rules import XiamenRules
 from .tiles import (
     BASE_TILE_COUNT,
@@ -73,7 +78,7 @@ _KIND_TOUR = _CONSUMED + BASE_TILE_COUNT
 _KIND_WALL = _KIND_TOUR + len(ACTION_KINDS) * 4
 _KIND_PHASE = _KIND_WALL + len(ACTION_KINDS) * 8
 FEATURE_DIM = _KIND_PHASE + len(ACTION_KINDS) * 2
-NEURAL_FEATURE_DIMS = {1: 76, 2: 80, 3: 145}
+NEURAL_FEATURE_DIMS = {1: 76, 2: 80, 3: 145, 4: 204}
 DEFAULT_NEURAL_FEATURE_VERSION = 2
 NEURAL_FEATURE_DIM = NEURAL_FEATURE_DIMS[DEFAULT_NEURAL_FEATURE_VERSION]
 PUBLIC_ACTION_KINDS = (
@@ -135,6 +140,12 @@ class TeacherDecision:
     # collector forces all actions in one sampled world per replicate, so this
     # captures their covariance and is more relevant to policy ranking.
     action_value_gap_stderrs: tuple[float, ...] | None = None
+    # Optional frozen-Teacher recommendation captured beside an independently
+    # executed human action.  ``chosen_index`` remains the actual supervision
+    # target for human demonstrations; this index is diagnostic provenance for
+    # identifying human/Teacher disagreements and must never be used as an
+    # observation feature.  Legacy and synthetic records leave it unset.
+    reference_teacher_index: int | None = None
 
     @property
     def chosen_action(self) -> GameAction:
@@ -159,6 +170,8 @@ class TeacherDecision:
             payload["executed_index"] = self.executed_index
         if self.executed_probability is not None:
             payload["executed_probability"] = self.executed_probability
+        if self.reference_teacher_index is not None:
+            payload["reference_teacher_index"] = self.reference_teacher_index
         if self.seed is not None:
             payload["seed"] = self.seed
         return payload
@@ -191,6 +204,16 @@ class TeacherDecision:
             ):
                 raise ValueError("行为动作概率必须对应已执行动作且在 (0, 1] 内")
             executed_probability = float(raw_executed_probability)
+        raw_reference_teacher_index = payload.get("reference_teacher_index")
+        reference_teacher_index = None
+        if raw_reference_teacher_index is not None:
+            if (
+                isinstance(raw_reference_teacher_index, bool)
+                or not isinstance(raw_reference_teacher_index, int)
+                or not 0 <= raw_reference_teacher_index < len(actions)
+            ):
+                raise ValueError("参考 Teacher 动作索引必须对应一项合法动作")
+            reference_teacher_index = raw_reference_teacher_index
         raw_action_values = payload.get("action_values")
         action_values = None
         if raw_action_values is not None:
@@ -252,6 +275,7 @@ class TeacherDecision:
             action_values=action_values,
             action_value_stderrs=action_value_stderrs,
             action_value_gap_stderrs=action_value_gap_stderrs,
+            reference_teacher_index=reference_teacher_index,
         )
 
 
@@ -8044,12 +8068,151 @@ def _dense_action_features(
     elif feature_version == 3:
         features.extend(_lookahead_features(state, action))
         features.extend(_public_context_features(state, target))
+    elif feature_version == 4:
+        features.extend(_lookahead_features(state, action))
+        features.extend(_public_context_features(state, target))
+        features.extend(_structured_public_action_features(state, action))
     expected_dimension = NEURAL_FEATURE_DIMS.get(feature_version)
     if expected_dimension is None:
         raise ValueError("不支持的 MLP 特征版本")
     if len(features) != expected_dimension:
         raise RuntimeError(f"MLP 特征维度错误：{len(features)}")
     return features
+
+
+def _structured_public_action_features(
+    state: dict[str, Any], action: GameAction
+) -> list[float]:
+    """Explicit low-data structure features for candidate MLP v4.
+
+    A 64-wide MLP with a few thousand disagreement labels should not have to
+    rediscover exact shanten, the frozen Teacher's component decomposition or
+    public tile availability from 34 raw hand counts.  These features remain
+    deterministic functions of the actor-visible observation and action.  No
+    wall order, opponent concealed hand or future outcome is consulted.
+    """
+
+    hand_before = [int(tile) for tile in state["hand"]]
+    hand_after = list(hand_before)
+    meld_count = sum(int(value) for value in state["meld_counts"])
+    if action.kind == "discard" and action.tile in hand_after:
+        hand_after.remove(action.tile)
+    elif action.kind in {"chi", "pong", "ming_kan"}:
+        for tile in action.tiles:
+            if tile in hand_after:
+                hand_after.remove(tile)
+        meld_count += 1
+    elif action.kind == "an_kan" and action.tile is not None:
+        for _ in range(4):
+            if action.tile in hand_after:
+                hand_after.remove(action.tile)
+        meld_count += 1
+    elif action.kind == "add_kan" and action.tile in hand_after:
+        hand_after.remove(action.tile)
+    elif action.kind == "advance_tour" and state.get("gold_tile") in hand_after:
+        hand_after.remove(state["gold_tile"])
+
+    rules = XiamenRules.from_profile(str(state.get("rules_profile", "classic")))
+    gold_tile = state.get("gold_tile")
+    proxy_tile = (
+        WHITE_DRAGON
+        if rules.white_dragon_is_gold_proxy
+        and gold_tile is not None
+        and gold_tile != WHITE_DRAGON
+        else None
+    )
+    wildcard_tiles = (
+        {int(gold_tile)}
+        if rules.gold_is_wildcard and isinstance(gold_tile, int)
+        else set()
+    )
+    parts = hand_quality_components(
+        hand_after,
+        gold_tile,
+        meld_count=meld_count,
+        wildcard_tiles=wildcard_tiles,
+        proxy_tile=proxy_tile,
+        proxy_as=gold_tile,
+    )
+    structure = [
+        parts.fixed_melds / 5.0,
+        parts.gold_tiles / 4.0,
+        parts.triplet_groups / 5.0,
+        parts.pair_remainders / 8.0,
+        parts.adjacent_overlap / 16.0,
+        parts.gap_overlap / 16.0,
+        parts.sequence_overlap / 16.0,
+    ]
+    shanten = standard_hand_shanten(
+        hand_after,
+        gold_tile,
+        meld_count=meld_count,
+        melds_required=rules.melds_required,
+        wildcard_tiles=wildcard_tiles,
+        proxy_tile=proxy_tile,
+        proxy_as=gold_tile,
+    )
+    shanten_bucket = min(8, max(-1, shanten)) + 1
+    shanten_one_hot = [
+        1.0 if index == shanten_bucket else 0.0 for index in range(10)
+    ]
+
+    visible = Counter(tile for tile in hand_before if is_base_tile(tile))
+    visible.update(
+        {
+            tile: int(count)
+            for tile, count in enumerate(state["river_counts"])
+            if int(count)
+        }
+    )
+    # Own meld faces are stored once per meld in meld_counts, whereas public
+    # player meld payloads retain their exposed physical tiles.  Use the latter
+    # for public availability and keep concealed opponent-kong faces redacted.
+    for player in state.get("public_players", []):
+        for meld in player.get("melds", []):
+            visible.update(
+                int(tile)
+                for tile in meld.get("tiles", [])
+                if isinstance(tile, int) and is_base_tile(int(tile))
+            )
+    indicator = state.get("gold_indicator")
+    if isinstance(indicator, int) and is_base_tile(indicator):
+        visible[indicator] += 1
+    public_live = [max(0, 4 - visible[tile]) / 4.0 for tile in range(BASE_TILE_COUNT)]
+
+    waits = (
+        wait_tiles(
+            hand_after,
+            gold_tile,
+            meld_count=meld_count,
+            melds_required=rules.melds_required,
+            allow_seven_pairs=rules.allow_seven_pairs,
+            wildcard_tiles=wildcard_tiles,
+            proxy_tile=proxy_tile,
+            proxy_as=gold_tile,
+        )
+        if action.kind == "discard"
+        else []
+    )
+    live_wait_copies = sum(max(0, 4 - visible[tile]) for tile in waits)
+    target = _candidate_target(state, action)
+    target_live = max(0, 4 - visible[target]) if is_base_tile(target) else 0
+    target_hand_count = hand_before.count(target) if is_base_tile(target) else 0
+    is_terminal = bool(target < 27 and target % 9 in {0, 8})
+    scalars = [
+        len(waits) / BASE_TILE_COUNT,
+        live_wait_copies / (4.0 * BASE_TILE_COUNT),
+        target_live / 4.0,
+        target_hand_count / 4.0,
+        1.0 if is_base_tile(target) and target >= 27 else 0.0,
+        1.0 if is_terminal else 0.0,
+        min(max(int(state.get("public_action_count", 0)), 0), 80) / 80.0,
+        min(max(int(state.get("wall_remaining", 0)), 0), 144) / 144.0,
+    ]
+    result = [*structure, *shanten_one_hot, *public_live, *scalars]
+    if len(result) != 59:
+        raise RuntimeError("MLP v4 结构化公开特征维度错误")
+    return result
 
 
 def _public_context_features(state: dict[str, Any], target: int) -> list[float]:

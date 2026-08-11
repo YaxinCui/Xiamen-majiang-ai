@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a4037" />
+    <title>厦门麻将 · 完全并列二选一</title>
+    <link rel="stylesheet" href="/review.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <header class="hero">
+        <div>
+          <p class="kicker">LOCAL · PAIRWISE ONLY · BOTH IDENTITIES HIDDEN</p>
+          <h1>厦门麻将 <span>完全并列二选一</span></h1>
+          <p>两张牌在规则 Teacher 中得分完全相同。只判断这两张打哪张更好；提交前不会告诉你哪张是 Teacher、哪张是自动替代。</p>
+        </div>
+        <div class="progress-card"><strong id="progress-count">– / –</strong><span id="progress-note">正在载入</span></div>
+      </header>
+      <section id="notice" class="notice">正在读取本地二选一题目…</section>
+      <section id="review-area" class="review-grid hidden">
+        <aside class="context-panel">
+          <article class="card"><p class="kicker">公开状态</p><dl class="facts">
+            <div><dt>金牌</dt><dd id="gold-tile">–</dd></div><div><dt>金牌指示</dt><dd id="gold-indicator">–</dd></div>
+            <div><dt>剩余牌墙</dt><dd id="wall-remaining">–</dd></div><div><dt>回合</dt><dd id="turn-count">–</dd></div>
+            <div><dt>庄家</dt><dd id="dealer-seat">–</dd></div><div><dt>当前玩家</dt><dd>你</dd></div>
+            <div><dt>待响应弃牌</dt><dd id="last-discard">—</dd></div></dl><p id="gold-note" class="muted"></p>
+          </article>
+          <article class="card"><p class="kicker">最近公开动作</p><ol id="history-list" class="history-list"></ol></article>
+        </aside>
+        <section class="table-card">
+          <div id="opponents" class="opponents"></div><div class="center-mark">厦门麻将<br /><small>只比较两张亮起的牌</small></div>
+          <article id="actor-seat" class="player-card actor-card"></article>
+        </section>
+        <aside class="decision-panel card">
+          <p class="kicker">匿名二选一</p><h2>只在亮起的两张中选</h2>
+          <p class="muted">其余手牌只是上下文，不能点击。若两张难分高下，先选较倾向的一张并点“不确定”。</p>
+          <p class="shortcut-note">快捷键：←/→ 切换，Enter 确认，U 不确定，S 跳过。</p>
+          <div id="action-options" class="action-options hidden"></div><div id="selected-answer" class="selected-answer">尚未选择</div>
+          <button id="confirm-button" class="primary" type="button" disabled>确认：这张更好</button>
+          <button id="uncertain-button" class="secondary" type="button" disabled>提交，但两张很接近／不确定</button>
+          <button id="skip-button" class="ghost" type="button">暂时跳过</button>
+          <div id="feedback" class="feedback hidden"></div><button id="next-button" class="primary hidden" type="button">下一题</button>
+          <p class="privacy-note">只保存这对动作的相对偏好；不会把未展示动作当负例，不含牌墙、暗手、seed 或赛果。</p>
+        </aside>
+      </section>
+    </main>
+    <script src="/review.js" defer></script>
+  </body>
+</html>

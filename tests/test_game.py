@@ -1,21 +1,82 @@
 import copy
+from types import SimpleNamespace
 import unittest
 
 from xiamen_mahjong.game import XiamenMahjongGame
 from xiamen_mahjong.agents import (
     AvailabilityTeacherAgent,
+    DeficiencyMeldTeacherAgent,
+    DiscardShapeWeights,
     ExactOneDrawTenpaiTieBreakTeacherAgent,
     GameAction,
     HeuristicTeacherAgent,
+    KnowledgeAwareDeficiencyTeacherAgent,
     MeldContinuationTeacherAgent,
     OnePlyLookaheadTeacherAgent,
+    ParametricDiscardTeacherAgent,
+    PublicParetoDeficiencyTeacherAgent,
+    PublicProgressTieBreakTeacherAgent,
+    PublicTenpaiValueTeacherAgent,
     RiskAwareTeacherAgent,
+    TwoDrawTenpaiReachTeacherAgent,
 )
 from xiamen_mahjong.rules import XiamenRules
 from xiamen_mahjong.tiles import BASE_TILE_COUNT, WHITE_DRAGON, gold_indicator_index
 
 
 class GameTests(unittest.TestCase):
+    def test_default_parametric_discard_teacher_exactly_matches_frozen(self):
+        frozen = HeuristicTeacherAgent()
+        candidate = ParametricDiscardTeacherAgent()
+        for seed in range(202626000, 202626010):
+            game = XiamenMahjongGame(
+                seed=seed,
+                rules=XiamenRules.classic(),
+                auto_advance=False,
+                human_seat=-1,
+            )
+            player_id = game.current_player
+            self.assertEqual(
+                candidate.explain_discard(game, player_id),
+                frozen.explain_discard(game, player_id),
+            )
+
+    def test_parametric_discard_teacher_rejects_invalid_weights(self):
+        with self.assertRaises(ValueError):
+            DiscardShapeWeights(wait_face=-1)
+        with self.assertRaises(ValueError):
+            DiscardShapeWeights(gold_tile=float("nan"))
+
+    def test_two_draw_tenpai_reach_rejects_invalid_probability_gate(self):
+        with self.assertRaises(ValueError):
+            TwoDrawTenpaiReachTeacherAgent(minimum_probability_advantage=0)
+        with self.assertRaises(ValueError):
+            TwoDrawTenpaiReachTeacherAgent(minimum_probability_advantage=1.1)
+
+    def test_two_draw_tenpai_reach_is_invariant_to_live_hidden_world(self):
+        game = XiamenMahjongGame(
+            seed=202629000,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        altered = copy.deepcopy(game)
+        opponent = next(player for player in altered.players if player.seat != player_id)
+        wall_index = next(
+            index for index, tile in enumerate(altered.wall) if tile != opponent.hand[0]
+        )
+        opponent.hand[0], altered.wall[wall_index] = (
+            altered.wall[wall_index],
+            opponent.hand[0],
+        )
+        opponent.hand.sort()
+        candidate = TwoDrawTenpaiReachTeacherAgent()
+        self.assertEqual(
+            candidate.choose_turn_action(game, player_id),
+            candidate.choose_turn_action(altered, player_id),
+        )
+
     def test_gold_indicator_scan_wraps_and_skips_flowers(self):
         # Dice 1+1 starts at index 3 and scans 3, 2, 1, 0, then wraps.
         self.assertEqual(gold_indicator_index([34, 0, 35, 36, 1], (1, 1)), 1)
@@ -396,6 +457,70 @@ class GameTests(unittest.TestCase):
             agent.choose_response(altered, 1, options),
         )
 
+    def test_deficiency_meld_teacher_declines_a_strict_shanten_regression(self):
+        game = XiamenMahjongGame(seed=202631001, rules=XiamenRules.classic())
+        game.gold_tile = 13
+        game.gold_indicator = 12
+        game.phase = "response"
+        game.discarder = 0
+        game.last_discard = 2
+        game.players[0].discards = [2]
+        game.players[1].hand = [
+            0, 1, 1, 2, 2, 3, 9, 10, 10, 12, 19, 21, 22, 24, 25, 33
+        ]
+        options = [GameAction("pass"), GameAction("pong", 2, (2, 2))]
+        frozen = HeuristicTeacherAgent().choose_response(game, 1, options)
+        candidate = DeficiencyMeldTeacherAgent()
+        self.assertEqual(frozen, GameAction("pong", 2, (2, 2)))
+        self.assertEqual(candidate.choose_response(game, 1, options), GameAction("pass"))
+        rows = candidate.explain_response(game, 1, options)
+        pass_row = next(row for row in rows if row["kind"] == "pass")
+        pong_row = next(row for row in rows if row["kind"] == "pong")
+        self.assertLess(
+            pass_row["regular_hand_shanten"],
+            pong_row["regular_hand_shanten"],
+        )
+
+    def test_deficiency_meld_teacher_uses_only_actor_visible_information(self):
+        game = XiamenMahjongGame(seed=202631002, rules=XiamenRules.classic())
+        game.gold_tile = 13
+        game.phase = "response"
+        game.discarder = 0
+        game.last_discard = 2
+        game.players[0].discards = [2]
+        game.players[1].hand = [
+            0, 1, 1, 2, 2, 3, 9, 10, 10, 12, 19, 21, 22, 24, 25, 33
+        ]
+        options = [GameAction("pass"), GameAction("pong", 2, (2, 2))]
+        altered = copy.deepcopy(game)
+        altered.players[2].hand[0], altered.wall[0] = (
+            altered.wall[0],
+            altered.players[2].hand[0],
+        )
+        altered.players[2].hand.sort()
+        candidate = DeficiencyMeldTeacherAgent()
+        self.assertEqual(
+            candidate.choose_response(game, 1, options),
+            candidate.choose_response(altered, 1, options),
+        )
+
+    def test_deficiency_meld_claim_removes_latest_honor_from_follow_source(self):
+        game = XiamenMahjongGame(seed=202631003, rules=XiamenRules.classic())
+        game.gold_tile = 5
+        game.phase = "response"
+        game.discarder = 0
+        game.last_discard = 27
+        game.players[0].discards = [27]
+        self.assertNotIn(
+            27,
+            DeficiencyMeldTeacherAgent._appeared_honors_after_claim(game),
+        )
+        game.players[2].discards = [27]
+        self.assertIn(
+            27,
+            DeficiencyMeldTeacherAgent._appeared_honors_after_claim(game),
+        )
+
     def test_risk_aware_teacher_uses_only_public_information(self):
         game = XiamenMahjongGame(
             seed=202611001,
@@ -495,6 +620,29 @@ class GameTests(unittest.TestCase):
             HeuristicTeacherAgent().choose_turn_action(game, player_id),
         )
 
+    def test_exact_one_draw_tiebreak_hides_opponent_concealed_kong_face(self):
+        game = XiamenMahjongGame(
+            seed=202621001,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        opponent = next(player for player in game.players if player.seat != player_id)
+        first = copy.deepcopy(game)
+        second = copy.deepcopy(game)
+        first.players[opponent.seat].melds = [
+            {"kind": "an_kan", "tiles": [0, 0, 0, 0], "value": 0}
+        ]
+        second.players[opponent.seat].melds = [
+            {"kind": "an_kan", "tiles": [1, 1, 1, 1], "value": 1}
+        ]
+        agent = ExactOneDrawTenpaiTieBreakTeacherAgent()
+        self.assertEqual(
+            agent._public_visible_counts(first, player_id),
+            agent._public_visible_counts(second, player_id),
+        )
+
     def test_exact_one_draw_tiebreak_reorders_only_after_a_strict_gate(self):
         game = XiamenMahjongGame(
             seed=202614200,
@@ -526,6 +674,236 @@ class GameTests(unittest.TestCase):
             ExactOneDrawTenpaiTieBreakTeacherAgent(score_margin=-0.1)
         with self.assertRaises(ValueError):
             ExactOneDrawTenpaiTieBreakTeacherAgent(minimum_live_advantage=0)
+
+    def test_public_tenpai_value_teacher_uses_only_public_information(self):
+        game = XiamenMahjongGame(
+            seed=202616000,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        altered = copy.deepcopy(game)
+        opponent = next(player for player in altered.players if player.seat != player_id)
+        wall_index = next(
+            index for index, tile in enumerate(altered.wall) if tile != opponent.hand[0]
+        )
+        opponent.hand[0], altered.wall[wall_index] = (
+            altered.wall[wall_index],
+            opponent.hand[0],
+        )
+        opponent.hand.sort()
+
+        agent = PublicTenpaiValueTeacherAgent()
+        self.assertEqual(
+            agent.choose_turn_action(game, player_id),
+            agent.choose_turn_action(altered, player_id),
+        )
+        strict = PublicTenpaiValueTeacherAgent(
+            minimum_weighted_value_advantage=1_000_000
+        )
+        self.assertEqual(
+            strict.choose_turn_action(game, player_id),
+            HeuristicTeacherAgent().choose_turn_action(game, player_id),
+        )
+
+    def test_public_tenpai_value_teacher_hides_opponent_concealed_kong_face(self):
+        game = XiamenMahjongGame(
+            seed=202616002,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        opponent = next(player for player in game.players if player.seat != player_id)
+        first = copy.deepcopy(game)
+        second = copy.deepcopy(game)
+        first.players[opponent.seat].melds = [
+            {"kind": "an_kan", "tiles": [0, 0, 0, 0], "value": 0}
+        ]
+        second.players[opponent.seat].melds = [
+            {"kind": "an_kan", "tiles": [1, 1, 1, 1], "value": 1}
+        ]
+        agent = PublicTenpaiValueTeacherAgent()
+        self.assertEqual(
+            agent._public_visible_counts(first, player_id),
+            agent._public_visible_counts(second, player_id),
+        )
+
+    def test_public_tenpai_value_teacher_reorders_only_after_strict_gate(self):
+        game = XiamenMahjongGame(
+            seed=202616001,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        frozen = HeuristicTeacherAgent().explain_discard(game, player_id)
+        frozen_tile = int(frozen[0]["tile"])
+        selected_tile = int(frozen[1]["tile"])
+        for row in frozen[:2]:
+            row["waits"] = ["受控听口"]
+            row["score"] = frozen[0]["score"]
+
+        agent = PublicTenpaiValueTeacherAgent()
+        original_explain = HeuristicTeacherAgent.explain_discard
+        original_value = agent._direct_tenpai_value
+
+        def controlled_explain(_self, _game, _player_id):
+            return [dict(row) for row in frozen]
+
+        def controlled_value(_game, _player_id, hand_after_discard, _visible):
+            discarded = next(
+                tile
+                for tile in (frozen_tile, selected_tile)
+                if game.players[player_id].hand.count(tile)
+                > hand_after_discard.count(tile)
+            )
+            weighted = 100.0 if discarded == selected_tile else 10.0
+            return {
+                "wait_faces": 1,
+                "live_copies": 4,
+                "weighted_value": weighted,
+                "mean_visible_score": weighted / 4,
+            }
+
+        HeuristicTeacherAgent.explain_discard = controlled_explain
+        agent._direct_tenpai_value = controlled_value  # type: ignore[method-assign]
+        try:
+            ranked = agent.explain_discard(game, player_id)
+        finally:
+            HeuristicTeacherAgent.explain_discard = original_explain
+            agent._direct_tenpai_value = original_value  # type: ignore[method-assign]
+        self.assertEqual(int(ranked[0]["tile"]), selected_tile)
+        self.assertNotEqual(int(ranked[0]["tile"]), frozen_tile)
+        self.assertTrue(ranked[0]["selected_by_public_tenpai_value"])
+
+    def test_public_tenpai_value_teacher_rejects_invalid_gates(self):
+        with self.assertRaises(ValueError):
+            PublicTenpaiValueTeacherAgent(score_margin=-0.1)
+        with self.assertRaises(ValueError):
+            PublicTenpaiValueTeacherAgent(minimum_weighted_value_advantage=0)
+
+    def test_knowledge_aware_deficiency_uses_only_public_information(self):
+        game = XiamenMahjongGame(
+            seed=202624100,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        altered = copy.deepcopy(game)
+        opponent = next(player for player in altered.players if player.seat != player_id)
+        wall_index = next(
+            index for index, tile in enumerate(altered.wall) if tile != opponent.hand[0]
+        )
+        opponent.hand[0], altered.wall[wall_index] = (
+            altered.wall[wall_index],
+            opponent.hand[0],
+        )
+        opponent.hand.sort()
+
+        agent = KnowledgeAwareDeficiencyTeacherAgent()
+        self.assertEqual(
+            agent.choose_turn_action(game, player_id),
+            agent.choose_turn_action(altered, player_id),
+        )
+
+    def test_knowledge_aware_deficiency_hides_concealed_kong_face(self):
+        game = XiamenMahjongGame(
+            seed=202624101,
+            rules=XiamenRules.classic(),
+            auto_advance=False,
+            human_seat=-1,
+        )
+        player_id = game.current_player
+        opponent = next(player for player in game.players if player.seat != player_id)
+        first = copy.deepcopy(game)
+        second = copy.deepcopy(game)
+        first.players[opponent.seat].melds = [
+            {"kind": "an_kan", "tiles": [0, 0, 0, 0], "value": 0}
+        ]
+        second.players[opponent.seat].melds = [
+            {"kind": "an_kan", "tiles": [1, 1, 1, 1], "value": 1}
+        ]
+        agent = KnowledgeAwareDeficiencyTeacherAgent()
+        self.assertEqual(
+            agent._public_visible_counts(first, player_id),
+            agent._public_visible_counts(second, player_id),
+        )
+
+    def test_knowledge_aware_deficiency_rejects_invalid_margin(self):
+        with self.assertRaises(ValueError):
+            KnowledgeAwareDeficiencyTeacherAgent(score_margin=-0.1)
+
+    def test_knowledge_aware_deficiency_makes_a_real_strict_improvement(self):
+        candidate = KnowledgeAwareDeficiencyTeacherAgent(score_margin=2.0)
+        teacher = HeuristicTeacherAgent()
+        game = XiamenMahjongGame(
+            seed=202624122,
+            rules=XiamenRules.classic(),
+            agents={0: teacher, 1: candidate, 2: teacher, 3: teacher},
+            human_seat=-1,
+            auto_advance=False,
+        )
+        found = None
+        for _step in range(200):
+            if game.phase == "discard" and game.current_player == 1:
+                ranked = candidate.explain_discard(game, 1)
+                if ranked and ranked[0].get(
+                    "selected_by_knowledge_aware_deficiency"
+                ):
+                    frozen_tile = int(teacher.explain_discard(game, 1)[0]["tile"])
+                    frozen = next(
+                        row for row in ranked if int(row["tile"]) == frozen_tile
+                    )
+                    found = (ranked[0], frozen)
+                    break
+            if game.phase == "over" or not game.advance_one_ai():
+                break
+
+        self.assertIsNotNone(found)
+        selected, frozen = found
+        self.assertEqual(int(selected["tile"]), 12)
+        self.assertEqual(int(frozen["tile"]), 26)
+        self.assertLess(
+            int(selected["regular_hand_shanten"]),
+            int(frozen["regular_hand_shanten"]),
+        )
+
+    def test_public_pareto_deficiency_never_trades_ukeire_for_shanten(self):
+        candidate = PublicParetoDeficiencyTeacherAgent(score_margin=2.0)
+        self.assertTrue(
+            candidate._accept_deficiency_override(
+                SimpleNamespace(improving_live_copies=12),
+                SimpleNamespace(improving_live_copies=12),
+            )
+        )
+        self.assertFalse(
+            candidate._accept_deficiency_override(
+                SimpleNamespace(improving_live_copies=11),
+                SimpleNamespace(improving_live_copies=12),
+            )
+        )
+
+    def test_public_progress_tiebreak_is_invariant_to_hidden_world(self):
+        game = XiamenMahjongGame(seed=202638211, rules=XiamenRules.classic())
+        agent = PublicProgressTieBreakTeacherAgent()
+        player_id = game.current_player
+        first = copy.deepcopy(game)
+        second = copy.deepcopy(game)
+        opponent = next(
+            player for player in game.players if player.seat != player_id
+        )
+        other = next(
+            player for player in second.players if player.seat == opponent.seat
+        )
+        other.hand = list(reversed(other.hand))
+        second.wall = list(reversed(second.wall))
+        self.assertEqual(
+            agent.explain_discard(first, player_id)[0]["tile"],
+            agent.explain_discard(second, player_id)[0]["tile"],
+        )
 
     def test_public_state_marks_the_current_drawn_tile(self):
         game = XiamenMahjongGame(seed=71, rules=XiamenRules.classic(), dealer=0)

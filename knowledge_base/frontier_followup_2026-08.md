@@ -3,17 +3,21 @@
 调研日期：2026-08-06。本文补充已有的《麻将 AI 前沿与开源实现》，重点回答：当前项目该借鉴什么、
 不该过早做什么，以及下一轮工程投入的顺序。
 
+> **2026-08-08 更新：** 本文的 belief/Q/AWR 内容保留为研究记录，不再是当前执行前置。
+> 当前机器与数据条件下，执行以[资源受限训练计划](research/technical_routes/resource_constrained_training_plan_2026-08-08.md)为准。
+
 ## 结论先行
 
-当前不应直接上 Deep CFR、全局 MCTS 或更大的 Transformer。最有价值的工作依次是：
+当前不应直接上 Deep CFR、全局 MCTS、Transformer、belief search 或完整自博弈。最有价值的工作依次是：
 
-1. 让反事实 rollout 能批量、高吞吐且精确复放；
-2. 以**完整公开历史**做顺序粒子过滤，构造可审计的信息集价值目标；
-3. 保留动作价值的分布/不确定性，再以保守的 AWR 离线更新策略；
-4. 在数据规模足够后，再做事件序列 Transformer、动作分层和有限深度的 belief search。
+1. 从现有 20,000 副 Teacher 墙中挖掘低 margin 和策略分歧，不再扩大同源模仿数据；
+2. 为一个自然覆盖率足够的错误类别建立只读公开信息的 `SlowExpertTeacher` 局部 oracle；
+3. 使用固定公开历史摘要，比较 linear、GBDT 和不超过约 50 万参数的小 MLP residual；
+4. 只允许 1%–5% 高置信 override，其余严格回退 Teacher，再用 100/400 墙验证。
 
 这是因为现有候选网络的 Q 头在留出集上的排序仍不稳定；在这种前提下直接用 `argmax Q`
-选牌，或用其驱动 PPO，只会放大目标噪声。当前更缺的是可信标签与样本量，而非表达能力。
+选牌，或用其驱动 PPO，只会放大目标噪声。项目当前缺的是 Teacher 之外的少量可信改进标签，
+而不是更大的表达能力或更多同源样本。
 
 ## 2026-08-07：联赛与当前快照自博弈补充
 
@@ -36,7 +40,7 @@ checkpoint 混合；不得共享梯度，也不得因为训练回报提升而晋
 | [MahJax](https://arxiv.org/abs/2605.20577) / [源码](https://github.com/nissymori/mahjax) | JAX 向量化 `reset/observe/step` 环境，支持 BC 与 PPO；其论文以大规模 GPU 并行训练为重点。 | 借鉴批量环境接口、合法动作掩码和吞吐优先的架构；不移植日麻规则或权重。先在既有厦门引擎外建立批量 rollout 调度层，而非重写规则引擎。 |
 | [Mortal](https://github.com/Equim-chan/Mortal) / [训练文档](https://mortal.ekyu.moe/) | Rust 模拟器、批量推理、offline/online 训练分段。 | 仅研究部署与训练编排。项目采用 AGPL-3.0，不能复制代码或混入源码；若未来想复用，必须先由项目方接受相应许可证义务。 |
 | [Mortal-Policy](https://github.com/Nitasurin/Mortal-Policy) | 离线 AWR（可选 BPPO）后，再用带重要性校正、PPO clip 的 online policy gradient。 | 借鉴“先保守离线、后在线”的顺序。对本项目，AWR 必须以不确定性合格的动作价值为权重，并保留 Teacher/DAgger 的行为克隆锚点；不能从当前低质量 Q 头直接切换。该项目同为 AGPL。 |
-| [Tjong](https://www.researchwithnj.com/en/publications/tjong-a-transformer-based-mahjong-ai-via-hierarchical-decision-ma/) | 将动作类别和牌目标分层，并以 Transformer 表示决策历史。 | 以后在候选动作排序器上增加“动作类别/目标牌”的辅助头；数据到达至少数十万条高质量决策前，不重试大 Transformer。规则引擎仍是最终合法性约束。 |
+| [Tjong](https://www.researchwithnj.com/en/publications/tjong-a-transformer-based-mahjong-ai-via-hierarchical-decision-ma/) | 将动作类别和牌目标分层，并以 Transformer 表示决策历史。 | 只迁移动作类别/目标牌分层思想；当前机器不重试 Transformer。规则引擎仍是最终合法性约束。 |
 | [History Filtering in Imperfect Information Games](https://arxiv.org/abs/2311.14651) | 用历史上的策略到达概率更新隐藏世界；一般情形下由公开状态直接重建历史很困难，建议采样/过滤。 | 这直接否定了“只按最近弃牌重洗未知牌”即可得到真实后验的想法。应先实现从发牌到当前的顺序粒子过滤，并在小玩具规则上做精确后验校验。 |
 | [ReBeL](https://arxiv.org/abs/2007.13544) / [Student of Games](https://arxiv.org/abs/2112.03178) | public belief、价值网络与搜索结合。 | 公共历史/信念状态的表示值得采用；两人零和的理论保证不能外推到四人一般和厦门麻将。不能据此宣称纳什收敛，也不应现在照搬 CFR。 |
 | [Progressive Hiding](https://arxiv.org/abs/2409.03875) | 先在更多信息可见的阶段学习游戏机制，再逐步增加信息约束；论文给出与 CFR/非完全记忆相关的理论与小型数值验证。 | 它提供了“不把尚未校准的完整 posterior 直接塞进 actor”的替代课程思路。仅可作为隔离的 core toy→训练期特权→可见 student 消融；不能把论文的小型交易博弈结果外推为四人厦门麻将保证。 |
@@ -101,14 +105,15 @@ Teacher/DAgger 的交叉熵必须保留，避免策略走出已有对手/规则�
 
 ### 4. 数据量足够后再提升表征和搜索
 
-当存在至少约 20 万条由上述 belief/Q 管线产生的、按物理牌墙隔离的决策，才进行以下消融：
+即使未来存在更多 belief/Q 决策，当前机器也只进行紧凑模型消融：
 
 - 候选排序 MLP 加动作类别、目标牌、多任务风险头；
-- 公开事件序列 Transformer，显式编码谁做了什么与时间间隔；
+- 公开历史压缩为确定性的计数、巡次、副露和最近 4–8 个动作定长编码；
 - 以冻结 value/风险网络为叶节点的 1--2 层 belief rollout 或有限深度搜索；
 - 通过后，才尝试 league + KL anchor 的小步 PPO。
 
-所有门槛是工程决策，不是从论文得出的普适阈值；数据质量优先于层数和参数量。
+2026-08-08 的资源计划进一步冻结了后两项：在 compact gated hybrid 通过 400 墙以前，不实施 belief search、
+league 或 PPO。所有门槛是工程决策，不是从论文得出的普适阈值；数据质量优先于层数和参数量。
 
 ## 2026-08-07：belief proposal 连续反证后的路线更新
 

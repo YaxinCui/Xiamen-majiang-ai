@@ -1,7 +1,7 @@
 # 棋牌 AI 开源工程地图（2026-08）
 
 本页只记录接口、测试和训练工程的可借鉴点。未在本仓库完成许可证审计、规则映射和隐藏信息审计前，**任何外部代码、权重、
-牌谱都不得复制或混入训练数据**。访问日期为 2026-08-07。
+牌谱都不得复制或混入训练数据**。访问日期为 2026-08-07，最近更新：2026-08-08。
 
 ## 第一层：优先阅读的工程模式
 
@@ -23,6 +23,28 @@
 | [Akagi](https://github.com/shinkuan/Akagi) | 实时分析器、对局可视化与统计展示。 | 可启发网页复盘/调试体验；不作为训练策略来源。 |
 | [MahjongRepository/mahjong](https://github.com/MahjongRepository/mahjong) | 日麻牌型、向听/和牌等通用算法的工程参考。 | 每一项数学/规则假设须单独验证，不把它当厦门判定器。 |
 | [mahjax](https://github.com/nissymori/mahjax) | JAX/GPU 加速麻将 simulator 的近期探索。 | 仅跟踪吞吐架构；当前未完成其规则与许可证审计。 |
+| [SuuTTT/IJCAI-mahjong](https://github.com/SuuTTT/IJCAI-mahjong) | 2026 国标麻将竞赛工程记录了三种子模仿集成、duplicate 评测、JAX 环境 parity，以及多条搜索／RL 负结果。 | commit `6908486...` 根目录无整体许可证；规则为 MCR。只借鉴实验设计，不复制代码、权重、数据或标签。 |
+
+### IJCAI-2026 工程卡：为什么它重要但不能直接接入
+
+```text
+source_url: https://github.com/SuuTTT/IJCAI-mahjong
+commit_or_release: 690848613f34b3ebc0a3547070497e07526c81ea
+license: repository-wide license not found; README says PyMahjongGB is MIT and upstream official assets are unspecified
+copied_or_reimplemented_files: none
+rule_differences: MCR, 8-fan floor, 13/14-tile flow and 235 actions; no Xiamen gold/tour/follow/flower semantics
+actor_visible_fields: not accepted or mapped
+training_only_fields: raw corpora may include walltiles, srand, final scores and identity fields
+test_vectors_compared: none, because rules are incompatible
+benchmark_command: none run locally; documentation-only audit
+```
+
+最值得保留的是其负结果：在强模仿锚点附近，value／Q、PIMC、belief weighting、AWBC 和早期自博弈 RL 都可能只产生小样本
+假阳性；扩大到 200 局或更大的 duplicate 复核后消失。其已部署方案仍是三个独立模仿网络的合法动作均值集成。这不是“神经网络
+无效”，而是说明当策略已贴近数据分布时，**数据上限、环境正确性和独立评测比增加算法名词更关键**。
+
+对本项目的直接动作是：保留 100 墙日常筛选，但正式晋级继续使用独立牌墙和置信区间；候选至少进行多种子稳定性检查；训练前先做
+计分、和牌、合法动作和观察泄漏的黄金测试；在人类盲评仍为零标签时，不开启新的大模型或 RL 长跑。
 
 ## 第三层：本项目的接入门槛
 

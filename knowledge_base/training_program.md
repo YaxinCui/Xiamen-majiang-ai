@@ -12,6 +12,21 @@ MLP 和游金课程。当前 MLP 的 Teacher 动作一致率不能视为实战�
 两者均只保留为历史可复核实验，不能作为默认、数据 Teacher 或新训练的“最强基线”。后续不得再把“更高的
 混合轨迹动作一致率”当作选择 checkpoint 的依据；新候选必须先在未参与调参的牌墙上通过正向下界。
 
+后续候选的依赖、成功前提、失败模式和停止门槛统一参考
+[《厦门麻将深度训练：问题分解、推理链、候选与失败路线》](research/technical_routes/xiamen_deep_training_route_space_2026-08.md)。
+
+## 2026-08-08 资源约束决策
+
+当前执行计划以[《厦门麻将 AI 资源受限训练计划》](research/technical_routes/resource_constrained_training_plan_2026-08-08.md)为准：
+
+- 不再训练 Transformer、attention 或完整历史 GRU；
+- 不再扩大同源 Teacher 百万级模仿数据；
+- 模型限制为 linear、GBDT 或不超过约 50 万参数的 candidate MLP；
+- 历史使用确定性统计摘要和最近 4–8 个动作定长编码；
+- 先建立只分析困难分歧状态的 `SlowExpertTeacher`，再训练 1%–5% override 的 gated residual；
+- 单次快速训练目标不超过 30 分钟，一个候选族不超过 2 GPU 小时；
+- PPO、VRPO、league、belief search 和 CFR 只保留为远期知识，不占用当前机器训练预算。
+
 ## 目标架构
 
 ```text
@@ -32,25 +47,18 @@ MLP 和游金课程。当前 MLP 的 Teacher 动作一致率不能视为实战�
 | A. 可重复评测 | MLP/Teacher/随机策略在固定种子、四座轮换下自动打完；支持固定三人对手阵容。 | 零非法动作、零安全循环超限、每局可回放；先跑 400 个以上配对局。候选与参考必须使用同一阵容标签。 | 先修规则/代理接口，禁止调参。 |
 | B. 强监督 | PyTorch 多头策略—价值网络；Teacher 与经授权人类牌谱混合训练。 | 与 Teacher 的保留集动作一致率提高，且 A 的净得分置信区间不劣于 Teacher。 | 检查特征、动作类别与样本覆盖；补游金/杠/响应课程。 |
 | C. DAgger | 候选一席对三名冻结 Teacher；Teacher 标注候选实际访问到的状态。 | 同一副牌墙的四座轮换必须在同一数据分区；每轮都在独立种子上评测。 | 提高 Teacher 占比或对罕见规则过采样。 |
-| D. 动作价值改进 | 候选一席访问真实部署局面；对每个合法动作反事实 rollout 到结算，学习 `Q^π(s,a)` 的软偏好。 | 四座轮换同组切分；目标只导出本家/公开观察与动作分数；批量/串行在固定分支上精确等价；动作价值留出集不少于 32 条，最终仍在全新牌墙配对。 | 先提高 rollout 吞吐和 belief world 数，再扩大冻结对手池或降低高方差目标权重；禁止把一次分支结果当 oracle。 |
-| E. 自博弈 RL | actor-critic / PPO，动作掩码；先单局净得分，后多局累计分差。 | 相对 Teacher **和**固定异质阵容的换座配对评测均须通过正向下界；标准误按同一牌墙的四座轮换聚合。 | 回滚到最佳冻结检查点；检查 reward 与 opponent pool。 |
-| F. 规模化 | 纯函数批量环境、GPU rollout、对手池和检查点联赛。 | 吞吐、规则回放和结果统计均可复现。 | 先保持 CPU DAgger，不为 GPU 重写未验证规则。 |
+| D. SlowExpertTeacher | 只在 Teacher 低 margin/分歧状态运行公开信息局部精确 oracle。 | 一个自然覆盖率足够的错误类别；分歧 held-out 有正向下界；与已失败规则有结构性差异。 | 找不到可验证类别时停止神经提升，保留现有 Teacher。 |
+| E. 紧凑 gated residual | linear、GBDT 或 hidden 64/128 小 MLP；只学习 SlowExpertTeacher 相对 Teacher 的差异。 | 参数≤约50万；1%–5% override；规则桶无回归；100 墙正下界后才做 400 墙。 | gate 外严格回退 Teacher；失败候选不增加网络或 epoch。 |
+| F. 轻量 DAgger | 只收集 override/门控边界状态，使用 SlowExpertTeacher 或经授权人类标签。 | 最多两轮、每轮约500–1,000墙；分歧 held-out 与实战均改善。 | 两轮无改善即停止；不进入完整自博弈。 |
 
 ## 模型演进
 
-1. **v1（已完成）**：76 维候选动作 MLP，模仿 Teacher，零依赖。
-2. **v1.1（进行中）**：80 维候选动作 MLP，增加本家可见的候选弃牌后牌效与听牌前瞻；
-   先通过换座评测验证其是否减小与 Teacher 的差距。
-3. **v2（已完成首版）**：PyTorch policy-value 网络。输入含本家手牌计数、四家河、公开副露、
-   金/白板代理、花、墙余、座位/庄家、游金与锁定状态、最近动作序列。输出为候选动作
-   分数、局内净得分价值、胜率/放铳风险等辅助预测。
-4. **v3（已做首轮反证）**：Transformer 与从 MLP 迁移的序列残差均能编码按时间排序的
-   公开事件，却未通过独立实战评测。下一次只在更大 online 数据、冻结对手池和严格
-   checkpoint 选择下重试；候选动作仍由规则引擎生成。
-5. **v4（进行中）**：反事实动作价值蒸馏。私有模拟状态只用于运行分支并生成终局分数，
-   导出与 actor 输入仍仅包含本家手牌及公开信息；策略头拟合每个合法动作的软偏好，而非
-   单一 Teacher 标签。仅当独立配对收益通过时才接受。
-6. **v5**：在通过 v4 验收的冻结候选上，做小规模 self-play PPO 与 frozen-opponent league。
+1. **规则基线（当前正式版本）**：冻结 `HeuristicTeacherAgent`，仍是网页和强度比较事实源。
+2. **紧凑 MLP 模仿（已反证为强度路线）**：可以高准确率复制 Teacher，但没有证明超过 Teacher；只保留为模型接口和压缩基线。
+3. **序列模型（已退休）**：短序列版本未通过；full-history Transformer 在 84,538 个测试决策上达到 98.72% Teacher 一致率，但只证明模仿，且训练接近 3 小时。按资源政策不做实战、不重试 GRU/Transformer。
+4. **动作价值/OPE（当前固定族已否决）**：单隐藏世界 Q、local belief、logged outcome、原始/缩减 DR 都没有形成可部署优势；不继续调同族阈值。
+5. **下一版本：SlowExpertTeacher + compact gated residual**：历史使用固定摘要；linear/GBDT/小 MLP 只修正一个经验证的 Teacher 错误类别。
+6. **远期可选**：只有 gated hybrid 先通过 400 墙，才重新评审轻量 DAgger 之后的局部 RL；当前不规划完整 PPO 或联赛。
 
 ## 数据集与奖励
 
@@ -97,6 +105,19 @@ MLP 和游金课程。当前 MLP 的 Teacher 动作一致率不能视为实战�
 若任一 split 缺少人类轨迹，训练器同样拒绝，以免把人类训练集与 Teacher 验证集混用后把动作准确率误当成人类泛化；
 三份人类 split 仍须由完整牌局、且不得重复的记录构成。
 人类终局分数暂不进入 value 回归：这些有限的、单一对手配置的行为记录可以监督行动，但不足以当作稳健的状态价值真值。
+
+2026-08-08 起，新记录还保存同一合法集合下 frozen `heuristic_teacher_v1` 的 `reference_teacher_index`。它不是
+观察特征，也不替换真人 `chosen_index`；只用于识别真人真正偏离 Teacher 的局部纠错样本。聚合门槛为至少 100 局、
+500 个可表示普通弃牌参考决策、其中 50 个弃牌分歧，且所有真人动作参考覆盖 100%。响应/胡/杠分歧不计入该门槛。
+训练器的 `--human-teacher-disagreement-weight` 默认 1.0；首轮协议在
+读数据前固定为 2.0，不做权重网格。best epoch 只看 `local_human_opt_in` validation，随后以整局分组的 1%/2%/5%
+低覆盖 gate 选门；evaluation 记录仍被训练入口硬拒绝。完整协议见 `human_teacher_correction_v1_protocol.md` 和
+`human_teacher_residual_gate_v1_protocol.md`。
+此外，training/evaluation 记录模式会在服务端强制关闭 AI 暗手调试；审计要求
+`opponent_hand_reveal=server_forced_disabled`。这防止“文件里没有暗手，但人类决策时看过暗手”的隐性标签泄漏。
+模型训练使用 `--reserve-local-human-test-for-gate`，只允许人类 train/validation；任何人类 test 参数都会报错。
+因此 gate validation 未通过时，终检文件不仅不参与梯度或 early stop，而且其内容从未被训练进程打开。
+`--human-discard-corrections-only` 进一步保证真人训练行与部署 gate 同域，其他动作继续由 Teacher 语料维护。
 
 ### 全历史 belief 的当前工程门槛（2026-08-07）
 
@@ -247,7 +268,7 @@ selection/terminal 随机干预为 **3,673/931/693/787**，selection 未达到�
 `rules_profile`、`dataset_manifest.json` 与按种子汇总的配对评测。原始大体量轨迹可置于
 Git 忽略目录或对象存储；可发布检查点应小、可加载、并带足够元数据复现。
 
-## 最近执行顺序
+## 历史执行顺序（截至 2026-08-07）
 
 1. 实现全自动换座配对评测，并用已提交 MLP 得到第一份对 Teacher 的实战基线。
 2. 将 MLP 作为可切换网页 AI 接入，保留 Teacher 回退。
@@ -267,5 +288,65 @@ Git 忽略目录或对象存储；可发布检查点应小、可加载、并带�
 8. 已补入反事实分支的可选批量调度：只批量合并实现 `scores_batch` 的冻结策略推理，规则状态、
    RNG、动作掩码与结算仍逐分支隔离。下一项工程任务是以此吞吐基础实现并校准顺序粒子 belief，
    而不是立即训练更大网络。
-9. v4 扩展语料现已通过 20,000 副真实 Teacher 牌墙的安全审计；下一项只训练显式读取完整公开前缀的
-   160 事件 Transformer。训练器采用有界随机缓冲流式读取，不能因内存压力而偷偷降回短历史或删减留出集。
+9. v4 扩展语料已通过 20,000 副真实 Teacher 牌墙的安全审计；full-history Transformer 也已完成并达到
+   98.72% test Teacher 一致率，但按 2026-08-08 资源决策退休，不做实战。下一项不是序列模型，而是从现有数据
+   提取 Teacher 低 margin/分歧状态，建立 SlowExpertTeacher 单类 oracle，再比较 linear、GBDT 和小 MLP residual。
+
+## 2026-08-08 当前执行顺序
+
+1. 使用已冻结的 600 题、443-group 低分歧 actor-visible 题库，独立人工审阅；提交前隐藏 Teacher 与 SlowExpert，
+   `uncertain` 不训练。离线 TwoDraw 候选只把其与 Teacher 分歧的 51 题提前，不是真值；部分完成样本不得估计总体错误率。
+2. 达到 500 confirmed、50 个 Teacher 分歧、100 个 group 后，按物理牌局 group 做 80/10/10 切分。
+3. 只训练 fresh feature-v3 candidate MLP（hidden 128、CPU、12 epoch）；人工 review 只提供 policy target，不伪造 value。
+4. validation 在预声明 10%/20%/30% 覆盖中选 discard-only gate；未通过时 review test 保持物理未读。
+5. test 通过后跑全新 100 墙四座轮换；paired 95% 下界大于 0 才跑 400 墙。
+6. 若审阅 gate 失败，按错误类别复盘标签：只有能用公开信息稳定定义的类别才实现 `SlowExpertTeacher` 局部 oracle，
+   再比较 linear/GBDT/hidden 64 或 128 小 MLP；不得回到已失败的一步前瞻或全局风险调参。
+7. 只有 400 墙确认超过 Teacher，才允许最多两轮轻量 DAgger；当前不实施 Transformer、PPO、VRPO 或联赛。
+
+响应补充：精确向听吃碰词典序已在全新 100 墙得到 −0.5175、95% CI `[−1.6406,+0.6056]`，未通过。不得把其
+23 个覆盖动作当标签。独立 actor-visible pass/chi/pong 审阅题库现为 400 题／319 groups、人工标签 0；先达到
+300 confirmed、50 分歧、100 groups，再按 group 80/10/10 切分。固定后继是 fresh feature-v3 candidate MLP、
+hidden 128、CPU、12 epoch，响应标签权重 4、分歧再乘 2，仅按响应 validation 选 checkpoint；训练器没有 response
+test 参数。validation 在 10%/20%/30% 覆盖中选门，未过则 test 物理未读；通过 test 也仅解锁全新 100/400 墙，
+不得直接替换 Teacher 或宣称超过人类。
+
+最新自动候选边界（2026-08-08）：TwoDraw v1 的 100 墙点估计 `+1.335`、首分歧二元干预 HT `+1.945`、
+exact-DP 确认 v2 `+0.425` 均未得到严格正下界；v2 在 184 个近似 proposal 中只确认 102 个且耗时 33.86 分钟，
+故整个 TwoDraw 代理族冻结，不蒸馏、不产标签。游金升级在已审计语料中只有合成课程、自然覆盖 0；不能据此构造
+强度候选。首杠随机干预只有 65 次、未达 100 次门槛，且 `skip-kan − Teacher-kan` 点估计 −3.705，三种杠方向
+均不支持减少杠，故同样停止。
+
+抚州源码级复核后新增的两条保守规则也已关闭：向听 v1 的 70 个 proposal 全部牺牲公开有效进张，Pareto v2 因而
+0 override；完全并列 `shanten/ukeire` Pareto 则高覆盖 814/3,318，却在全新 100 墙均分 −0.08、95% CI
+`[-3.563,+3.403]`，且慢 60.46 倍。它证明 Teacher 约一半弃牌最高分存在完全并列，但“更多公开进张”不是厦门的
+可靠长期 tie-break 真值。不要继续扫进张权重、风险项、巡数门控或用网络蒸馏这些自动动作。
+
+在没有新的厦门真人标签前，下一项**训练**仍是两套现成人工盲审入口，而不是继续创造局部牌效 proxy：弃牌 queue
+需要 500 confirmed/50 分歧/100 groups，响应 queue 需要 300/50/100；当前两者均为 0。后续强度筛选按用户约定以
+100 个新物理墙为常规预算，不因点估计为正自动追加 400 墙。自动化工作可继续提升采集体验、审计和小 residual
+训练吞吐，但不得让 AI 自己填写“真人”标签。
+
+为降低完整弃牌选择负担，新增优先数据入口：完全并列匿名二选一 queue 为 227 题／227 groups，端口 51863。它只问
+Teacher 默认牌与一个完全同分替代牌的相对偏好；门槛为 100 confirmed、20 个非 Teacher 偏好、75 groups。通过后
+训练 fresh feature-v3 hidden-64 CPU MLP，损失只比较展示动作对，validation 选 epoch且 test 不读。该路径比 500 题
+全动作审阅更快，但只能学习 exact-tie pair，不能替代吃碰响应或长期 value 数据；当前同样为 0 标签。
+
+自动 exact-tie residual 也已完成并冻结：900 墙单自然暗手配对标签的 feature-v3 ensemble 在 validation 为 −1.418；
+增加显式结构／精确向听／公开余牌的 feature-v4 在新 100 墙为 +0.075；500 墙、每状态四个未来墙序平均后为 −0.091，
+三者 95% 下界均未过 0。最有希望的 v2 又做全新 100 墙 0.5/0.5 第一次分歧干预，229 次干预 HT 为 −5.210，
+95% CI `[-11.311,+0.891]`。不得继续扩大 exact-tie source-world 数据、未来牌序数、hidden size 或改变 ensemble
+一致阈值；final test 保持未解析，网页继续 frozen Teacher。feature-v4 可复用于未来不同标签源，但自身不是强度证据。
+
+响应因果错误地图补充：已有 v2 train 随机干预给出 `pong→pass` −8.913、95% CI
+`[-16.091,-1.735]`，不再研究统一少碰；唯一 `chi→pass` 候选在独立 validation 虽为 +7.406，但 conditional 区间
+`[-6.905,+21.718]`，全部位置区间也跨零。按预注册不收集 targeted 数据、不读取 response terminal、不训练响应 gate。
+自动响应规则路线暂时关闭；在没有真人标签时，下一自动方向应审计 Teacher-anchored 小模型／自博弈的退化机制，而不是
+继续添加吃碰牌效 proxy。
+
+Teacher-anchored 退化机制现已完成：旧 margin-5 prior 比八轮 PPO 学到的最大 residual gap 大约 3,000 倍。改用强
+Teacher-clone 小 MLP、冻结训练起点 reference KL 和独立 policy-head 学习率后，4,096 局确实产生 `1.0415%` argmax
+分歧且 KL 受控，说明“actor 完全不动”已修复；但唯一全新 100 墙相对 Teacher 为 −0.135，95% CI
+`[-1.9748,+1.7048]`，仍未通过。该配置不扩大至 250,000 局，也不能复用选择墙调 PPO 参数。下一自动路线若没有新真值
+或新的信用分配机制，不得仅把同一终局 PPO 放大；优先级重新回到真实人工纠错数据，或一条先在训练／validation 独立
+证明 target 信噪比的新候选路线。

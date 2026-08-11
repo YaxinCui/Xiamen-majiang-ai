@@ -23,3 +23,10 @@
 
 点估计为正但置信区间跨 0，只能写“未证实更强”；区间下界严格为正，才可以进入下一层筛选。
 模仿准确率、训练 loss、单局胜负和候选自博弈分数都不能单独替代同墙四座评测。
+
+## 真人终评口径
+
+真人 evaluation 只允许用于已经冻结且通过 Teacher 确认的候选，不能回流训练或选模。一名真人对三张相同 AI 座位时，
+三 AI 席合计分为 `-human_score`，单个 AI 座位平均只能报告 `-human_score/3`；符号相同但幅度不同。session 只是等权
+统计区块，不自动等价于独立参与者。详见
+[`human_strength_benchmark_v1_protocol.md`](../../human_strength_benchmark_v1_protocol.md)。

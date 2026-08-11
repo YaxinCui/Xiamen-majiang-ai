@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 import tempfile
 import threading
@@ -9,7 +10,9 @@ from urllib.request import Request, urlopen
 from xiamen_mahjong.agents import HeuristicTeacherAgent
 from xiamen_mahjong.human_data import (
     audit_local_human_evaluation,
+    audit_local_human_teacher_corrections,
     audit_local_human_trajectories,
+    is_eligible_human_teacher_discard_correction,
     require_local_human_training_approval,
     split_local_human_trajectories,
 )
@@ -37,20 +40,45 @@ class WebTests(unittest.TestCase):
         self.assertEqual(state["rules"]["profile"], "classic")
         self.assertIn("classic", [profile["id"] for profile in state["rule_profiles"]])
         self.assertEqual(state["local_human_recording"]["scope"], "disabled")
+        self.assertTrue(state["debug_ai_hands_allowed"])
 
     def test_debug_state_explicitly_reveals_ai_hands(self):
         with urlopen(f"{self.base_url}/api/game?debug=1") as response:
             state = json.load(response)
         self.assertTrue(all(player["hand"] for player in state["players"][1:]))
 
+    def test_recording_forces_hidden_opponents_but_manual_rule_debug_stays_available(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = GameStore(
+                human_log=Path(directory) / "human.jsonl",
+                human_recording_purpose="training",
+            )
+            recorded_state = store._public_state(reveal_ai_hands=True)
+            self.assertFalse(recorded_state["debug_ai_hands_allowed"])
+            self.assertTrue(
+                all(
+                    player["hand"] is None
+                    for player in recorded_state["players"][1:]
+                )
+            )
+            store.new_game(
+                seed=202608073,
+                rules_profile="classic",
+                reset_match=True,
+                table_mode="four_player_manual",
+            )
+            manual_state = store._public_state(reveal_ai_hands=True)
+            self.assertTrue(manual_state["debug_ai_hands_allowed"])
+            self.assertTrue(all(player["hand"] for player in manual_state["players"]))
+
     def test_static_page_is_served(self):
         with urlopen(f"{self.base_url}/") as response:
             page = response.read().decode("utf-8")
         self.assertIn("厦门麻将", page)
-        self.assertIn("隐藏 AI 手牌（调试）", page)
+        self.assertIn("显示 AI 手牌（调试）", page)
         with urlopen(f"{self.base_url}/app.js") as response:
             script = response.read().decode("utf-8")
-        self.assertIn("let debugAiHands = true;", script)
+        self.assertIn("let debugAiHands = false;", script)
 
     def test_rules_guide_page_is_served(self):
         with urlopen(f"{self.base_url}/guide.html") as response:
@@ -159,12 +187,40 @@ class WebTests(unittest.TestCase):
                 ai_identity="sha256:test",
             )
             store.new_game(seed=1, rules_profile="classic", reset_match=True)
+            debug_state = store._public_state(reveal_ai_hands=True)
+            self.assertFalse(debug_state["debug_ai_hands_allowed"])
+            self.assertTrue(
+                all(player["hand"] is None for player in debug_state["players"][1:])
+            )
+            reference = HeuristicTeacherAgent().choose_turn_action(
+                store.game, store.game.human_seat
+            )
             action = next(
                 candidate
                 for candidate in store.game.human_actions()
-                if candidate["kind"] == "discard"
+                if (
+                    candidate["kind"],
+                    candidate.get("tile"),
+                    tuple(candidate.get("tiles", [])),
+                )
+                != (reference.kind, reference.tile, reference.tiles)
             )
-            store._human_decisions.append(store._capture_human_decision(action))
+            captured = store._capture_human_decision(action)
+            self.assertTrue(
+                is_eligible_human_teacher_discard_correction(captured)
+            )
+            self.assertFalse(
+                is_eligible_human_teacher_discard_correction(
+                    replace(
+                        captured,
+                        state={**captured.state, "phase": "response"},
+                    )
+                )
+            )
+            self.assertNotEqual(
+                captured.reference_teacher_index, captured.chosen_index
+            )
+            store._human_decisions.append(captured)
             store._human_score_start = (10, -4, -3, -3)
             for player, score in zip(store.game.players, (26, -12, -7, -7)):
                 player.score = score
@@ -197,6 +253,18 @@ class WebTests(unittest.TestCase):
                 "sha256:test",
             )
             self.assertEqual(
+                record["source_metadata"]["opponent_hand_reveal"],
+                "server_forced_disabled",
+            )
+            self.assertEqual(
+                record["source_metadata"]["reference_policy"],
+                "heuristic_teacher_v1",
+            )
+            self.assertEqual(
+                record["source_metadata"]["reference_label"],
+                "same_state_frozen_teacher_action_index",
+            )
+            self.assertEqual(
                 record["agent_profiles"],
                 [
                     "local_human_opt_in",
@@ -207,14 +275,42 @@ class WebTests(unittest.TestCase):
             )
             decision = record["decisions"][0]
             self.assertEqual(decision["chosen_index"], decision["executed_index"])
+            self.assertNotEqual(
+                decision["reference_teacher_index"], decision["chosen_index"]
+            )
             self.assertNotIn("wall", decision["state"])
             self.assertNotIn("opponent_hands", decision["state"])
             self.assertTrue(store._public_state()["local_human_recording"]["enabled"])
+            recording_state = store._public_state()["local_human_recording"]
+            self.assertEqual(recording_state["session_completed_hands"], 1)
+            self.assertEqual(
+                recording_state["session_eligible_discard_decisions"], 1
+            )
+            self.assertEqual(recording_state["session_discard_disagreements"], 1)
             audit = audit_local_human_trajectories([output], minimum_hands=1)
             self.assertTrue(audit["ready_for_manual_review"])
             self.assertEqual(audit["valid_hands"], 1)
             self.assertEqual(audit["opponent_policies"], {"sha256:test": 1})
             self.assertEqual(audit["recording_purposes"], {"training": 1})
+            reference_summary = audit["reference_teacher_summary"]
+            self.assertEqual(reference_summary["decisions_with_reference"], 1)
+            self.assertEqual(reference_summary["disagreements"], 1)
+            self.assertEqual(
+                reference_summary[
+                    "eligible_ordinary_discard_reference_decisions"
+                ],
+                1,
+            )
+            self.assertEqual(
+                reference_summary[
+                    "eligible_ordinary_discard_disagreements"
+                ],
+                1,
+            )
+            self.assertEqual(
+                reference_summary["reference_policies"],
+                {"heuristic_teacher_v1": 1},
+            )
             summary = audit["human_match_summary"]
             self.assertEqual(summary["scope"], "structurally_valid_completed_hands_only")
             self.assertEqual(summary["hands"], 1)
@@ -303,6 +399,73 @@ class WebTests(unittest.TestCase):
             self.assertFalse(split_group_sets["train"] & split_group_sets["test"])
             self.assertFalse(split_group_sets["validation"] & split_group_sets["test"])
 
+            correction_audit = audit_local_human_teacher_corrections(
+                [split_input],
+                minimum_hands=100,
+                minimum_reference_decisions=100,
+                minimum_disagreements=50,
+            )
+            self.assertTrue(
+                correction_audit["ready_for_teacher_residual_experiment"]
+            )
+            self.assertEqual(
+                correction_audit["correction_summary"]["teacher_disagreements"],
+                100,
+            )
+
+            from scripts.train_policy_value import load_examples
+
+            human_examples = load_examples(
+                split_input,
+                SimpleNamespace(
+                    allow_local_human_data=True,
+                    feature_version=3,
+                    history_window=24,
+                    full_public_history=False,
+                    value_scale=80.0,
+                    human_weight=1.0,
+                    human_teacher_disagreement_weight=3.0,
+                    human_discard_corrections_only=True,
+                    exploration_weight=0.35,
+                    synthetic_weight=1.0,
+                    action_value_weight=1.0,
+                    action_value_margin_scale=0.0,
+                    action_value_stderr_scale=0.0,
+                ),
+            )
+            self.assertEqual(len(human_examples), 100)
+            self.assertTrue(
+                all(example.sample_weight == 3.0 for example in human_examples)
+            )
+            noneligible_input = Path(directory) / "noneligible-human.jsonl"
+            noneligible_record = json.loads(json.dumps(record))
+            noneligible_record["trajectory_id"] = "noneligible-response"
+            noneligible_record["split_group_id"] = "noneligible-response"
+            noneligible_record["decisions"][0]["state"]["phase"] = "response"
+            noneligible_input.write_text(
+                json.dumps(noneligible_record, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            filtered = load_examples(
+                noneligible_input,
+                SimpleNamespace(
+                    allow_local_human_data=True,
+                    feature_version=3,
+                    history_window=24,
+                    full_public_history=False,
+                    value_scale=80.0,
+                    human_weight=1.0,
+                    human_teacher_disagreement_weight=3.0,
+                    human_discard_corrections_only=True,
+                    exploration_weight=0.35,
+                    synthetic_weight=1.0,
+                    action_value_weight=1.0,
+                    action_value_margin_scale=0.0,
+                    action_value_stderr_scale=0.0,
+                ),
+            )
+            self.assertEqual(filtered, [])
+
             # A frozen-AI human benchmark must be recorded evaluation-only;
             # this purpose is rejected by both training approval and the
             # hand splitter, but may be summarized by the strength auditor.
@@ -340,6 +503,18 @@ class WebTests(unittest.TestCase):
                 evaluation["comparison"]["ai_side_score_delta_95pct_low"], 16.0
             )
             self.assertTrue(evaluation["comparison"]["positive_ai_side_lcb"])
+            self.assertEqual(evaluation["comparison"]["ai_roster_size"], 3)
+            self.assertAlmostEqual(
+                evaluation["comparison"]["ai_per_seat_score_delta_mean"],
+                16.0 / 3.0,
+            )
+            self.assertAlmostEqual(
+                evaluation["comparison"]["ai_per_seat_score_delta_95pct_low"],
+                16.0 / 3.0,
+            )
+            self.assertTrue(
+                evaluation["comparison"]["positive_ai_per_seat_lcb"]
+            )
             insufficient_sessions = audit_local_human_evaluation(
                 [evaluation_input], minimum_hands=100, minimum_sessions=11
             )
