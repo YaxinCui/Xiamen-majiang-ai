@@ -9,7 +9,7 @@ from typing import Any
 from .agents import GameAction, HeuristicTeacherAgent
 from .hand import is_travelling_ready, is_winning_hand, wait_tiles, winning_pattern
 from .rules import XiamenRules
-from .scoring import classic_score
+from .scoring import classic_score, new120_score
 from .tiles import (
     BASE_TILE_COUNT,
     WHITE_DRAGON,
@@ -91,7 +91,7 @@ class XiamenMahjongGame:
         self._setup()
 
     def _setup(self) -> None:
-        self.wall = base_wall()
+        self.wall = base_wall(include_honors=self.rules.include_honors)
         self.random.shuffle(self.wall)
         self.current_player = self.dealer
         for _ in range(self.rules.initial_hand_size):
@@ -110,10 +110,16 @@ class XiamenMahjongGame:
             f"（连庄 {self.dealer_streak}），补花后翻出{tile_name(self.gold_indicator)}，"
             f"金牌为{tile_name(self.gold_tile)}{dice_note}",
         )
+        opening_three_gold_winner = self._opening_three_gold_winner()
+        if opening_three_gold_winner is not None:
+            self._finish_win(opening_three_gold_winner, "three_gold_open")
+            return
         opening_gold_winner = self._opening_gold_winner()
         if opening_gold_winner is not None:
             self._finish_win(opening_gold_winner, "opening_gold")
             return
+        if not self.rules.enable_opening_wait:
+            self.opening_wait_seats.clear()
         self._start_turn(self.dealer)
         self.advance_ais()
 
@@ -174,7 +180,7 @@ class XiamenMahjongGame:
         return None
 
     def _mark_opening_waits(self) -> None:
-        if not self.rules.enable_opening_wait:
+        if not (self.rules.enable_opening_wait or self.rules.enable_opening_gold_capture):
             return
         for player in self.players:
             waits = wait_tiles(
@@ -191,10 +197,33 @@ class XiamenMahjongGame:
                 self.opening_wait_seats.add(player.seat)
         if self.opening_wait_seats:
             names = "、".join(self._seat_name(seat) for seat in sorted(self.opening_wait_seats))
-            self._event("天听", f"{names}开局听牌；保持原牌形可按天听结算")
+            if self.rules.enable_opening_wait:
+                self._event("天听", f"{names}开局听牌；保持原牌形可按天听结算")
+            else:
+                self._event("抢金准备", f"{names}起手听牌，等待开金结果")
+
+    def _opening_three_gold_winner(self) -> int | None:
+        if (
+            not self.rules.enable_three_gold_instant_win
+            or not self.rules.three_gold_opening_only
+            or self.gold_tile is None
+        ):
+            return None
+        priority = [
+            (self.dealer + offset) % self.rules.player_count
+            for offset in range(self.rules.player_count)
+        ]
+        return next(
+            (
+                player_id
+                for player_id in priority
+                if self.players[player_id].hand.count(self.gold_tile) >= 3
+            ),
+            None,
+        )
 
     def _opening_gold_winner(self) -> int | None:
-        if not self.rules.enable_opening_wait or self.gold_indicator is None:
+        if not self.rules.enable_opening_gold_capture or self.gold_indicator is None:
             return None
         priority = [
             (self.dealer + offset) % self.rules.player_count
@@ -216,6 +245,7 @@ class XiamenMahjongGame:
         player = self.players[player_id]
         if (
             self.rules.enable_three_gold_instant_win
+            and not self.rules.three_gold_opening_only
             and self.gold_tile is not None
             and player.hand.count(self.gold_tile) >= 3
         ):
@@ -253,8 +283,10 @@ class XiamenMahjongGame:
         tour_level = self._tour_resolution_level(player_id)
         if tour_level:
             labels = {1: "游金胡", 2: "双游胡", 3: "三游胡"}
-            actions.append({"kind": "hu", "label": labels[tour_level]})
-            if self._can_advance_tour(player_id):
+            can_advance = self._can_advance_tour(player_id)
+            if not (self.rules.scoring_mode == "new120_fixed" and can_advance):
+                actions.append({"kind": "hu", "label": labels[tour_level]})
+            if can_advance:
                 next_label = "双游" if tour_level == 1 else "三游"
                 actions.append(
                     {
@@ -761,6 +793,12 @@ class XiamenMahjongGame:
     def _can_win(self, player_id: int, claimed_tile: int | None = None) -> bool:
         player = self.players[player_id]
         tiles = [*player.hand, *([claimed_tile] if claimed_tile is not None else [])]
+        if (
+            self.rules.scoring_mode == "new120_fixed"
+            and self.gold_tile is not None
+            and tiles.count(self.gold_tile) >= 2
+        ):
+            return False
         return is_winning_hand(
             tiles,
             self.gold_tile if self.rules.gold_is_wildcard else None,
@@ -835,6 +873,19 @@ class XiamenMahjongGame:
             self.score_breakdown["payment_mode"] = (
                 "all_pay" if self.rules.all_players_pay_discard_win else "discarder_pays"
             )
+        elif self.rules.scoring_mode == "new120_fixed":
+            breakdown = new120_score(
+                winner_player,
+                gold_tile=self.gold_tile,
+                win_type=win_type,
+                rules=self.rules,
+            )
+            amount = breakdown.per_payer
+            self.score_breakdown = breakdown.payload()
+            self.score_breakdown["mode"] = "new120_fixed"
+            self.score_breakdown["payment_mode"] = (
+                "all_pay" if self.rules.all_players_pay_discard_win else "discarder_pays"
+            )
         else:
             multiplier = 1 + len(winner_player.flowers) + winner_player.hand.count(self.gold_tile)
             amount = self.rules.base_score * multiplier
@@ -872,10 +923,16 @@ class XiamenMahjongGame:
             "opening_gold": "抢金",
         }
         win_label = win_labels.get(win_type, win_type)
+        settlement = (
+            f"主分 {self.score_breakdown['base']}＋水 {self.score_breakdown['water']}"
+            f"＝{self.score_breakdown['unit']}"
+            if self.score_breakdown["mode"] == "new120_fixed"
+            else f"{self.score_breakdown['unit']} × {self.score_breakdown['multiplier']}"
+        )
         self._event(
             "胡牌",
             f"{self._seat_name(winner)}{win_label}，{self.win_pattern}，"
-            f"结算 {self.score_breakdown['unit']} × {self.score_breakdown['multiplier']}",
+            f"结算 {settlement}",
         )
         self.phase = "over"
         self.message = f"{self._seat_name(winner)}{win_label}：{self.win_pattern}"
@@ -934,6 +991,11 @@ class XiamenMahjongGame:
                 "name": self.rules.name,
                 "version": self.rules.version,
                 "summary": self.rules.public_summary(),
+                "tile_count": self.rules.tile_count,
+                "scoring_mode": self.rules.scoring_mode,
+                "rules_page": self.rules.rules_page,
+                "white_dragon_is_gold_proxy": self.white_dragon_is_proxy,
+                "white_dragon_proxy_enabled": self.rules.white_dragon_is_gold_proxy,
             },
             "seed": self.seed,
             "phase": self.phase,
@@ -1008,7 +1070,7 @@ class XiamenMahjongGame:
     def _player_status(self, player_id: int) -> list[str]:
         status: list[str] = []
         if player_id in self.opening_wait_seats:
-            status.append("天听")
+            status.append("天听" if self.rules.enable_opening_wait else "抢金听牌")
         if self.tour_state and self.tour_state["owner"] == player_id:
             status.append({1: "游金", 2: "双游", 3: "三游"}[self.tour_state["level"]])
         if self.gold_discard_lock_seat == player_id:

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#0a332b" />
+    <meta name="description" content="120 张厦门麻将四人同屏规则验牌桌，四席轮流摸打，方便核对规则。" />
+    <title>120 张厦门麻将 · 1v1v1v1 四人验牌桌</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="/play-120.css" />
+    <link rel="stylesheet" href="/play-120-four.css" />
+  </head>
+  <body class="four-lab-page">
+    <main class="four-lab-shell">
+      <header class="four-lab-topbar">
+        <div>
+          <p class="eyebrow">120 TILES · FOUR PLAYER RULE LAB</p>
+          <h1>1v1v1v1 <span>四人验牌桌</span></h1>
+          <p>四席都由你轮流操作；当前版本先验证牌面、摸打和响应流程。</p>
+        </div>
+        <div class="four-lab-links">
+          <a class="guide-link" href="/games-120.html">游戏大厅</a>
+          <a class="guide-link mode-entry-link" href="/play-120.html">1 人对 3 AI</a>
+          <a class="guide-link" href="/rules-120.html">规则教学</a>
+          <button id="new-four-game" class="primary-button" type="button">重新洗牌</button>
+        </div>
+      </header>
+
+      <section class="lab-notice" aria-label="开发状态">
+        <span>前端验牌版</span>
+        <p>发牌、摸牌、出牌、吃碰杠已可操作；候选响应会同时列出供验牌，正式牌局仍按“胡 ＞ 杠／碰 ＞ 吃”裁定。</p>
+      </section>
+
+      <section class="lab-toolbar" aria-label="验牌工具">
+        <div class="view-switcher">
+          <strong>查看手牌</strong>
+          <button class="is-selected" type="button" data-view="all">四家明牌</button>
+          <button type="button" data-view="0">东家</button>
+          <button type="button" data-view="1">南家</button>
+          <button type="button" data-view="2">西家</button>
+          <button type="button" data-view="3">北家</button>
+        </div>
+        <div class="lab-state-line">
+          <span>当前操作</span><strong id="lab-current-player">东家</strong>
+          <span>牌墙</span><strong id="lab-wall-count">–</strong>
+          <span>回合</span><strong id="lab-turn-count">–</strong>
+        </div>
+      </section>
+
+      <section id="lab-action-panel" class="lab-action-panel" aria-live="polite">
+        <div>
+          <p class="section-kicker">当前操作</p>
+          <strong id="lab-message">正在洗牌…</strong>
+        </div>
+        <div id="lab-response-actions" class="lab-response-actions"></div>
+      </section>
+
+      <section class="four-lab-layout">
+        <aside class="lab-side-panel">
+          <section class="lab-panel-card">
+            <p class="section-kicker">本局开金</p>
+            <div class="lab-gold-display">
+              <div><small>翻出牌</small><span id="lab-gold-indicator"></span></div>
+              <div><small>真金</small><span id="lab-gold-tile"></span></div>
+            </div>
+            <p id="lab-gold-note">白板只按金牌原牌面使用。</p>
+          </section>
+
+          <section class="lab-panel-card">
+            <p class="section-kicker">手动验结算</p>
+            <p>选择一个牌型，将当前操作席标记为赢家。此处只验证界面与记录，不自动判定牌形。</p>
+            <div class="manual-win-grid">
+              <button type="button" data-win="平胡">平胡 2</button>
+              <button type="button" data-win="自摸">自摸 4</button>
+              <button type="button" data-win="抢金">抢金 10</button>
+              <button type="button" data-win="游金">游金 10</button>
+              <button type="button" data-win="双游">双游 20</button>
+              <button type="button" data-win="三游">三游 80</button>
+            </div>
+          </section>
+
+          <details class="lab-panel-card lab-rule-card" open>
+            <summary>验牌时重点观察</summary>
+            <ul>
+              <li>120 张牌墙只有万、筒、条、白板和八张花。</li>
+              <li>庄家起手 17 张，闲家各 16 张；花牌自动补牌。</li>
+              <li>真金万能；白板只代替本局金牌原来的牌面。</li>
+              <li>打出的真金不可被吃、碰、杠或点炮胡。</li>
+              <li>候选响应为方便验牌会全部显示；正式裁定是胡优先，其次杠／碰，最后才是吃。</li>
+              <li>双金必须进入游金流程，三金必须先经过双游。</li>
+            </ul>
+          </details>
+        </aside>
+
+        <section class="four-table-wrap" aria-label="四人同屏麻将桌">
+          <div class="four-mahjong-table">
+            <span class="four-table-ribbon">四席可操作 · 验牌模式</span>
+
+            <section class="lab-seat lab-seat-top" data-seat="2"></section>
+            <section class="lab-seat lab-seat-left" data-seat="3"></section>
+            <section class="lab-seat lab-seat-right" data-seat="1"></section>
+            <section class="lab-seat lab-seat-bottom" data-seat="0"></section>
+
+            <section class="lab-river lab-river-top" data-river="2" aria-label="西家弃牌区"></section>
+            <section class="lab-river lab-river-left" data-river="3" aria-label="北家弃牌区"></section>
+            <section class="lab-river lab-river-right" data-river="1" aria-label="南家弃牌区"></section>
+            <section class="lab-river lab-river-bottom" data-river="0" aria-label="东家弃牌区"></section>
+
+            <div class="four-table-center">
+              <span>一二〇张</span>
+              <strong id="lab-phase">出牌</strong>
+              <small id="lab-last-discard">等待首张弃牌</small>
+            </div>
+          </div>
+        </section>
+
+        <aside class="lab-log-panel">
+          <div><p class="section-kicker">牌局记录</p><button id="clear-lab-log" type="button">清空记录</button></div>
+          <ol id="lab-event-list"></ol>
+        </aside>
+      </section>
+
+      <section id="lab-result" class="lab-result hidden"></section>
+    </main>
+
+    <template id="lab-tile-template"><button class="tile" type="button"></button></template>
+    <script src="/four-player-lab.js" defer></script>
+  </body>
+</html>

@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 
-from .hand import hand_quality, is_winning_hand, wait_tiles
+from .hand import hand_quality, wait_tiles
 from .tiles import BASE_TILE_COUNT, tile_name
 
 
@@ -30,16 +30,7 @@ class HeuristicTeacherAgent:
             if game._can_win(player_id):
                 return GameAction("hu")
             return GameAction("discard", self._best_discard(game, player_id))
-        if is_winning_hand(
-            player.hand,
-            game.gold_tile,
-            meld_count=meld_count,
-            melds_required=game.rules.melds_required,
-            allow_seven_pairs=game.rules.allow_seven_pairs,
-            wildcard_tiles=game.wildcard_tiles,
-            proxy_tile=game.gold_proxy_tile,
-            proxy_as=game.gold_tile,
-        ):
+        if game._can_win(player_id):
             return GameAction("hu")
 
         if len(game.wall) > game.rules.dead_wall_tiles:

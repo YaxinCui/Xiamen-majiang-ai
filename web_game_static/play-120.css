@@ -1,0 +1,53 @@
+.new120-table {
+  background:
+    radial-gradient(circle at 50% -20%, #388a70 0, #10483c 29%, #061c18 73%);
+}
+
+.new120-topbar { margin-bottom: 12px; }
+.new120-subtitle { margin: 7px 0 0; color: #b4d1c5; font-size: .82rem; }
+.mode-entry-link { border-color: rgba(239, 187, 80, .5); background: rgba(91, 67, 22, .55); color: #f3d27a; }
+
+.new120-summary {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.new120-summary div {
+  display: grid;
+  gap: 3px;
+  padding: 12px 13px;
+  border: 1px solid rgba(200, 235, 219, .15);
+  border-radius: 11px;
+  background: linear-gradient(145deg, rgba(9, 65, 53, .76), rgba(4, 32, 27, .78));
+}
+.new120-summary strong { color: #f1cc6c; font-size: .82rem; }
+.new120-summary span { color: #9dbdaf; font-size: .65rem; line-height: 1.4; }
+
+.new120-table .mahjong-table {
+  border-color: #a97935;
+  outline-color: #edc25b;
+  background: linear-gradient(135deg, #16725d, #0a4a3d);
+}
+.new120-table .mahjong-table::before {
+  position: absolute;
+  z-index: 0;
+  right: 27px;
+  bottom: 12px;
+  color: rgba(246, 215, 132, .05);
+  font-size: 8rem;
+  font-weight: 900;
+  content: "120";
+}
+.new120-table .table-center { background: #0c5e4b; }
+.new120-table .phase-chip { background: #f1c961; }
+.new120-table .rules-card summary { color: #f0cf74; }
+
+@media (max-width: 1000px) {
+  .new120-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+@media (max-width: 760px) {
+  .new120-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .new120-summary div:first-child { grid-column: 1 / -1; }
+}

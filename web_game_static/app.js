@@ -1,11 +1,13 @@
 const $ = (selector) => document.querySelector(selector);
+const API_BASE = document.body.dataset.apiBase || '/api/game';
+const FIXED_RULES_PROFILE = document.body.dataset.rulesProfile || null;
 let state = null;
 let sending = false;
 let debugAiHands = true;
 let selectedRulesProfile = null;
 
 const MELD_LABELS = { chi: '吃', pong: '碰', ming_kan: '明杠', an_kan: '暗杠', add_kan: '补杠' };
-const CHINESE_NUMERALS = ['一', '二', '三', '四', '五', '六', '七', '八', '九'];
+const CHINESE_NUMERALS = ['一', '二', '三', '四', '伍', '六', '七', '八', '九'];
 const PIP_POSITIONS = {
   1: [5], 2: [3, 7], 3: [3, 5, 7], 4: [1, 3, 7, 9], 5: [1, 3, 5, 7, 9],
   6: [1, 3, 4, 6, 7, 9], 7: [1, 3, 4, 5, 6, 7, 9], 8: [1, 2, 3, 4, 6, 7, 8, 9],
@@ -25,12 +27,33 @@ function tileFace(tile) {
   if (id < 27) {
     const isTong = id < 18;
     const rank = id % 9 + 1;
-    face.classList.add(isTong ? 'tile-tong' : 'tile-tiao');
+    face.classList.add(isTong ? 'tile-tong' : 'tile-tiao', `rank-${rank}`);
+    if (isTong && rank === 1) {
+      face.classList.add('tile-one-circle');
+      face.innerHTML = '<svg class="one-circle-wheel" viewBox="0 0 48 58" aria-hidden="true"><circle cx="24" cy="29" r="20" fill="#f5ead6" stroke="#226f92" stroke-width="2.4"/><circle cx="24" cy="29" r="16.5" fill="none" stroke="#2f8a5b" stroke-width="2"/><g stroke="#165b79" stroke-width=".8"><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#2a769c"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#3b955f" transform="rotate(45 24 29)"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#2a769c" transform="rotate(90 24 29)"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#3b955f" transform="rotate(135 24 29)"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#2a769c" transform="rotate(180 24 29)"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#3b955f" transform="rotate(225 24 29)"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#2a769c" transform="rotate(270 24 29)"/><ellipse cx="24" cy="17" rx="3.6" ry="7.2" fill="#3b955f" transform="rotate(315 24 29)"/></g><circle cx="24" cy="29" r="8" fill="#f7eddc" stroke="#bb3f35" stroke-width="2"/><path d="M24 20.8l2.2 5.5 5.9-1.4-3.7 4.8 3.7 4.7-5.9-1.3-2.2 5.5-2.2-5.5-5.9 1.3 3.7-4.7-3.7-4.8 5.9 1.4z" fill="#c64638"/><circle cx="24" cy="29" r="2.3" fill="#f2d45d" stroke="#286b8b" stroke-width="1"/></svg>';
+      return face;
+    }
+    if (!isTong && rank === 1) {
+      face.classList.add('tile-one-bamboo');
+      face.innerHTML = `
+        <svg class="bamboo-bird" viewBox="0 0 44 58" aria-hidden="true">
+          <path d="M14 47c2-12 8-20 17-29-1 12-4 24-11 33z" fill="#19764f"/>
+          <path d="M19 45c-1-12 2-24 8-36 4 14 3 27-2 39z" fill="#287baf"/>
+          <path d="M24 45c2-10 8-20 14-27-1 13-4 24-10 31z" fill="#c64638"/>
+          <ellipse cx="19" cy="24" rx="8" ry="11" fill="#2f8b56"/>
+          <path d="M14 22c6 1 11 4 14 9-6 1-11-1-15-5z" fill="#176b9c"/>
+          <circle cx="18" cy="12" r="6" fill="#308d59"/>
+          <path d="M22 11l8 3-8 3z" fill="#d84b38"/>
+          <circle cx="20" cy="11" r="1.2" fill="#102f29"/>
+          <path d="M15 7l-2-4m5 4V2m3 6 3-4" stroke="#277b55" stroke-width="1.8" stroke-linecap="round"/>
+        </svg>`;
+      return face;
+    }
     const grid = document.createElement('span');
     grid.className = 'pip-grid';
     PIP_POSITIONS[rank].forEach((position, index) => {
       const pip = document.createElement('i');
-      pip.className = `pip pip-${position}${index % 3 === 2 ? ' accent' : ''}`;
+      pip.className = `pip pip-${position} ${pipColorClass(rank, position, index)}`;
       grid.append(pip);
     });
     face.append(grid);
@@ -43,12 +66,30 @@ function tileFace(tile) {
   }
   if (id < 34) {
     face.classList.add('tile-dragon', `dragon-${id - 31}`);
-    face.textContent = ['中', '發', '白'][id - 31];
+    if (id === 33) {
+      face.classList.add('white-dragon');
+      face.innerHTML = '<span class="white-dragon-frame" aria-hidden="true"></span>';
+    } else {
+      face.textContent = ['中', '發'][id - 31];
+    }
     return face;
   }
   face.classList.add('tile-flower');
   face.innerHTML = `<span>❀</span><small>${tile.name}</small>`;
   return face;
+}
+
+function pipColorClass(rank, position, index) {
+  if (rank === 1) return 'pip-multicolor';
+  if (rank === 2) return index === 0 ? 'pip-green' : 'pip-blue';
+  if (rank === 3) return ['pip-green', 'pip-red', 'pip-blue'][index];
+  if (rank === 4) return [1, 9].includes(position) ? 'pip-green' : 'pip-blue';
+  if (rank === 5) return position === 5 ? 'pip-red' : ([1, 9].includes(position) ? 'pip-green' : 'pip-blue');
+  if (rank === 6) return position <= 3 ? 'pip-green' : 'pip-red';
+  if (rank === 7) return [1, 5, 9].includes(position) ? 'pip-green' : 'pip-red';
+  if (rank === 8) return 'pip-blue';
+  if (rank === 9) return position <= 3 ? 'pip-green' : (position <= 6 ? 'pip-red' : 'pip-blue');
+  return 'pip-blue';
 }
 
 function tileElement(tile, {
@@ -68,7 +109,7 @@ function tileElement(tile, {
   corner.textContent = tile.name;
   node.append(corner, tileFace(tile));
   node.classList.toggle('gold', state?.gold_tile?.id === tile.id);
-  node.classList.toggle('gold-proxy', state?.rules?.profile === 'classic' && state?.gold_tile?.id !== 33 && tile.id === 33);
+  node.classList.toggle('gold-proxy', Boolean(state?.rules?.white_dragon_is_gold_proxy) && tile.id === 33);
   node.classList.toggle('compact', compact);
   node.classList.toggle('forced', forced);
   node.classList.toggle('drawn-tile', drawn);
@@ -231,7 +272,9 @@ function renderResult() {
     const score = document.createElement('p');
     score.className = 'score-line';
     const payer = breakdown.payment_mode === 'all_pay' ? '其余三家各付' : '放铳者付';
-    score.textContent = `底 ${breakdown.base} + 水 ${breakdown.water} = ${breakdown.unit}；倍数 ×${breakdown.multiplier}；${payer} ${breakdown.per_payer}`;
+    score.textContent = breakdown.mode === 'new120_fixed'
+      ? `主分 ${breakdown.base} + 水 ${breakdown.water} = ${breakdown.unit}；${payer} ${breakdown.per_payer}`
+      : `底 ${breakdown.base} + 水 ${breakdown.water} = ${breakdown.unit}；倍数 ×${breakdown.multiplier}；${payer} ${breakdown.per_payer}`;
     content.append(score);
     if (breakdown.items?.length) {
       const details = document.createElement('p');
@@ -261,9 +304,9 @@ function render() {
   renderTileSlot('#gold-tile', state.gold_tile);
   $('#gold-indicator').title = state.gold_dice ? `翻金骰子：${state.gold_dice.join(' + ')}` : '';
   const goldNote = $('#gold-proxy-note');
-  if (state.rules.profile === 'classic' && state.gold_tile?.id === 33) {
+  if (state.rules.white_dragon_proxy_enabled && state.gold_tile?.id === 33) {
     goldNote.textContent = '本局白板就是真金。';
-  } else if (state.rules.profile === 'classic' && state.gold_tile) {
+  } else if (state.rules.white_dragon_is_gold_proxy && state.gold_tile) {
     goldNote.textContent = `白板按 ${state.gold_tile.name} 使用，不是万能牌。`;
   } else {
     goldNote.textContent = '';
@@ -302,9 +345,12 @@ function render() {
 
 function renderProfilePicker() {
   const picker = $('#rules-profile');
-  if (!state?.rule_profiles) return;
+  if (!picker || !state?.rule_profiles) return;
   if (!selectedRulesProfile) selectedRulesProfile = state.rules.profile;
-  picker.replaceChildren(...state.rule_profiles.map((profile) => {
+  const profiles = FIXED_RULES_PROFILE
+    ? state.rule_profiles.filter((profile) => profile.id === FIXED_RULES_PROFILE)
+    : state.rule_profiles.filter((profile) => profile.id !== 'new120');
+  picker.replaceChildren(...profiles.map((profile) => {
     const option = document.createElement('option');
     option.value = profile.id;
     option.textContent = profile.name;
@@ -337,7 +383,7 @@ async function sendAction(action) {
   if (sending) return;
   sending = true;
   try {
-    state = await request('/api/game/action', action);
+    state = await request(`${API_BASE}/action`, action);
     if (debugAiHands) state = await requestGameState();
     render();
   } catch (error) {
@@ -357,8 +403,8 @@ async function newGame(resetMatch = false) {
   }
   sending = true;
   try {
-    state = await request('/api/game/new', {
-      rules_profile: selectedRulesProfile || $('#rules-profile').value,
+    state = await request(`${API_BASE}/new`, {
+      rules_profile: FIXED_RULES_PROFILE || selectedRulesProfile || $('#rules-profile')?.value,
       reset_match: resetMatch,
     });
     selectedRulesProfile = state.rules.profile;
@@ -370,7 +416,7 @@ async function newGame(resetMatch = false) {
 }
 
 async function requestGameState() {
-  return request(`/api/game${debugAiHands ? '?debug=1' : ''}`);
+  return request(`${API_BASE}${debugAiHands ? '?debug=1' : ''}`);
 }
 
 async function toggleDebugAiHands() {
@@ -391,7 +437,7 @@ async function toggleDebugAiHands() {
 $('#new-game').addEventListener('click', () => newGame(false));
 $('#reset-match').addEventListener('click', () => newGame(true));
 $('#toggle-debug').addEventListener('click', toggleDebugAiHands);
-$('#rules-profile').addEventListener('change', (event) => {
+$('#rules-profile')?.addEventListener('change', (event) => {
   selectedRulesProfile = event.target.value;
 });
 requestGameState().then((data) => { state = data; selectedRulesProfile = data.rules.profile; render(); }).catch((error) => {
