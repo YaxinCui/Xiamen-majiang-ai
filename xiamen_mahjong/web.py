@@ -10,24 +10,285 @@ from pathlib import Path
 import threading
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
+from .agents import GameAction, HeuristicTeacherAgent
 from .game import GameError, XiamenMahjongGame
+from .human_data import is_eligible_human_teacher_discard_correction
 from .rules import XiamenRules
+from .training import (
+    TeacherDecision,
+    _perspective_state,
+    _trajectory_from_game,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC_ROOT = ROOT / "web_game_static"
+HUMAN_REFERENCE_POLICY = "heuristic_teacher_v1"
 
 
 class GameStore:
-    def __init__(self) -> None:
+    """Own one browser table and an optional local-only human data recorder.
+
+    Recording is deliberately disabled unless the command-line caller supplies
+    a path.  The writer only appends a completed hand after the human has made
+    at least one decision, and the safe trajectory payload excludes replay
+    seeds, wall order, and opponents' concealed hands.
+    """
+
+    AI_DELAYS = (0, 5, 10, 15)
+    TABLE_MODES = {
+        "solo_vs_ai": "一人对三 AI",
+        "four_player_manual": "四人手动验规则",
+    }
+
+    def __init__(
+        self,
+        *,
+        human_log: str | Path | None = None,
+        human_recording_purpose: str | None = None,
+        ai_agent: Any | None = None,
+        ai_profile: str = "heuristic_teacher",
+        ai_identity: str | None = None,
+    ) -> None:
+        valid_purposes = {"training", "evaluation"}
+        if human_log is None and human_recording_purpose is not None:
+            raise ValueError("未启用 --human-log 时不能指定人类记录用途")
+        if human_log is not None and human_recording_purpose not in valid_purposes:
+            raise ValueError(
+                "启用人类记录时必须明确指定用途：training 或 evaluation"
+            )
         self.lock = threading.Lock()
         self.rules_profile = "classic"
-        self.game = XiamenMahjongGame(rules=XiamenRules.from_profile(self.rules_profile))
+        self.table_mode = "solo_vs_ai"
+        self.ai_delay_seconds = 0
+        self._ai_agent = ai_agent
+        self._ai_profile = ai_profile
+        self._ai_identity = ai_identity or ai_profile
+        self._human_log = Path(human_log) if human_log is not None else None
+        self._human_recording_purpose = human_recording_purpose
+        # A random, local-only identifier marks one server-run recording
+        # session without asking for a player name, account, device ID, or
+        # network identifier.  Evaluation auditing treats sessions—not hands—
+        # as its independent statistical units.
+        self._human_recording_session_id = (
+            uuid4().hex if self._human_log is not None else None
+        )
+        self._human_reference_teacher = HeuristicTeacherAgent()
+        self._human_decisions: list[TeacherDecision] = []
+        self._human_session_completed_hands = 0
+        self._human_session_eligible_discard_decisions = 0
+        self._human_session_discard_disagreements = 0
+        self._human_hand_written = False
+        self._human_log_error = False
+        self.game = self._new_engine_game(
+            rules=XiamenRules.from_profile(self.rules_profile)
+        )
+        self._human_score_start = tuple(player.score for player in self.game.players)
+
+    def _ai_agents(self) -> dict[int, Any] | None:
+        if self.table_mode == "four_player_manual":
+            return None
+        if self._ai_agent is None:
+            return None
+        return {
+            seat: self._ai_agent
+            for seat in range(XiamenRules().player_count)
+            if seat != 0
+        }
+
+    def _manual_seats(self) -> set[int]:
+        if self.table_mode == "four_player_manual":
+            return set(range(XiamenRules().player_count))
+        return {0}
+
+    def _new_engine_game(
+        self,
+        *,
+        rules: XiamenRules,
+        seed: int | None = None,
+        dealer: int | None = None,
+        dealer_streak: int = 0,
+        scores: list[int] | None = None,
+        hand_number: int = 1,
+    ) -> XiamenMahjongGame:
+        slow_ai = self.table_mode == "solo_vs_ai" and self.ai_delay_seconds > 0
+        return XiamenMahjongGame(
+            seed=seed,
+            rules=rules,
+            dealer=dealer,
+            dealer_streak=dealer_streak,
+            scores=scores,
+            hand_number=hand_number,
+            auto_advance=not slow_ai,
+            agents=self._ai_agents(),
+            human_seat=0,
+            human_seats=self._manual_seats(),
+        )
 
     def _public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
-        state = self.game.public_state(reveal_ai_hands=reveal_ai_hands)
+        recording_enabled = (
+            self._human_log is not None and self.table_mode == "solo_vs_ai"
+        )
+        # Human labels must be generated from the same information available
+        # to a deployed actor. A query-string debug request cannot override
+        # this boundary while either training or evaluation recording is on.
+        debug_ai_hands_allowed = not recording_enabled
+        state = self.game.public_state(
+            reveal_ai_hands=reveal_ai_hands and debug_ai_hands_allowed
+        )
         state["rule_profiles"] = XiamenRules.available_profiles()
+        state["table_mode"] = self.table_mode
+        state["table_modes"] = [
+            {"id": mode, "name": name}
+            for mode, name in self.TABLE_MODES.items()
+        ]
+        state["ai_delay_seconds"] = self.ai_delay_seconds
+        state["ai_delay_options"] = list(self.AI_DELAYS)
+        state["ai_profile"] = (
+            "four_player_manual"
+            if self.table_mode == "four_player_manual"
+            else self._ai_profile
+        )
+        state["debug_ai_hands_allowed"] = debug_ai_hands_allowed
+        state["local_human_recording"] = {
+            "enabled": recording_enabled,
+            "purpose": self._human_recording_purpose,
+            "pending_decisions": len(self._human_decisions),
+            "completed_hand_written": self._human_hand_written,
+            "write_failed": self._human_log_error,
+            "session_completed_hands": self._human_session_completed_hands,
+            "session_eligible_discard_decisions": (
+                self._human_session_eligible_discard_decisions
+            ),
+            "session_discard_disagreements": (
+                self._human_session_discard_disagreements
+            ),
+            "scope": (
+                "completed_hand_actor_visible_only"
+                if self._human_log is not None and self.table_mode == "solo_vs_ai"
+                else "disabled_for_four_player_manual"
+                if self._human_log is not None
+                else "disabled"
+            ),
+        }
         return state
+
+    def _capture_human_decision(self, payload: dict[str, Any]) -> TeacherDecision:
+        """Create an actor-visible snapshot before the engine mutates state."""
+
+        legal = tuple(
+            GameAction(
+                str(item["kind"]),
+                item.get("tile"),
+                tuple(item.get("tiles", [])),
+            )
+            for item in self.game.human_actions()
+        )
+        action = GameAction(
+            str(payload.get("kind", "")),
+            payload.get("tile"),
+            tuple(payload.get("tiles", [])),
+        )
+        if action not in legal:
+            raise GameError("该动作不是当前可执行的操作")
+        action_index = legal.index(action)
+        if self.game.phase == "discard":
+            reference_action = self._human_reference_teacher.choose_turn_action(
+                self.game, self.game.human_seat
+            )
+        elif self.game.phase == "response":
+            reference_action = self._human_reference_teacher.choose_response(
+                self.game, self.game.human_seat, list(legal)
+            )
+        else:
+            raise GameError("当前状态无法记录人类决策")
+        if reference_action not in legal:
+            raise RuntimeError("冻结 Teacher 给出了当前状态下的非法参考动作")
+        return TeacherDecision(
+            profile=self.game.rules.profile,
+            seed=None,
+            seat=self.game.human_seat,
+            state=_perspective_state(self.game, self.game.human_seat),
+            legal_actions=legal,
+            # For an opt-in human record, the chosen and executed action are
+            # intentionally identical.  There is no synthetic Teacher label.
+            chosen_index=action_index,
+            executed_index=action_index,
+            executed_probability=None,
+            reference_teacher_index=legal.index(reference_action),
+        )
+
+    def _write_completed_human_hand(self) -> None:
+        """Append one safe, complete opt-in human trajectory exactly once."""
+
+        if (
+            self._human_log is None
+            or self.table_mode != "solo_vs_ai"
+            or self._human_hand_written
+            or self.game.phase != "over"
+            or not self._human_decisions
+        ):
+            return
+        trajectory = _trajectory_from_game(
+            self.game,
+            self._human_decisions,
+            agent_profiles=(
+                "local_human_opt_in",
+                *(self._ai_profile for _ in range(self.game.rules.player_count - 1)),
+            ),
+            source_metadata={
+                "collector": "local_human_opt_in",
+                "recording_scope": "actor_visible_state_and_public_outcome_only",
+                "behavior_label": "executed_human_action",
+                "training_default": "excluded_until_separate_quality_review",
+                # This purpose is chosen when recording starts, not inferred
+                # later from a filename.  It prevents evaluation hands from
+                # entering the behavioral-imitation path and lets the human
+                # benchmark require an explicit independent source.
+                "recording_purpose": self._human_recording_purpose,
+                "recording_session_id": self._human_recording_session_id,
+                "opponent_policy": self._ai_identity,
+                "opponent_hand_reveal": "server_forced_disabled",
+                "reference_policy": HUMAN_REFERENCE_POLICY,
+                "reference_label": "same_state_frozen_teacher_action_index",
+            },
+        )
+        payload = trajectory.payload()
+        # A browser match may carry scores across hands because of dealer
+        # continuation. Training outcomes must instead retain the reward of
+        # this hand alone, never an earlier hand's accumulated result.
+        payload["outcome"]["scores"] = [
+            player.score - self._human_score_start[index]
+            for index, player in enumerate(self.game.players)
+        ]
+        payload["outcome"]["score_semantics"] = "single_hand_delta"
+        try:
+            self._human_log.parent.mkdir(parents=True, exist_ok=True)
+            with self._human_log.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+                handle.write("\n")
+        except OSError:
+            # A completed game remains playable/reviewable even if its optional
+            # local export path becomes unavailable.  Expose only a boolean to
+            # the browser, never a local filesystem path or OS error detail.
+            self._human_log_error = True
+            return
+        self._human_hand_written = True
+        self._human_session_completed_hands += 1
+        for decision in self._human_decisions:
+            if not is_eligible_human_teacher_discard_correction(decision):
+                continue
+            self._human_session_eligible_discard_decisions += 1
+            self._human_session_discard_disagreements += (
+                decision.reference_teacher_index != decision.chosen_index
+            )
+
+    def _reset_human_recorder(self) -> None:
+        self._human_decisions = []
+        self._human_hand_written = False
+        self._human_log_error = False
+        self._human_score_start = tuple(player.score for player in self.game.players)
 
     def state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
         with self.lock:
@@ -39,6 +300,8 @@ class GameStore:
         rules_profile: str | None = None,
         *,
         reset_match: bool = False,
+        table_mode: str | None = None,
+        ai_delay_seconds: int | None = None,
     ) -> dict[str, Any]:
         with self.lock:
             profile = rules_profile or self.rules_profile
@@ -46,6 +309,12 @@ class GameStore:
                 rules = XiamenRules.from_profile(profile)
             except ValueError as error:
                 raise GameError(str(error)) from error
+            mode = table_mode or self.table_mode
+            if mode not in self.TABLE_MODES:
+                raise GameError("未知牌桌模式")
+            delay = self.ai_delay_seconds if ai_delay_seconds is None else ai_delay_seconds
+            if isinstance(delay, bool) or delay not in self.AI_DELAYS:
+                raise GameError("AI 出牌间隔只能是即时、5、10 或 15 秒")
             dealer = None
             dealer_streak = 0
             scores = None
@@ -53,6 +322,7 @@ class GameStore:
             same_match = (
                 not reset_match
                 and profile == self.rules_profile
+                and mode == self.table_mode
                 and rules.enable_dealer_continuation
             )
             if same_match:
@@ -68,7 +338,9 @@ class GameStore:
                         dealer = (previous.dealer + 1) % rules.player_count
                         dealer_streak = 0
             self.rules_profile = profile
-            self.game = XiamenMahjongGame(
+            self.table_mode = mode
+            self.ai_delay_seconds = delay
+            self.game = self._new_engine_game(
                 seed=seed,
                 rules=rules,
                 dealer=dealer,
@@ -76,11 +348,49 @@ class GameStore:
                 scores=scores,
                 hand_number=hand_number,
             )
+            self._reset_human_recorder()
             return self._public_state()
 
     def action(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self.lock:
+            decision = (
+                self._capture_human_decision(payload)
+                if self._human_log is not None and self.table_mode == "solo_vs_ai"
+                else None
+            )
             self.game.apply_human_action(payload)
+            if decision is not None:
+                self._human_decisions.append(decision)
+            self._write_completed_human_hand()
+            return self._public_state()
+
+    def advance_ai(self) -> dict[str, Any]:
+        """Advance exactly one visible AI decision in slow mode."""
+
+        with self.lock:
+            if self.table_mode != "solo_vs_ai":
+                raise GameError("四人手动模式没有 AI 可推进")
+            if self.ai_delay_seconds == 0:
+                raise GameError("即时模式会自动推进 AI")
+            if not self.game.awaiting_ai_action():
+                raise GameError("当前没有等待中的 AI 操作")
+            self.game.advance_one_ai()
+            self._write_completed_human_hand()
+            return self._public_state()
+
+    def settings(self, *, ai_delay_seconds: int) -> dict[str, Any]:
+        """Change AI pacing without rebuilding the current hand."""
+
+        with self.lock:
+            if isinstance(ai_delay_seconds, bool) or ai_delay_seconds not in self.AI_DELAYS:
+                raise GameError("AI 出牌间隔只能是即时、5、10 或 15 秒")
+            self.ai_delay_seconds = ai_delay_seconds
+            if self.table_mode == "solo_vs_ai" and ai_delay_seconds == 0:
+                self.game.auto_advance = True
+                self.game.advance_ais()
+                self._write_completed_human_hand()
+            elif self.table_mode == "solo_vs_ai":
+                self.game.auto_advance = False
             return self._public_state()
 
 
@@ -112,13 +422,42 @@ def make_handler(store: GameStore):
                     reset_match = payload.get("reset_match", False)
                     if not isinstance(reset_match, bool):
                         raise GameError("reset_match 必须是布尔值")
+                    table_mode = payload.get("table_mode")
+                    if table_mode is not None and not isinstance(table_mode, str):
+                        raise GameError("table_mode 必须是字符串")
+                    ai_delay_seconds = payload.get("ai_delay_seconds")
+                    if ai_delay_seconds is not None and (
+                        isinstance(ai_delay_seconds, bool)
+                        or not isinstance(ai_delay_seconds, int)
+                    ):
+                        raise GameError("ai_delay_seconds 必须是整数")
                     self._send_json(
                         HTTPStatus.OK,
-                        store.new_game(seed, rules_profile, reset_match=reset_match),
+                        store.new_game(
+                            seed,
+                            rules_profile,
+                            reset_match=reset_match,
+                            table_mode=table_mode,
+                            ai_delay_seconds=ai_delay_seconds,
+                        ),
                     )
                     return
                 if self.path == "/api/game/action":
                     self._send_json(HTTPStatus.OK, store.action(payload))
+                    return
+                if self.path == "/api/game/advance":
+                    self._send_json(HTTPStatus.OK, store.advance_ai())
+                    return
+                if self.path == "/api/game/settings":
+                    ai_delay_seconds = payload.get("ai_delay_seconds")
+                    if isinstance(ai_delay_seconds, bool) or not isinstance(
+                        ai_delay_seconds, int
+                    ):
+                        raise GameError("ai_delay_seconds 必须是整数")
+                    self._send_json(
+                        HTTPStatus.OK,
+                        store.settings(ai_delay_seconds=ai_delay_seconds),
+                    )
                     return
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "接口不存在"})
             except GameError as error:
@@ -171,8 +510,23 @@ def make_handler(store: GameStore):
     return GameHandler
 
 
-def serve(host: str = "127.0.0.1", port: int = 8765) -> None:
-    store = GameStore()
+def serve(
+    host: str = "127.0.0.1",
+    port: int = 8765,
+    *,
+    human_log: str | Path | None = None,
+    human_recording_purpose: str | None = None,
+    ai_agent: Any | None = None,
+    ai_profile: str = "heuristic_teacher",
+    ai_identity: str | None = None,
+) -> None:
+    store = GameStore(
+        human_log=human_log,
+        human_recording_purpose=human_recording_purpose,
+        ai_agent=ai_agent,
+        ai_profile=ai_profile,
+        ai_identity=ai_identity,
+    )
     server = ThreadingHTTPServer((host, port), make_handler(store))
     print(f"厦门麻将已启动：http://{host}:{port}")
     try:

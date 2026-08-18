@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import random
-from typing import Any
+from typing import Any, Iterable, Mapping
 
 from .agents import GameAction, HeuristicTeacherAgent
 from .hand import is_travelling_ready, is_winning_hand, wait_tiles, winning_pattern
@@ -14,6 +14,7 @@ from .tiles import (
     BASE_TILE_COUNT,
     WHITE_DRAGON,
     base_wall,
+    gold_indicator_index,
     is_honor,
     is_base_tile,
     is_suited,
@@ -49,15 +50,41 @@ class XiamenMahjongGame:
         dealer_streak: int = 0,
         scores: list[int] | None = None,
         hand_number: int = 1,
+        auto_advance: bool = True,
+        agents: Mapping[int, Any] | None = None,
+        human_seat: int = 0,
+        human_seats: Iterable[int] | None = None,
     ):
         self.rules = rules or XiamenRules()
+        self.auto_advance = auto_advance
         self.random = random.Random(seed)
         self.seed = seed
         self.teacher = HeuristicTeacherAgent()
+        # ``human_seat`` remains the stable single-player compatibility
+        # field.  ``human_seats`` additionally supports the local pass-around
+        # table, where all four seats are manually controlled in one browser.
+        # The engine still exposes only the currently acting manual seat's
+        # concealed hand by default.
+        self.human_seat = human_seat
+        self.human_seats = frozenset(
+            {human_seat}
+            if human_seats is None and 0 <= human_seat < self.rules.player_count
+            else set(human_seats or ())
+        )
+        if any(
+            not isinstance(seat, int) or not 0 <= seat < self.rules.player_count
+            for seat in self.human_seats
+        ):
+            raise ValueError("手动座位编号无效")
         self.players = [
             Player(seat=index, score=(scores[index] if scores else 0))
             for index in range(self.rules.player_count)
         ]
+        self.agents: dict[int, Any] = {
+            player.seat: self.teacher for player in self.players
+        }
+        if agents:
+            self.agents.update(agents)
         self.wall: list[int] = []
         self.gold_indicator: int | None = None
         self.gold_tile: int | None = None
@@ -81,12 +108,23 @@ class XiamenMahjongGame:
         self.score_breakdown: dict[str, Any] | None = None
         self.gold_discard_lock_seat: int | None = None
         self.last_drawn_tiles: list[int | None] = [None] * self.rules.player_count
+        # Replacement flowers are public. Keep their ordered faces alongside
+        # the most recent physical draw so the corresponding public ``draw``
+        # event can preserve that fact without exposing the final playable
+        # tile or any wall position.
+        self.last_drawn_flowers: list[tuple[int, ...]] = [
+            () for _ in range(self.rules.player_count)
+        ]
         self.first_turn_pending: set[int] = set(range(self.rules.player_count))
         self.opening_wait_seats: set[int] = set()
         self.pending_tour_seat: int | None = None
         self.tour_state: dict[str, Any] | None = None
         self.turn_count = 0
         self.events: list[dict[str, Any]] = []
+        # Structured public action history is separate from the localized UI
+        # event text.  Training exporters may retain it for sequence models
+        # without ever serializing wall order or concealed hands.
+        self.public_actions: list[dict[str, Any]] = []
         self.message = "准备开始"
         self._setup()
 
@@ -115,36 +153,35 @@ class XiamenMahjongGame:
             self._finish_win(opening_gold_winner, "opening_gold")
             return
         self._start_turn(self.dealer)
-        self.advance_ais()
+        if self.auto_advance:
+            self.advance_ais()
 
     def _select_gold_indicator(self) -> None:
         self.gold_dice = (self.random.randint(1, 6), self.random.randint(1, 6))
-        start = len(self.wall) - sum(self.gold_dice)
-        indices = list(range(max(start, 0), -1, -1)) + list(
-            range(len(self.wall) - 1, max(start, 0), -1)
+        index = gold_indicator_index(self.wall, self.gold_dice)
+        if index is None:
+            raise RuntimeError("wall has no base tile for the gold indicator")
+        self.gold_indicator = self.wall.pop(index)
+        self.gold_tile = (
+            next_gold_tile(self.gold_indicator)
+            if self.rules.gold_from_indicator_next
+            else self.gold_indicator
         )
-        for index in indices:
-            candidate = self.wall[index]
-            if is_base_tile(candidate):
-                self.gold_indicator = self.wall.pop(index)
-                self.gold_tile = (
-                    next_gold_tile(self.gold_indicator)
-                    if self.rules.gold_from_indicator_next
-                    else self.gold_indicator
-                )
-                return
-        raise RuntimeError("wall has no base tile for the gold indicator")
 
     def _draw_for_player(self, player: Player) -> int | None:
+        drawn_flowers: list[int] = []
         while self.wall:
             tile = self.wall.pop(0)
             if tile >= BASE_TILE_COUNT:
                 player.flowers.append(tile)
+                drawn_flowers.append(tile)
                 self._event("补花", f"{self._seat_name(player.seat)}补到花牌")
                 continue
             player.hand.append(tile)
             player.hand.sort()
+            self.last_drawn_flowers[player.seat] = tuple(drawn_flowers)
             return tile
+        self.last_drawn_flowers[player.seat] = tuple(drawn_flowers)
         return None
 
     @property
@@ -232,6 +269,13 @@ class XiamenMahjongGame:
         self.phase = "discard"
         self.last_drawn_tiles[player_id] = tile
         self.turn_count += 1
+        self._record_public_action(
+            "draw",
+            seat=player_id,
+            # Flower faces are exposed at the table; the actual playable draw
+            # remains concealed. Empty tuples retain the legacy compact event.
+            tiles=self.last_drawn_flowers[player_id],
+        )
         if self._tour_resolution_level(player_id):
             labels = {1: "游金", 2: "双游", 3: "三游"}
             self.message = f"{self._seat_name(player_id)}进入{labels[self.tour_state['level']]}决胜摸牌"
@@ -239,13 +283,77 @@ class XiamenMahjongGame:
             self.message = f"{self._seat_name(player_id)}摸牌"
 
     def human_actions(self) -> list[dict[str, Any]]:
+        """Return actions for the one manual seat currently holding priority.
+
+        In the ordinary browser table this is always seat 0.  In a local
+        four-player pass-around table it changes with the turn; responses are
+        requested in claim-priority order, one seat at a time.
+        """
+
+        manual_seat = self._manual_action_seat()
+        if manual_seat is None:
+            return []
         if self.phase == "over":
             return []
-        if self.phase == "discard" and self.current_player == self.human_seat:
-            return self._turn_actions(self.human_seat)
-        if self.phase == "response" and self.human_seat in self.response_options:
-            return [self._action_payload(action) for action in self.response_options[self.human_seat]]
+        if self.phase == "discard":
+            return self._turn_actions(manual_seat)
+        if self.phase == "response":
+            return [
+                self._action_payload(action)
+                for action in self.response_options[manual_seat]
+            ]
         return []
+
+    def manual_action_seat(self) -> int | None:
+        """Public helper identifying the manual seat that should act next."""
+
+        return self._manual_action_seat()
+
+    def awaiting_ai_action(self) -> bool:
+        """Whether a non-manual AI action can be advanced by the web table."""
+
+        if self.phase == "discard":
+            return self.current_player not in self.human_seats
+        if self.phase == "response":
+            if self._manual_response_seat() is not None:
+                return False
+            # Keep one final slow-mode tick for claim resolution after all
+            # responders have supplied a choice.  Resolution itself is a
+            # deterministic rule transition, not a hidden AI action.
+            return bool(self.response_options)
+        return False
+
+    def _manual_action_seat(self) -> int | None:
+        if self.phase == "discard":
+            return (
+                self.current_player
+                if self.current_player in self.human_seats
+                else None
+            )
+        if self.phase == "response":
+            return self._manual_response_seat()
+        return None
+
+    def _manual_response_seat(self) -> int | None:
+        """Return the next unchosen local responder in rule priority order."""
+
+        if self.phase != "response" or self.discarder is None:
+            return None
+        candidates = [
+            player_id
+            for player_id in self.response_options
+            if player_id in self.human_seats
+            and player_id not in self.response_choices
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda player_id: (
+                (player_id - self.discarder) % self.rules.player_count,
+                player_id,
+            ),
+        )
 
     def _turn_actions(self, player_id: int) -> list[dict[str, Any]]:
         player = self.players[player_id]
@@ -304,17 +412,20 @@ class XiamenMahjongGame:
         if not isinstance(tiles, list) or not all(isinstance(item, int) for item in tiles):
             raise GameError("吃牌参数无效")
         action = GameAction(kind, tile, tuple(tiles))
-        if self.phase == "discard" and self.current_player == self.human_seat:
-            self._apply_turn_action(self.human_seat, action)
-        elif self.phase == "response" and self.human_seat in self.response_options:
-            valid = self.response_options[self.human_seat]
+        manual_seat = self._manual_action_seat()
+        if manual_seat is None:
+            raise GameError("现在不是手动座位的操作回合")
+        if self.phase == "discard":
+            self._apply_turn_action(manual_seat, action)
+        elif self.phase == "response":
+            valid = self.response_options[manual_seat]
             if not self._is_valid_response_action(action, valid):
                 raise GameError("该响应不是当前可执行的动作")
-            self.response_choices[self.human_seat] = action
-            self._resolve_responses()
+            self.response_choices[manual_seat] = action
         else:
             raise GameError("现在不是你的操作回合")
-        self.advance_ais()
+        if self.auto_advance:
+            self.advance_ais()
 
     def advance_ais(self) -> None:
         """Play automatic seats until a human decision is required."""
@@ -325,19 +436,83 @@ class XiamenMahjongGame:
             if safety > 500:
                 raise RuntimeError("automatic game loop exceeded its safety limit")
             if self.phase == "discard":
-                if self.current_player == self.human_seat:
-                    self.message = "轮到你出牌"
+                if self.current_player in self.human_seats:
+                    self.message = f"轮到{self._seat_name(self.current_player)}出牌"
                     return
-                action = self.teacher.choose_turn_action(self, self.current_player)
+                action = self._agent_for(self.current_player).choose_turn_action(
+                    self, self.current_player
+                )
                 self._apply_turn_action(self.current_player, action)
                 continue
             if self.phase == "response":
-                if self.human_seat in self.response_options:
-                    self.message = "你可以响应上一张弃牌"
+                manual_responder = self._manual_response_seat()
+                if manual_responder is not None:
+                    self.message = f"轮到{self._seat_name(manual_responder)}响应上一张弃牌"
                     return
                 self._resolve_responses()
                 continue
             raise RuntimeError(f"unknown game phase: {self.phase}")
+
+    def advance_one_ai(self) -> bool:
+        """Apply exactly one automated decision for the slow local web mode.
+
+        A response can require several players to choose.  This method stores
+        one AI response at a time; after every eligible responder has chosen,
+        normal claim resolution runs as a rule transition (not an additional
+        hidden AI decision).  It intentionally never advances a manual seat.
+        """
+
+        if self.phase == "over":
+            return False
+        if self.phase == "discard":
+            if self.current_player in self.human_seats:
+                self.message = f"轮到{self._seat_name(self.current_player)}出牌"
+                return False
+            player_id = self.current_player
+            action = self._agent_for(player_id).choose_turn_action(self, player_id)
+            self._apply_turn_action(player_id, action)
+            return True
+        if self.phase == "response":
+            manual_responder = self._manual_response_seat()
+            if manual_responder is not None:
+                self.message = f"轮到{self._seat_name(manual_responder)}响应上一张弃牌"
+                return False
+            pending_ai = [
+                player_id
+                for player_id in self.response_options
+                if player_id not in self.response_choices
+            ]
+            if pending_ai:
+                assert self.discarder is not None
+                player_id = min(
+                    pending_ai,
+                    key=lambda seat: (
+                        (seat - self.discarder) % self.rules.player_count,
+                        seat,
+                    ),
+                )
+                options = self.response_options[player_id]
+                action = self._agent_for(player_id).choose_response(
+                    self, player_id, options
+                )
+                if not self._is_valid_response_action(action, options):
+                    raise RuntimeError("自动策略选择了规则引擎未提供的响应动作")
+                self.response_choices[player_id] = action
+                return True
+            self._resolve_responses()
+            return True
+        raise RuntimeError(f"unknown game phase: {self.phase}")
+
+    def _agent_for(self, player_id: int) -> Any:
+        """Return the configured policy for an automated seat.
+
+        Policies share the Teacher's small interface: ``choose_turn_action``
+        and ``choose_response``.  The rules engine still validates and applies
+        the returned action, so an experimental neural policy cannot bypass
+        legality or settlement.
+        """
+
+        return self.agents.get(player_id, self.teacher)
 
     def _apply_turn_action(self, player_id: int, action: GameAction) -> None:
         if self.phase != "discard" or player_id != self.current_player:
@@ -346,6 +521,7 @@ class XiamenMahjongGame:
         if action.kind == "hu":
             if not self._tour_resolution_level(player_id) and not self._can_win(player_id):
                 raise GameError("当前手牌不能自摸胡")
+            self._record_public_action("hu", seat=player_id)
             self._finish_win(player_id, self._self_draw_win_type(player_id))
             return
         if action.kind == "advance_tour":
@@ -360,6 +536,7 @@ class XiamenMahjongGame:
             self.last_drawn_tiles[player_id] = None
             assert self.tour_state is not None
             self.tour_state["level"] += 1
+            self._record_public_action("advance_tour", seat=player_id, tile=self.gold_tile)
             label = "双游" if self.tour_state["level"] == 2 else "三游"
             self._event(label, f"{self._seat_name(player_id)}打出金牌，进入{label}封闭摸牌圈")
             self.first_turn_pending.discard(player_id)
@@ -379,6 +556,7 @@ class XiamenMahjongGame:
             self.discarder = player_id
             self.latest_discard = action.tile
             self.latest_discard_seat = player_id
+            self._record_public_action("discard", seat=player_id, tile=action.tile)
             if (
                 player_id in self.opening_wait_seats
                 and action.tile != self.last_drawn_tiles[player_id]
@@ -427,6 +605,9 @@ class XiamenMahjongGame:
                     "value": self._tile_value(action.tile),
                 }
             )
+            # A concealed kong itself is public, but its face value is not
+            # supplied to opponents' training observations.
+            self._record_public_action("an_kan", seat=player_id)
             self.opening_wait_seats.discard(player_id)
             self.first_turn_pending.discard(player_id)
             self._event("暗杠", f"{self._seat_name(player_id)}暗杠")
@@ -455,6 +636,7 @@ class XiamenMahjongGame:
             target["kind"] = "add_kan"
             target["tiles"] = [action.tile] * 4
             target["value"] = self._tile_value(action.tile)
+            self._record_public_action("add_kan", seat=player_id, tile=action.tile)
             self.opening_wait_seats.discard(player_id)
             self.first_turn_pending.discard(player_id)
             self._event("补杠", f"{self._seat_name(player_id)}补杠{tile_name(action.tile)}")
@@ -667,7 +849,10 @@ class XiamenMahjongGame:
         assert self.discarder is not None
         for player_id, options in self.response_options.items():
             if player_id not in self.response_choices:
-                self.response_choices[player_id] = self.teacher.choose_response(self, player_id, options)
+                action = self._agent_for(player_id).choose_response(self, player_id, options)
+                if not self._is_valid_response_action(action, options):
+                    raise RuntimeError("自动策略选择了规则引擎未提供的响应动作")
+                self.response_choices[player_id] = action
         choices = list(self.response_choices.items())
         hu_claims = [(player_id, action) for player_id, action in choices if action.kind == "hu"]
         if hu_claims:
@@ -696,6 +881,9 @@ class XiamenMahjongGame:
         assert self.last_discard is not None and self.discarder is not None
         player = self.players[player_id]
         tile = self.last_discard
+        self._record_public_action(
+            action.kind, seat=player_id, tile=tile, tiles=action.tiles
+        )
         discard_pile = self.players[self.discarder].discards
         if discard_pile and discard_pile[-1] == tile:
             discard_pile.pop()
@@ -877,6 +1065,7 @@ class XiamenMahjongGame:
             f"{self._seat_name(winner)}{win_label}，{self.win_pattern}，"
             f"结算 {self.score_breakdown['unit']} × {self.score_breakdown['multiplier']}",
         )
+        self._record_public_action("result", seat=winner, result=win_type)
         self.phase = "over"
         self.message = f"{self._seat_name(winner)}{win_label}：{self.win_pattern}"
         self.response_options = {}
@@ -892,6 +1081,7 @@ class XiamenMahjongGame:
         self.score_breakdown = None
         self.message = "牌墙耗尽，本局流局"
         self._event("流局", self.message)
+        self._record_public_action("result", result="draw")
         self.response_options = {}
         self.response_choices = {}
 
@@ -925,9 +1115,31 @@ class XiamenMahjongGame:
             payload["tiles"] = list(action.tiles)
         return payload
 
-    def public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
-        human = self.players[self.human_seat]
+    def public_state(
+        self,
+        *,
+        reveal_ai_hands: bool = False,
+        viewer_seat: int | None = None,
+    ) -> dict[str, Any]:
+        """Return a browser-safe view from one local seat's perspective.
+
+        ``viewer_seat`` defaults to the active manual seat when one exists;
+        otherwise it stays on the legacy seat 0 perspective.  The explicit
+        debug flag is the only path that reveals every concealed hand.
+        """
+
+        if viewer_seat is None:
+            viewer_seat = self._manual_action_seat()
+        if viewer_seat is None:
+            viewer_seat = (
+                self.human_seat
+                if 0 <= self.human_seat < self.rules.player_count
+                else 0
+            )
+        if not 0 <= viewer_seat < self.rules.player_count:
+            raise ValueError("查看座位编号无效")
         response_tile = tile_payload(self.last_discard) if self.last_discard is not None else None
+        action_seat = self._manual_action_seat()
         return {
             "rules": {
                 "profile": self.rules.profile,
@@ -944,6 +1156,10 @@ class XiamenMahjongGame:
             "dealer": self.dealer,
             "dealer_streak": self.dealer_streak,
             "current_player": self.current_player,
+            "viewer_seat": viewer_seat,
+            "action_seat": action_seat,
+            "manual_seats": sorted(self.human_seats),
+            "awaiting_ai_action": self.awaiting_ai_action(),
             "gold_indicator": tile_payload(self.gold_indicator) if self.gold_indicator is not None else None,
             "gold_indicator_label": "指示牌" if self.rules.gold_from_indicator_next else "翻出牌",
             "gold_tile": tile_payload(self.gold_tile) if self.gold_tile is not None else None,
@@ -955,9 +1171,9 @@ class XiamenMahjongGame:
             "latest_discard_seat": self.latest_discard_seat,
             "forced_discards": [
                 tile_payload(tile)
-                for tile in self._forced_follow_tiles(self.human_seat)
+                for tile in self._forced_follow_tiles(action_seat)
             ]
-            if self.phase == "discard" and self.current_player == self.human_seat
+            if action_seat is not None and self.phase == "discard"
             else [],
             "winner": self.winner,
             "win_type": self.win_type,
@@ -986,11 +1202,11 @@ class XiamenMahjongGame:
                         self.phase == "discard"
                         and self.current_player == player.seat
                         and self.last_drawn_tiles[player.seat] in player.hand
-                        and (player.seat == self.human_seat or reveal_ai_hands)
+                        and (player.seat == viewer_seat or reveal_ai_hands)
                     )
                     else None,
                     "hand": [tile_payload(tile) for tile in player.hand]
-                    if player.seat == self.human_seat or reveal_ai_hands
+                    if player.seat == viewer_seat or reveal_ai_hands
                     else None,
                 }
                 for player in self.players
@@ -1001,6 +1217,32 @@ class XiamenMahjongGame:
 
     def _event(self, kind: str, text: str) -> None:
         self.events.append({"turn": self.turn_count, "kind": kind, "text": text})
+
+    def _record_public_action(
+        self,
+        kind: str,
+        *,
+        seat: int | None = None,
+        tile: int | None = None,
+        tiles: tuple[int, ...] = (),
+        result: str | None = None,
+    ) -> None:
+        """Record a machine-readable action containing only public facts."""
+
+        event: dict[str, Any] = {
+            "index": len(self.public_actions),
+            "turn": self.turn_count,
+            "kind": kind,
+        }
+        if seat is not None:
+            event["seat"] = seat
+        if tile is not None:
+            event["tile"] = tile
+        if tiles:
+            event["tiles"] = list(tiles)
+        if result is not None:
+            event["result"] = result
+        self.public_actions.append(event)
 
     def _next_player(self, player_id: int) -> int:
         return (player_id + 1) % self.rules.player_count

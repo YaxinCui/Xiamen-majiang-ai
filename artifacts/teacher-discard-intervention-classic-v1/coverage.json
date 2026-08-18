@@ -1,0 +1,52 @@
+{
+  "status": "coverage_only_terminal_labels_unread",
+  "experiment": "teacher_discard_intervention_classic_v1",
+  "protocol_commit": "7fc952d",
+  "collection_parameters": {
+    "profile": "classic",
+    "physical_wall_seed_start": 202608700,
+    "physical_wall_count": 1600,
+    "seat_rotations_per_wall": 4,
+    "base_policy": "heuristic_teacher",
+    "intervention_phase": "discard",
+    "uniform_exploration_probability": 0.4,
+    "intervention_max_decisions": 8
+  },
+  "randomized_intervention_coverage": {
+    "train": {
+      "randomized_decisions": 3003,
+      "wall_groups": 968
+    },
+    "validation": {
+      "randomized_decisions": 727,
+      "wall_groups": 228
+    },
+    "held_out": {
+      "randomized_decisions": 1160,
+      "wall_groups": 381
+    },
+    "selection": {
+      "randomized_decisions": 579,
+      "wall_groups": 191
+    },
+    "terminal": {
+      "randomized_decisions": 581,
+      "wall_groups": 190
+    }
+  },
+  "gate": {
+    "minimum_randomized_decisions": {
+      "train": 2500,
+      "validation": 500,
+      "selection": 500,
+      "terminal": 500
+    },
+    "train_and_validation_pass": true,
+    "selection_and_terminal_pass": true
+  },
+  "privacy": {
+    "terminal_outcomes_aggregated": false,
+    "terminal_action_summary_exported": false,
+    "raw_trajectory_jsonl_committed": false
+  }
+}

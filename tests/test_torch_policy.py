@@ -1,0 +1,829 @@
+import tempfile
+import unittest
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
+
+
+@unittest.skipIf(torch is None, "PyTorch 仅在项目 .venv 中安装")
+class CheckpointSelectionTests(unittest.TestCase):
+    def test_v4_full_public_history_stops_at_decision_cursor(self):
+        from scripts.train_policy_value import public_events_for_training_decision
+        from xiamen_mahjong.training import collect_teacher_trajectories
+
+        trajectories, _summary = collect_teacher_trajectories(
+            hands=1, profile="classic", seed=913
+        )
+        trajectory = trajectories[0]
+        decision = max(
+            trajectory.decisions,
+            key=lambda item: int(item.state["public_action_count"]),
+        )
+        self.assertGreater(decision.state["public_action_count"], 24)
+        args = SimpleNamespace(history_window=160, full_public_history=True)
+        events = public_events_for_training_decision(trajectory, decision, args)
+        self.assertEqual(len(events), decision.state["public_action_count"])
+        extended = replace(
+            trajectory,
+            public_actions=trajectory.public_actions
+            + ({"kind": "discard", "seat": (decision.seat + 1) % 4, "tile": 0},),
+        )
+        self.assertEqual(
+            events,
+            public_events_for_training_decision(extended, decision, args),
+        )
+
+    def test_sequence_checkpoint_preserves_nondefault_history_window(self):
+        from xiamen_mahjong.torch_policy import (
+            PublicSequencePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+
+        network = PublicSequencePolicyValueNetwork(
+            feature_dim=145, hidden_size=16, event_length=48, attention_heads=4
+        )
+        agent = TorchPolicyValueAgent(network=network, device="cpu")
+        self.assertEqual(agent.event_length, 48)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sequence-history.pt"
+            agent.save(checkpoint)
+            loaded = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+        self.assertEqual(loaded.event_length, 48)
+
+    def test_streamed_training_shards_cover_each_example_once(self):
+        from scripts.train_policy_value import Example, iter_training_batches
+
+        first = Path("first.trajectories.jsonl")
+        second = Path("second.trajectories.jsonl")
+
+        def example(index: int) -> Example:
+            return Example(
+                candidates=((0.0,) * 145,),
+                public_events=(),
+                chosen_index=index,
+                action_kind="discard",
+                source="teacher_self_play",
+                action_values=None,
+                action_value_stderrs=None,
+                action_value_gap_stderrs=None,
+                value_target=None,
+                sample_weight=1.0,
+            )
+
+        examples_by_path = {first: [example(0), example(1)], second: [example(2)]}
+        args = SimpleNamespace(seed=37)
+        with patch(
+            "scripts.train_policy_value.iter_examples",
+            side_effect=lambda path, _args: examples_by_path[path],
+        ) as loader:
+            batches = list(
+                iter_training_batches(
+                    paths=(first, second),
+                    args=args,
+                    epoch=2,
+                    batch_size=1,
+                    stream_shards=True,
+                    in_memory_examples=None,
+                )
+            )
+        flattened = [row.chosen_index for batch in batches for row in batch]
+        self.assertCountEqual(flattened, [0, 1, 2])
+        self.assertEqual(loader.call_count, 2)
+
+    def test_lowest_validation_policy_loss_wins_then_accuracy_breaks_ties(self):
+        from scripts.train_policy_value import better_validation_checkpoint
+
+        first = {"policy_loss": 0.30, "accuracy": 0.90}
+        lower_loss = {"policy_loss": 0.20, "accuracy": 0.80}
+        tie_higher_accuracy = {"policy_loss": 0.20, "accuracy": 0.85}
+        self.assertTrue(better_validation_checkpoint(first, None))
+        self.assertTrue(better_validation_checkpoint(lower_loss, first))
+        self.assertTrue(better_validation_checkpoint(tie_higher_accuracy, lower_loss))
+        self.assertFalse(better_validation_checkpoint(lower_loss, tie_higher_accuracy))
+
+    def test_human_test_can_be_physically_reserved_for_gate(self):
+        from scripts.train_policy_value import validate_local_human_split_contract
+
+        reserved = {
+            "train": (Path("human-train.jsonl"),),
+            "validation": (Path("human-validation.jsonl"),),
+            "test": (),
+        }
+        validate_local_human_split_contract(
+            reserved,
+            reserve_test_for_gate=True,
+        )
+        with self.assertRaisesRegex(ValueError, "完全不接收真人 test"):
+            validate_local_human_split_contract(
+                {**reserved, "test": (Path("human-test.jsonl"),)},
+                reserve_test_for_gate=True,
+            )
+        with self.assertRaisesRegex(ValueError, "缺少 test"):
+            validate_local_human_split_contract(
+                reserved,
+                reserve_test_for_gate=False,
+            )
+
+    def test_rollout_soft_preference_masks_padding_and_rewards_better_actions(self):
+        from scripts.train_policy_value import policy_preference_loss
+
+        chosen = torch.tensor([0, 1])
+        action_values = torch.tensor([[12.0, -12.0, 0.0], [-6.0, 14.0, 0.0]])
+        action_value_mask = torch.tensor([True, True])
+        legal = torch.tensor([[True, True, False], [True, True, False]])
+        preferred_logits = torch.tensor([[4.0, -4.0, -1e30], [-4.0, 4.0, -1e30]])
+        reversed_logits = torch.tensor([[-4.0, 4.0, -1e30], [4.0, -4.0, -1e30]])
+        preferred = policy_preference_loss(
+            preferred_logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=4.0,
+        )
+        reversed_loss = policy_preference_loss(
+            reversed_logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=4.0,
+        )
+        self.assertTrue(torch.isfinite(preferred).all())
+        self.assertTrue(torch.isfinite(reversed_loss).all())
+        self.assertLess(float(preferred.mean()), float(reversed_loss.mean()))
+
+    def test_rollout_soft_preference_can_use_per_action_lower_confidence_scores(self):
+        from scripts.train_policy_value import policy_preference_loss
+
+        chosen = torch.tensor([0])
+        action_values = torch.tensor([[10.0, 0.0, 0.0]])
+        action_value_stderrs = torch.tensor([[30.0, 0.0, 999.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True, False]])
+        raw_preferred = torch.tensor([[4.0, -4.0, -1e30]])
+        conservative_preferred = torch.tensor([[-4.0, 4.0, -1e30]])
+        raw_loss = policy_preference_loss(
+            raw_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+        )
+        raw_reversed_loss = policy_preference_loss(
+            conservative_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+        )
+        conservative_loss = policy_preference_loss(
+            conservative_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+            confidence_z=0.5,
+        )
+        conservative_reversed_loss = policy_preference_loss(
+            raw_preferred,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_stderrs=action_value_stderrs,
+            confidence_z=0.5,
+        )
+        self.assertLess(float(raw_loss[0]), float(raw_reversed_loss[0]))
+        self.assertLess(float(conservative_loss[0]), float(conservative_reversed_loss[0]))
+        with self.assertRaises(ValueError):
+            policy_preference_loss(
+                raw_preferred,
+                chosen=chosen,
+                action_values=action_values,
+                action_value_mask=action_value_mask,
+                action_mask=legal,
+                temperature=2.0,
+                confidence_z=-0.1,
+            )
+
+    def test_rollout_soft_preference_can_shrink_only_uncertain_paired_gaps(self):
+        from scripts.train_policy_value import policy_preference_loss
+
+        logits = torch.tensor([[4.0, -4.0]])
+        chosen = torch.tensor([0])
+        action_values = torch.tensor([[10.0, 0.0]])
+        rollout_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True]])
+        raw_loss = policy_preference_loss(
+            logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=rollout_mask,
+            action_mask=legal,
+            temperature=2.0,
+        )
+        uncertain_gap_loss = policy_preference_loss(
+            logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=rollout_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_gap_stderrs=torch.tensor([[0.0, 30.0]]),
+            pairwise_confidence_z=0.5,
+        )
+        certain_gap_loss = policy_preference_loss(
+            logits,
+            chosen=chosen,
+            action_values=action_values,
+            action_value_mask=rollout_mask,
+            action_mask=legal,
+            temperature=2.0,
+            action_value_gap_stderrs=torch.zeros((1, 2)),
+            pairwise_confidence_z=0.5,
+        )
+        self.assertGreater(float(uncertain_gap_loss[0]), float(raw_loss[0]))
+        self.assertAlmostEqual(float(certain_gap_loss[0]), float(raw_loss[0]))
+
+    def test_direct_action_value_loss_keeps_terminal_score_magnitude(self):
+        from scripts.train_policy_value import action_value_regression_loss
+
+        action_values = torch.tensor([[40.0, -40.0, 0.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True, False]])
+        aligned = torch.tensor([[0.50, -0.50, 99.0]])
+        reversed_values = torch.tensor([[-0.50, 0.50, 99.0]])
+        aligned_loss, aligned_error, valid = action_value_regression_loss(
+            aligned,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+        )
+        reversed_loss, _reversed_error, _valid = action_value_regression_loss(
+            reversed_values,
+            action_values=action_values,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+        )
+        self.assertTrue(torch.isfinite(aligned_loss).all())
+        self.assertLess(float(aligned_loss[0]), float(reversed_loss[0]))
+        self.assertEqual(valid.tolist(), [[True, True, False]])
+        self.assertAlmostEqual(float(aligned_error[0, 0]), 0.0)
+
+    def test_centered_q_loss_removes_the_common_information_set_score(self):
+        from scripts.train_policy_value import action_value_regression_loss
+
+        predictions = torch.tensor([[0.5, -0.5]])
+        targets = torch.tensor([[80.0, 0.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True]])
+        centered_loss, centered_error, _valid = action_value_regression_loss(
+            predictions,
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+            centered_regression=True,
+        )
+        absolute_loss, _absolute_error, _valid = action_value_regression_loss(
+            predictions,
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+        )
+        self.assertAlmostEqual(float(centered_loss[0]), 0.0)
+        self.assertTrue(torch.allclose(centered_error, torch.zeros_like(centered_error)))
+        self.assertGreater(float(absolute_loss[0]), 0.0)
+
+    def test_q_listwise_rank_loss_rewards_the_target_order(self):
+        from scripts.train_policy_value import action_value_listwise_rank_loss
+
+        targets = torch.tensor([[40.0, -40.0]])
+        action_value_mask = torch.tensor([True])
+        legal = torch.tensor([[True, True]])
+        aligned, _mask = action_value_listwise_rank_loss(
+            torch.tensor([[0.5, -0.5]]),
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+            temperature=16.0,
+        )
+        reversed_loss, _mask = action_value_listwise_rank_loss(
+            torch.tensor([[-0.5, 0.5]]),
+            action_values=targets,
+            action_value_mask=action_value_mask,
+            action_mask=legal,
+            target_scale=80.0,
+            temperature=16.0,
+        )
+        self.assertLess(float(aligned[0]), float(reversed_loss[0]))
+
+    def test_q_regression_samples_are_not_disabled_with_policy_preference(self):
+        from scripts.train_policy_value import action_value_regression_sample_weights
+
+        weights = action_value_regression_sample_weights(
+            torch.tensor([True, False, True]), sample_weight=0.75
+        )
+        self.assertEqual(weights.tolist(), [0.75, 0.0, 0.75])
+        with self.assertRaises(ValueError):
+            action_value_regression_sample_weights(
+                torch.tensor([True]), sample_weight=-0.1
+            )
+
+    def test_checkpoint_selection_can_target_a_held_out_action_value_source(self):
+        from scripts.train_policy_value import (
+            better_validation_checkpoint,
+            checkpoint_selection_metrics,
+        )
+
+        validation = {
+            "overall": {"decisions": 100.0, "policy_loss": 0.2, "accuracy": 0.9},
+            "by_source": {
+                "counterfactual_action_value_rollout": {
+                    "decisions": 24.0,
+                    "policy_loss": 0.7,
+                    "accuracy": 0.5,
+                    "action_value_decisions": 24.0,
+                    "action_value_huber_loss": 0.7,
+                    "action_value_rank_accuracy": 0.0,
+                },
+                "local_human_opt_in": {
+                    "decisions": 60.0,
+                    "policy_loss": 0.4,
+                    "accuracy": 0.75,
+                    "action_value_decisions": 0.0,
+                },
+            },
+        }
+        self.assertEqual(
+            checkpoint_selection_metrics(
+                validation,
+                source="local_human_opt_in",
+                minimum_decisions=50,
+            ),
+            {"policy_loss": 0.4, "accuracy": 0.75},
+        )
+        self.assertEqual(
+            checkpoint_selection_metrics(
+                validation,
+                source="counterfactual_action_value_rollout",
+                minimum_decisions=20,
+            ),
+            {"policy_loss": 0.7, "accuracy": 0.5},
+        )
+        with self.assertRaises(ValueError):
+            checkpoint_selection_metrics(
+                validation,
+                source="counterfactual_action_value_rollout",
+                minimum_decisions=25,
+            )
+
+        q_first = {
+            "action_value_huber_loss": 0.15,
+            "action_value_rank_accuracy": 0.50,
+        }
+        q_better = {
+            "action_value_huber_loss": 0.10,
+            "action_value_rank_accuracy": 0.40,
+        }
+        self.assertEqual(
+            checkpoint_selection_metrics(
+                validation,
+                source="counterfactual_action_value_rollout",
+                minimum_decisions=20,
+                metric="action_value_huber_loss",
+            ),
+            {
+                "action_value_huber_loss": 0.7,
+                "action_value_rank_accuracy": 0.0,
+            },
+        )
+        self.assertTrue(
+            better_validation_checkpoint(
+                q_better,
+                q_first,
+                metric="action_value_huber_loss",
+            )
+        )
+        self.assertTrue(
+            better_validation_checkpoint(
+                q_first,
+                q_better,
+                metric="action_value_rank_accuracy",
+            )
+        )
+        self.assertEqual(
+            checkpoint_selection_metrics(
+                validation,
+                source="counterfactual_action_value_rollout",
+                minimum_decisions=20,
+                metric="action_value_rank_accuracy",
+            ),
+            {
+                "action_value_huber_loss": 0.7,
+                "action_value_rank_accuracy": 0.0,
+            },
+        )
+
+    def test_held_out_rare_action_uses_neutral_class_weight(self):
+        from scripts.train_policy_value import Example, tensors
+
+        example = Example(
+            candidates=((0.0,) * 145, (1.0,) * 145),
+            public_events=(),
+            chosen_index=1,
+            action_kind="rare_held_out_action",
+            source="test",
+            action_values=None,
+            action_value_stderrs=None,
+            action_value_gap_stderrs=None,
+            value_target=None,
+            sample_weight=0.5,
+        )
+        result = tensors(
+            [example], feature_dim=145, device=torch.device("cpu"), weights={}
+        )
+        self.assertAlmostEqual(float(result[7][0]), 0.5)
+
+
+@unittest.skipIf(torch is None, "PyTorch 仅在项目 .venv 中安装")
+class TorchPolicyTests(unittest.TestCase):
+    def test_candidate_policy_value_forward_and_checkpoint_round_trip(self):
+        from xiamen_mahjong.torch_policy import (
+            CandidatePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+        from xiamen_mahjong.training import collect_teacher_decisions
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        candidates = torch.rand((2, 3, 145))
+        mask = torch.tensor([[True, True, False], [True, True, True]])
+        logits, values = network(candidates, mask)
+        _q_logits, _q_values, action_values = network.forward_with_action_values(
+            candidates, mask
+        )
+        (
+            _outcome_logits,
+            _outcome_values,
+            _outcome_q,
+            afterstate_scores,
+            afterstate_win_logits,
+            afterstate_opponent_win_logits,
+        ) = network.forward_with_afterstate_outcomes(candidates, mask)
+        self.assertEqual(tuple(logits.shape), (2, 3))
+        self.assertEqual(tuple(values.shape), (2,))
+        self.assertEqual(tuple(action_values.shape), (2, 3))
+        self.assertEqual(tuple(afterstate_scores.shape), (2, 3))
+        self.assertEqual(tuple(afterstate_win_logits.shape), (2, 3))
+        self.assertEqual(tuple(afterstate_opponent_win_logits.shape), (2, 3))
+        self.assertEqual(action_values[0, 2].item(), 0.0)
+        self.assertLess(logits[0, 2].item(), -1e30)
+
+        decisions, _ = collect_teacher_decisions(hands=2, profile="core", seed=741)
+        agent = TorchPolicyValueAgent(
+            feature_version=3, hidden_size=16, device="cpu", network=network
+        )
+        self.assertEqual(len(agent.scores(decisions[0])), len(decisions[0].legal_actions))
+        self.assertEqual(
+            len(agent.action_value_scores(decisions[0]) or ()),
+            len(decisions[0].legal_actions),
+        )
+        afterstate = agent.afterstate_outcomes(decisions[0])
+        self.assertIsNotNone(afterstate)
+        assert afterstate is not None
+        self.assertEqual(len(afterstate[0]), len(decisions[0].legal_actions))
+        logits, value = agent.policy_value(decisions[0])
+        self.assertEqual(len(logits), len(decisions[0].legal_actions))
+        self.assertIsInstance(value, float)
+        single = [agent.policy_value(decision) for decision in decisions[:4]]
+        batched = agent.policy_values_batch(decisions[:4])
+        self.assertEqual(len(batched), len(single))
+        for (single_logits, single_value), (batch_logits, batch_value) in zip(
+            single, batched
+        ):
+            self.assertEqual(len(batch_logits), len(single_logits))
+            self.assertAlmostEqual(batch_value, single_value, places=6)
+            for actual, expected in zip(batch_logits, single_logits):
+                self.assertAlmostEqual(actual, expected, places=6)
+        single_scores = [agent.scores(decision) for decision in decisions[:4]]
+        self.assertEqual(len(agent.scores_batch(decisions[:4])), len(single_scores))
+        for expected, actual in zip(single_scores, agent.scores_batch(decisions[:4])):
+            for expected_score, actual_score in zip(expected, actual):
+                self.assertAlmostEqual(actual_score, expected_score, places=6)
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "policy-value.pt"
+            agent.save(checkpoint)
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            self.assertEqual(
+                restored.predict_index(decisions[0]), agent.predict_index(decisions[0])
+            )
+
+    def test_v2_candidate_checkpoint_loads_with_a_zero_initialized_q_head(self):
+        from xiamen_mahjong.torch_policy import (
+            ACTION_SELECTION_ACTION_VALUE,
+            ACTION_SELECTION_RESPONSE_ACTION_VALUE,
+            CandidatePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+        from xiamen_mahjong.training import collect_teacher_decisions
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        legacy_state = {
+            key: value
+            for key, value in network.state_dict().items()
+            if not key.startswith(
+                (
+                    "action_value_head.",
+                    "action_value_encoder.",
+                    "afterstate_encoder.",
+                    "afterstate_score_head.",
+                    "afterstate_win_head.",
+                    "afterstate_opponent_win_head.",
+                )
+            )
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "legacy-policy-value.pt"
+            torch.save(
+                {
+                    "version": "xiamen-candidate-policy-value-v2",
+                    "model": "candidate_policy_value",
+                    "architecture": "candidate_mlp",
+                    "feature_version": 3,
+                    "feature_dim": 145,
+                    "hidden_size": 16,
+                    "attention_heads": 4,
+                    "state_dict": legacy_state,
+                    "metadata": {},
+                },
+                checkpoint,
+            )
+            restored = TorchPolicyValueAgent.load(
+                checkpoint,
+                device="cpu",
+                action_selection=ACTION_SELECTION_ACTION_VALUE,
+            )
+            decisions, _ = collect_teacher_decisions(hands=1, profile="core", seed=771)
+            self.assertTrue(
+                all(value == 0.0 for value in restored.action_value_scores(decisions[0]) or ())
+            )
+            self.assertEqual(restored.action_selection, ACTION_SELECTION_ACTION_VALUE)
+
+            response_only = TorchPolicyValueAgent.load(
+                checkpoint,
+                device="cpu",
+                action_selection=ACTION_SELECTION_RESPONSE_ACTION_VALUE,
+            )
+            self.assertEqual(
+                response_only.action_selection, ACTION_SELECTION_RESPONSE_ACTION_VALUE
+            )
+            # Generic scoring remains policy-only without an explicit response
+            # context, avoiding accidental Q selection for discard decisions.
+            self.assertEqual(
+                response_only.scores(decisions[0]),
+                response_only.policy_value(decisions[0])[0],
+            )
+
+    def test_v4_checkpoint_loads_when_only_the_independent_outcome_encoder_is_new(self):
+        """v4 outcome heads predate the v5 independent outcome encoder."""
+        from xiamen_mahjong.torch_policy import (
+            CandidatePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+        from xiamen_mahjong.training import collect_teacher_decisions
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        v4_state = {
+            key: value
+            for key, value in network.state_dict().items()
+            if not key.startswith(("afterstate_encoder.", "action_value_encoder."))
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "v4-policy-value.pt"
+            torch.save(
+                {
+                    "version": "xiamen-candidate-policy-value-v4",
+                    "model": "candidate_policy_value",
+                    "architecture": "candidate_mlp",
+                    "feature_version": 3,
+                    "feature_dim": 145,
+                    "hidden_size": 16,
+                    "attention_heads": 4,
+                    "state_dict": v4_state,
+                    "metadata": {},
+                },
+                checkpoint,
+            )
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            decisions, _ = collect_teacher_decisions(hands=1, profile="core", seed=772)
+            outcomes = restored.afterstate_outcomes(decisions[0])
+            self.assertIsNotNone(outcomes)
+            assert outcomes is not None
+            self.assertEqual(len(outcomes[0]), len(decisions[0].legal_actions))
+
+    def test_v5_checkpoint_loads_when_only_the_independent_q_encoder_is_new(self):
+        """v5 outcome checkpoints predate the v6 independent Q encoder."""
+        from xiamen_mahjong.torch_policy import (
+            CandidatePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        v5_state = {
+            key: value
+            for key, value in network.state_dict().items()
+            if not key.startswith("action_value_encoder.")
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "v5-policy-value.pt"
+            torch.save(
+                {
+                    "version": "xiamen-candidate-policy-value-v5",
+                    "model": "candidate_policy_value",
+                    "architecture": "candidate_mlp",
+                    "feature_version": 3,
+                    "feature_dim": 145,
+                    "hidden_size": 16,
+                    "attention_heads": 4,
+                    "state_dict": v5_state,
+                    "metadata": {},
+                },
+                checkpoint,
+            )
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            self.assertIsInstance(restored.network, CandidatePolicyValueNetwork)
+
+    def test_q_encoder_changes_do_not_change_policy_or_value_outputs(self):
+        from xiamen_mahjong.torch_policy import CandidatePolicyValueNetwork
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        candidates = torch.rand((2, 3, 145))
+        mask = torch.tensor([[True, True, False], [True, True, True]])
+        policy_before, value_before, _q_before = network.forward_with_action_values(
+            candidates, mask
+        )
+        with torch.no_grad():
+            network.action_value_encoder[0].weight.add_(0.25)
+            network.action_value_head.weight.fill_(0.5)
+            network.action_value_head.bias.fill_(0.25)
+        policy_after, value_after, q_after = network.forward_with_action_values(
+            candidates, mask
+        )
+        self.assertTrue(torch.equal(policy_before, policy_after))
+        self.assertTrue(torch.equal(value_before, value_after))
+        self.assertTrue(torch.isfinite(q_after[mask]).all())
+
+    def test_q_only_training_freezes_every_non_q_parameter(self):
+        from scripts.train_policy_value import configure_q_only_trainable_parameters
+        from xiamen_mahjong.torch_policy import CandidatePolicyValueNetwork
+
+        network = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        trainable = configure_q_only_trainable_parameters(network)
+        expected = {
+            id(parameter)
+            for module in (network.action_value_encoder, network.action_value_head)
+            for parameter in module.parameters()
+        }
+        self.assertEqual({id(parameter) for parameter in trainable}, expected)
+        self.assertTrue(
+            all(
+                parameter.requires_grad == (id(parameter) in expected)
+                for parameter in network.parameters()
+            )
+        )
+
+    def test_q_rank_metric_accepts_any_action_tied_for_best_target(self):
+        from scripts.train_policy_value import action_value_prediction_is_optimal
+
+        self.assertEqual(
+            action_value_prediction_is_optimal(
+                predictions=[3.0, 1.0],
+                targets=[10.0, 10.0],
+                valid_indices=[0, 1],
+            ),
+            (True, True),
+        )
+        self.assertEqual(
+            action_value_prediction_is_optimal(
+                predictions=[3.0, 1.0],
+                targets=[9.0, 10.0],
+                valid_indices=[0, 1],
+            ),
+            (False, False),
+        )
+
+    def test_public_sequence_transformer_masks_events_and_round_trips(self):
+        from xiamen_mahjong.torch_policy import (
+            ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER,
+            PublicSequencePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+        from xiamen_mahjong.training import (
+            PUBLIC_ACTION_SEQUENCE_DIM,
+            PUBLIC_ACTION_SEQUENCE_LENGTH,
+            collect_teacher_decisions,
+        )
+
+        network = PublicSequencePolicyValueNetwork(
+            feature_dim=145, hidden_size=16, attention_heads=4
+        )
+        candidates = torch.rand((2, 3, 145))
+        action_mask = torch.tensor([[True, True, False], [True, True, True]])
+        events = torch.zeros((2, PUBLIC_ACTION_SEQUENCE_LENGTH, PUBLIC_ACTION_SEQUENCE_DIM))
+        event_mask = torch.zeros((2, PUBLIC_ACTION_SEQUENCE_LENGTH), dtype=torch.bool)
+        event_mask[1, :2] = True
+        logits, values = network(candidates, action_mask, events, event_mask)
+        self.assertEqual(tuple(logits.shape), (2, 3))
+        self.assertEqual(tuple(values.shape), (2,))
+        self.assertTrue(torch.isfinite(values).all())
+        self.assertLess(logits[0, 2].item(), -1e30)
+
+        decisions, _ = collect_teacher_decisions(hands=2, profile="core", seed=751)
+        agent = TorchPolicyValueAgent(
+            feature_version=3,
+            hidden_size=16,
+            architecture=ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER,
+            attention_heads=4,
+            device="cpu",
+            network=network,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "sequence-policy-value.pt"
+            agent.save(checkpoint)
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            self.assertEqual(
+                restored.architecture, ARCHITECTURE_PUBLIC_SEQUENCE_TRANSFORMER
+            )
+            self.assertEqual(
+                restored.predict_index(decisions[0]), agent.predict_index(decisions[0])
+            )
+
+    def test_residual_sequence_starts_exactly_as_candidate_checkpoint(self):
+        from xiamen_mahjong.torch_policy import (
+            ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL,
+            CandidatePolicyValueNetwork,
+            ResidualPublicSequencePolicyValueNetwork,
+            TorchPolicyValueAgent,
+        )
+        from xiamen_mahjong.training import (
+            PUBLIC_ACTION_SEQUENCE_DIM,
+            PUBLIC_ACTION_SEQUENCE_LENGTH,
+            collect_teacher_decisions,
+        )
+
+        base = CandidatePolicyValueNetwork(feature_dim=145, hidden_size=16)
+        residual = ResidualPublicSequencePolicyValueNetwork(
+            feature_dim=145, hidden_size=16, attention_heads=4
+        )
+        residual.initialize_from_candidate(base)
+        candidates = torch.rand((2, 3, 145))
+        action_mask = torch.tensor([[True, True, False], [True, True, True]])
+        events = torch.rand((2, PUBLIC_ACTION_SEQUENCE_LENGTH, PUBLIC_ACTION_SEQUENCE_DIM))
+        event_mask = torch.zeros((2, PUBLIC_ACTION_SEQUENCE_LENGTH), dtype=torch.bool)
+        event_mask[0, 0] = True
+        base_logits, base_values = base(candidates, action_mask)
+        logits, values = residual(candidates, action_mask, events, event_mask)
+        self.assertTrue(torch.equal(base_logits, logits))
+        self.assertTrue(torch.equal(base_values, values))
+
+        decisions, _ = collect_teacher_decisions(hands=2, profile="core", seed=761)
+        agent = TorchPolicyValueAgent(
+            feature_version=3,
+            hidden_size=16,
+            architecture=ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL,
+            attention_heads=4,
+            device="cpu",
+            network=residual,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory) / "residual-sequence-policy-value.pt"
+            agent.save(checkpoint)
+            restored = TorchPolicyValueAgent.load(checkpoint, device="cpu")
+            self.assertEqual(
+                restored.architecture, ARCHITECTURE_PUBLIC_SEQUENCE_RESIDUAL
+            )
+            self.assertEqual(
+                restored.predict_index(decisions[0]), agent.predict_index(decisions[0])
+            )
+
+
+if __name__ == "__main__":
+    unittest.main()

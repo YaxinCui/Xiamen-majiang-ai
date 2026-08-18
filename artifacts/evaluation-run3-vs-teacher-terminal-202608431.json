@@ -1,0 +1,45 @@
+{
+  "profile": "classic",
+  "first_seed": 202608431,
+  "seed_count": 400,
+  "games": 1600,
+  "candidate_wins": 381,
+  "draws": 5,
+  "candidate_score_total": -1368,
+  "candidate_score_mean": -0.855,
+  "candidate_score_stderr": 0.6448305862491372,
+  "candidate_win_rate": 0.238125,
+  "opponent_labels": [
+    "heuristic_teacher_0",
+    "heuristic_teacher_1",
+    "heuristic_teacher_2"
+  ],
+  "candidate_kind": "checkpoint",
+  "checkpoint": "artifacts/policy-value-classic-v1-run3/policy-value.pt",
+  "checkpoint_sha256": "01616a38ff34af71f1774995d5d3f9e08c4408fd85757ad563d9dfa339b19f70",
+  "inference_device": "cuda",
+  "action_selection": "policy",
+  "opponent_roster": [
+    {
+      "label": "heuristic_teacher_0",
+      "kind": "heuristic_teacher",
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "action_selection": null
+    },
+    {
+      "label": "heuristic_teacher_1",
+      "kind": "heuristic_teacher",
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "action_selection": null
+    },
+    {
+      "label": "heuristic_teacher_2",
+      "kind": "heuristic_teacher",
+      "checkpoint": null,
+      "checkpoint_sha256": null,
+      "action_selection": null
+    }
+  ]
+}

@@ -1,0 +1,131 @@
+{
+  "experiment": "progressive_hiding_critic_calibration_core_smoke_v1",
+  "privacy": {
+    "actor_checkpoint_saved": false,
+    "critic_checkpoint_saved": false,
+    "hidden_feature_vectors_exported": false
+  },
+  "protocol": {
+    "actor_optimized": false,
+    "critic_batch_size": 128,
+    "critic_hidden_size": 32,
+    "curriculum_schedule": [
+      {
+        "epochs": 3,
+        "stage": "oracle"
+      },
+      {
+        "epochs": 3,
+        "stage": "hide_wall"
+      },
+      {
+        "epochs": 3,
+        "stage": "visible"
+      }
+    ],
+    "device": "cuda",
+    "direct_epochs": 9,
+    "direct_hiding_stage": "visible",
+    "fresh_random_actor": true,
+    "independent_validation_walls": true,
+    "learning_rate": 0.0003,
+    "profile": "core",
+    "reward_scale": 80.0,
+    "rollout_batch_size": 16,
+    "same_in_memory_train_rollouts": true,
+    "same_initial_critic_parameters": true,
+    "seed": 202608560,
+    "teacher_opponents_only": true,
+    "train_episodes": 64,
+    "validation_episodes": 32
+  },
+  "rollouts": {
+    "train": {
+      "action_counts": {
+        "chi": 32,
+        "discard": 458,
+        "hu": 1,
+        "ming_kan": 1,
+        "pass": 42,
+        "pong": 20
+      },
+      "decisions": 554,
+      "draws": 0,
+      "episodes": 64,
+      "opponent_profile_counts": {
+        "heuristic_teacher": 192
+      },
+      "reward_mean": -0.29843749999999997,
+      "reward_stderr": 0.0663494008529963,
+      "wins": 64
+    },
+    "validation": {
+      "action_counts": {
+        "chi": 14,
+        "discard": 215,
+        "pass": 31,
+        "pong": 9
+      },
+      "decisions": 269,
+      "draws": 0,
+      "episodes": 32,
+      "opponent_profile_counts": {
+        "heuristic_teacher": 96
+      },
+      "reward_mean": -0.384375,
+      "reward_stderr": 0.08256343785333367,
+      "wins": 32
+    }
+  },
+  "selection_gate": {
+    "improves_huber": false,
+    "improves_mae": false,
+    "pass_requires": "independent final-visible Huber and MAE both strictly lower than equal-budget direct-visible baseline",
+    "passed": false,
+    "status": "rejected_before_policy_training"
+  },
+  "source_revision": "b025af5ab1abcf15f51e3cbfaeccc744cd2ad8f7",
+  "training": {
+    "direct_visible": {
+      "hiding_stage": 2.0,
+      "loss": 0.1550125103,
+      "updates": 45.0
+    },
+    "progressive_hiding": [
+      {
+        "hiding_stage": 0.0,
+        "loss": 0.1570742354,
+        "stage_index": 0.0,
+        "updates": 15.0
+      },
+      {
+        "hiding_stage": 1.0,
+        "loss": 0.1516398763,
+        "stage_index": 1.0,
+        "updates": 15.0
+      },
+      {
+        "hiding_stage": 2.0,
+        "loss": 0.1523316234,
+        "stage_index": 2.0,
+        "updates": 15.0
+      }
+    ]
+  },
+  "validation_visible_only": {
+    "delta_progressive_minus_direct": {
+      "huber": 0.0007634163,
+      "mae": 0.0002762675
+    },
+    "direct_visible": {
+      "decisions": 269.0,
+      "huber": 0.1707421392,
+      "mae": 0.4069980085
+    },
+    "progressive_hiding": {
+      "decisions": 269.0,
+      "huber": 0.1715055555,
+      "mae": 0.407274276
+    }
+  }
+}

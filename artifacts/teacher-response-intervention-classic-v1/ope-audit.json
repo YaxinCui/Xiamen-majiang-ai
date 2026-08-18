@@ -1,0 +1,62 @@
+{
+  "status": "audit_only_one_response_teacher_override",
+  "outcome_checkpoints": [
+    "artifacts/policy-value-teacher-response-outcome-classic-v1-seed471/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v1-seed472/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v1-seed473/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v1-seed474/policy-value.pt",
+    "artifacts/policy-value-teacher-response-outcome-classic-v1-seed475/policy-value.pt"
+  ],
+  "data": [
+    "artifacts/teacher-response-intervention-classic-v1/test.trajectories.jsonl"
+  ],
+  "inference_device": "cuda",
+  "candidate": {
+    "base": "heuristic_teacher",
+    "target": "max_afterstate_score_lcb_or_teacher",
+    "score_lcb_z": 1.0,
+    "minimum_lcb_advantage": 0.0,
+    "protocol": "one randomized response position; Teacher before and after"
+  },
+  "scanned_candidate_decisions": 4913,
+  "randomized_response_interventions": 282,
+  "target_action_kinds": {
+    "chi": 29,
+    "hu": 10,
+    "pass": 182,
+    "pong": 61
+  },
+  "estimates": {
+    "ips": {
+      "groups": 108,
+      "observations": 282,
+      "mean": -1.6428170594837266,
+      "stderr": 4.408715199015319,
+      "95pct_low": -10.283898849553752,
+      "95pct_high": 6.998264730586299
+    },
+    "support": {
+      "target_matched_logged_action_count": 109,
+      "baseline_matched_logged_action_count": 219,
+      "target_effective_sample_size": 66.0592124582027,
+      "baseline_effective_sample_size": 218.6560753450327,
+      "target_override_rate": 0.6631205673758865,
+      "minimum_target_propensity": 0.1,
+      "minimum_baseline_propensity": 0.7
+    },
+    "doubly_robust": {
+      "groups": 108,
+      "observations": 282,
+      "mean": -0.7896862201630371,
+      "stderr": 4.618799660495734,
+      "95pct_low": -9.842533554734676,
+      "95pct_high": 8.2631611144086
+    }
+  },
+  "ready_for_single_override_game_screen": false,
+  "screen_gate": {
+    "requires": "both grouped IPS and grouped DR 95% lower bounds positive",
+    "minimum_effective_sample_size_per_side": 30.0
+  },
+  "warning": "This estimate identifies only one response replacement followed by the same Teacher suffix under the logged intervention protocol. It is not evidence for a policy that changes multiple decisions, browser deployment, or strength against humans. Outcome checkpoints must be trained without these held-out wall groups."
+}

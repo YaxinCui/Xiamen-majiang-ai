@@ -1,0 +1,111 @@
+{
+  "profile": "core",
+  "model": "linear",
+  "hidden_size": null,
+  "learning_rate": 0.02,
+  "seed": 202608520,
+  "train": {
+    "hands": 300,
+    "decisions": 10476,
+    "wins": 300,
+    "draws": 0,
+    "action_counts": {
+      "add_kan": 14,
+      "an_kan": 14,
+      "chi": 1037,
+      "discard": 8329,
+      "hu": 303,
+      "ming_kan": 34,
+      "pass": 2,
+      "pong": 743
+    }
+  },
+  "validation": {
+    "hands": 100,
+    "decisions": 3558,
+    "wins": 100,
+    "draws": 0,
+    "action_counts": {
+      "add_kan": 5,
+      "an_kan": 6,
+      "chi": 310,
+      "discard": 2839,
+      "hu": 105,
+      "ming_kan": 20,
+      "pong": 273
+    }
+  },
+  "tour_curriculum_decisions": 0,
+  "tour_validation_decisions": 0,
+  "validation_before": {
+    "accuracy": 0.19477234401349072,
+    "loss": 1.9280546217882437,
+    "decisions": 3558.0
+  },
+  "validation_after": {
+    "accuracy": 0.6708825182686903,
+    "loss": 1.0178937600388107,
+    "decisions": 3558.0
+  },
+  "tour_validation_before": {
+    "accuracy": 0.0,
+    "loss": 0.0,
+    "decisions": 0.0
+  },
+  "tour_validation_after": {
+    "accuracy": 0.0,
+    "loss": 0.0,
+    "decisions": 0.0
+  },
+  "history": [
+    {
+      "epoch": 1.0,
+      "accuracy": 0.6724894998090875,
+      "loss": 1.0271122053909476,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 2.0,
+      "accuracy": 0.7292859870179458,
+      "loss": 0.8733693028646152,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 3.0,
+      "accuracy": 0.7655593738067965,
+      "loss": 0.7988871650548941,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 4.0,
+      "accuracy": 0.7799732722413135,
+      "loss": 0.743686758091893,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 5.0,
+      "accuracy": 0.7871324933180603,
+      "loss": 0.7164495539016837,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 6.0,
+      "accuracy": 0.7895189003436426,
+      "loss": 0.6976326064738976,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 7.0,
+      "accuracy": 0.8017373043146239,
+      "loss": 0.6721016013879171,
+      "decisions": 10476.0
+    },
+    {
+      "epoch": 8.0,
+      "accuracy": 0.8089919816723941,
+      "loss": 0.659832985517607,
+      "decisions": 10476.0
+    }
+  ],
+  "checkpoint": "rule-policy.json"
+}

@@ -1,0 +1,261 @@
+{
+  "status": "terminal_audit_complete",
+  "outcome_checkpoints": [
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed702/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed703/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed704/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed705/policy-value.pt",
+    "artifacts/policy-value-teacher-discard-outcome-classic-v1-seed706/policy-value.pt"
+  ],
+  "inference_device": "cuda",
+  "protocol": {
+    "base": "heuristic_teacher",
+    "intervention_phase": "discard",
+    "policy": "one discard override followed by Teacher suffix",
+    "score_lcb_z": 1.0,
+    "pre_registered_minimum_lcb_advantages": [
+      0.0,
+      8.0,
+      16.0,
+      24.0
+    ],
+    "selection_data": "artifacts/teacher-discard-intervention-classic-v1-heldout/selection.trajectories.jsonl",
+    "terminal_data": "artifacts/teacher-discard-intervention-classic-v1-heldout/terminal.trajectories.jsonl",
+    "terminal_read": true,
+    "selection_rule": "maximize min(IPS lower bound, DR lower bound); tie -> higher threshold"
+  },
+  "selection": [
+    {
+      "minimum_lcb_advantage": 0.0,
+      "intervention_phase": "discard",
+      "scanned_candidate_decisions": 8546,
+      "randomized_interventions": 579,
+      "target_action_kinds": {
+        "an_kan": 2,
+        "discard": 572,
+        "hu": 5
+      },
+      "estimates": {
+        "ips": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 22.915080365142263,
+          "stderr": 14.932490187295306,
+          "95pct_low": -6.352600401956536,
+          "95pct_high": 52.18276113224106
+        },
+        "support": {
+          "target_matched_logged_action_count": 91,
+          "baseline_matched_logged_action_count": 379,
+          "target_effective_sample_size": 30.96668900853588,
+          "baseline_effective_sample_size": 378.638223046766,
+          "target_override_rate": 0.8221070811744386,
+          "minimum_target_propensity": 0.025,
+          "minimum_baseline_propensity": 0.625
+        },
+        "doubly_robust": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 23.57498771820424,
+          "stderr": 12.84397553652276,
+          "95pct_low": -1.5992043333803707,
+          "95pct_high": 48.74917976978885
+        }
+      },
+      "gate": {
+        "ips_95pct_low": -6.352600401956536,
+        "dr_95pct_low": -1.5992043333803707,
+        "minimum_lower_bound": -6.352600401956536,
+        "target_effective_sample_size": 30.96668900853588,
+        "baseline_effective_sample_size": 378.638223046766,
+        "passes": false
+      }
+    },
+    {
+      "minimum_lcb_advantage": 8.0,
+      "intervention_phase": "discard",
+      "scanned_candidate_decisions": 8546,
+      "randomized_interventions": 579,
+      "target_action_kinds": {
+        "an_kan": 2,
+        "discard": 571,
+        "hu": 6
+      },
+      "estimates": {
+        "ips": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 8.219551144910197,
+          "stderr": 7.639693514645117,
+          "95pct_low": -6.754248143794232,
+          "95pct_high": 23.193350433614626
+        },
+        "support": {
+          "target_matched_logged_action_count": 276,
+          "baseline_matched_logged_action_count": 379,
+          "target_effective_sample_size": 69.35434995723759,
+          "baseline_effective_sample_size": 378.638223046766,
+          "target_override_rate": 0.27979274611398963,
+          "minimum_target_propensity": 0.025,
+          "minimum_baseline_propensity": 0.625
+        },
+        "doubly_robust": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 9.373068485565103,
+          "stderr": 7.759022688067823,
+          "95pct_low": -5.834615983047829,
+          "95pct_high": 24.580752954178035
+        }
+      },
+      "gate": {
+        "ips_95pct_low": -6.754248143794232,
+        "dr_95pct_low": -5.834615983047829,
+        "minimum_lower_bound": -6.754248143794232,
+        "target_effective_sample_size": 69.35434995723759,
+        "baseline_effective_sample_size": 378.638223046766,
+        "passes": false
+      }
+    },
+    {
+      "minimum_lcb_advantage": 16.0,
+      "intervention_phase": "discard",
+      "scanned_candidate_decisions": 8546,
+      "randomized_interventions": 579,
+      "target_action_kinds": {
+        "an_kan": 2,
+        "discard": 570,
+        "hu": 7
+      },
+      "estimates": {
+        "ips": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 0.33638230127445795,
+          "stderr": 0.1466384291744542,
+          "95pct_low": 0.04897098009252776,
+          "95pct_high": 0.6237936224563881
+        },
+        "support": {
+          "target_matched_logged_action_count": 373,
+          "baseline_matched_logged_action_count": 379,
+          "target_effective_sample_size": 372.6395722538103,
+          "baseline_effective_sample_size": 378.638223046766,
+          "target_override_rate": 0.017271157167530225,
+          "minimum_target_propensity": 0.02666666666666667,
+          "minimum_baseline_propensity": 0.625
+        },
+        "doubly_robust": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 0.4861739144979652,
+          "stderr": 0.19729193692458968,
+          "95pct_low": 0.09948171812576945,
+          "95pct_high": 0.872866110870161
+        }
+      },
+      "gate": {
+        "ips_95pct_low": 0.04897098009252776,
+        "dr_95pct_low": 0.09948171812576945,
+        "minimum_lower_bound": 0.04897098009252776,
+        "target_effective_sample_size": 372.6395722538103,
+        "baseline_effective_sample_size": 378.638223046766,
+        "passes": true
+      }
+    },
+    {
+      "minimum_lcb_advantage": 24.0,
+      "intervention_phase": "discard",
+      "scanned_candidate_decisions": 8546,
+      "randomized_interventions": 579,
+      "target_action_kinds": {
+        "an_kan": 2,
+        "discard": 570,
+        "hu": 7
+      },
+      "estimates": {
+        "ips": {
+          "groups": 191,
+          "observations": 579,
+          "mean": 0.04090314136125654,
+          "stderr": 0.04090314136125655,
+          "95pct_low": -0.039267015706806296,
+          "95pct_high": 0.12107329842931938
+        },
+        "support": {
+          "target_matched_logged_action_count": 378,
+          "baseline_matched_logged_action_count": 379,
+          "target_effective_sample_size": 377.63822366623054,
+          "baseline_effective_sample_size": 378.638223046766,
+          "target_override_rate": 0.0017271157167530224,
+          "minimum_target_propensity": 0.04,
+          "minimum_baseline_propensity": 0.625
+        },
+        "doubly_robust": {
+          "groups": 191,
+          "observations": 579,
+          "mean": -0.009447227051744911,
+          "stderr": 0.00944722705174491,
+          "95pct_low": -0.027963792073164934,
+          "95pct_high": 0.00906933796967511
+        }
+      },
+      "gate": {
+        "ips_95pct_low": -0.039267015706806296,
+        "dr_95pct_low": -0.027963792073164934,
+        "minimum_lower_bound": -0.039267015706806296,
+        "target_effective_sample_size": 377.63822366623054,
+        "baseline_effective_sample_size": 378.638223046766,
+        "passes": false
+      }
+    }
+  ],
+  "chosen": 16.0,
+  "terminal": {
+    "minimum_lcb_advantage": 16.0,
+    "intervention_phase": "discard",
+    "scanned_candidate_decisions": 8425,
+    "randomized_interventions": 581,
+    "target_action_kinds": {
+      "an_kan": 3,
+      "discard": 571,
+      "hu": 7
+    },
+    "estimates": {
+      "ips": {
+        "groups": 190,
+        "observations": 581,
+        "mean": -0.014801991935373831,
+        "stderr": 0.16649698387861273,
+        "95pct_low": -0.3411360803374548,
+        "95pct_high": 0.3115320964667071
+      },
+      "support": {
+        "target_matched_logged_action_count": 373,
+        "baseline_matched_logged_action_count": 377,
+        "target_effective_sample_size": 372.6552593717707,
+        "baseline_effective_sample_size": 376.65507243988674,
+        "target_override_rate": 0.01549053356282272,
+        "minimum_target_propensity": 0.03333333333333333,
+        "minimum_baseline_propensity": 0.6235294117647059
+      },
+      "doubly_robust": {
+        "groups": 190,
+        "observations": 581,
+        "mean": 0.13919039476001505,
+        "stderr": 0.17883545184823746,
+        "95pct_low": -0.21132709086253038,
+        "95pct_high": 0.48970788038256047
+      }
+    },
+    "gate": {
+      "ips_95pct_low": -0.3411360803374548,
+      "dr_95pct_low": -0.21132709086253038,
+      "minimum_lower_bound": -0.3411360803374548,
+      "target_effective_sample_size": 372.6552593717707,
+      "baseline_effective_sample_size": 376.65507243988674,
+      "passes": false
+    }
+  },
+  "warning": "No terminal result is complete-policy, browser, or human-strength evidence. The terminal corpus is read only if selection passes both grouped lower-bound gates."
+}

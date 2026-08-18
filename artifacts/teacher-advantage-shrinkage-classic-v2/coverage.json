@@ -1,0 +1,38 @@
+{
+  "status": "coverage_rejected_before_cross_fitting",
+  "experiment": "teacher_advantage_shrinkage_classic_v2",
+  "protocol": "knowledge_base/teacher_advantage_shrinkage_v2_protocol.md",
+  "collection_parameters": {
+    "profile": "classic",
+    "physical_wall_seed_start": 202608900,
+    "physical_wall_count": 2000,
+    "seat_rotations_per_wall": 4,
+    "base_policy": "heuristic_teacher",
+    "intervention_phase": "discard",
+    "uniform_exploration_probability": 0.8,
+    "intervention_max_decisions": 8
+  },
+  "randomized_intervention_coverage": {
+    "train": {"randomized_decisions": 3673, "wall_groups": 1186},
+    "validation": {"randomized_decisions": 931, "wall_groups": 300},
+    "held_out": {"randomized_decisions": 1480, "wall_groups": 481},
+    "selection": {"randomized_decisions": 693, "wall_groups": 222},
+    "terminal": {"randomized_decisions": 787, "wall_groups": 259}
+  },
+  "gate": {
+    "minimum_randomized_decisions": {
+      "train": 3500,
+      "validation": 800,
+      "selection": 700,
+      "terminal": 700
+    },
+    "passed": false,
+    "failure": "selection coverage 693 < 700"
+  },
+  "privacy": {
+    "terminal_outcomes_aggregated": false,
+    "terminal_action_summary_exported": false,
+    "raw_trajectory_jsonl_committed": false
+  },
+  "next_step": "Do not tune this corpus. A future protocol needs wholly new wall groups."
+}

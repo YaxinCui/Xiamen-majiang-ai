@@ -1,0 +1,248 @@
+{
+  "source": "candidate_vs_teacher_dagger",
+  "profile": "classic",
+  "behavior_base": {
+    "kind": "heuristic_teacher",
+    "checkpoint": null,
+    "inference_device": null
+  },
+  "behavior_policy": {
+    "type": "single_intervention_epsilon_uniform",
+    "base_policy": "heuristic_teacher",
+    "uniform_exploration_probability": 0.8,
+    "intervention_max_decisions": 8,
+    "intervention_phase": "discard",
+    "seed_in_training_jsonl": false
+  },
+  "inference_device": null,
+  "seed_count": 2000,
+  "seat_rotations_per_seed": 4,
+  "summary": {
+    "hands": 8000,
+    "decisions": 88340,
+    "wins": 7979,
+    "draws": 21,
+    "action_counts": {
+      "add_kan": 269,
+      "an_kan": 143,
+      "chi": 10825,
+      "discard": 66787,
+      "hu": 1711,
+      "ming_kan": 614,
+      "pass": 17,
+      "pong": 7974
+    }
+  },
+  "replay_metadata": {
+    "included_in_training_jsonl": false,
+    "private_replay_index": null
+  },
+  "split": {
+    "train_fraction": 0.6,
+    "validation_fraction": 0.15,
+    "split_salt": "teacher-advantage-shrinkage-v2-main",
+    "rotation_grouping": "all four candidate seats share one partition"
+  },
+  "dataset": {
+    "version": "xiamen-training-trajectory-v3",
+    "hands": 8000,
+    "decisions": 88340,
+    "rules_versions": {
+      "xiamen-classic-full-v2": 8000
+    },
+    "agent_profiles": {
+      "candidate_policy": 8000,
+      "heuristic_teacher": 24000
+    },
+    "action_counts": {
+      "add_kan": 269,
+      "an_kan": 143,
+      "chi": 10825,
+      "discard": 66787,
+      "hu": 1711,
+      "ming_kan": 614,
+      "pass": 17,
+      "pong": 7974
+    },
+    "phase_counts": {
+      "discard": 68422,
+      "response": 19918
+    },
+    "outcome_counts": {
+      "discard": 2216,
+      "draw": 21,
+      "opening_gold": 16,
+      "self_draw": 5671,
+      "three_gold": 37,
+      "three_gold_open": 36,
+      "travelling_gold": 3
+    },
+    "score_mean": 0.0,
+    "score_min": -80,
+    "score_max": 240,
+    "action_value_decisions": 0,
+    "mean_action_value_span": null,
+    "action_value_stderr_observations": 0,
+    "mean_action_value_stderr": null,
+    "action_value_gap_stderr_observations": 0,
+    "mean_action_value_gap_stderr": null
+  },
+  "randomized_intervention_coverage": {
+    "randomized_decisions": 6084,
+    "wall_groups": 1967
+  },
+  "partitions": {
+    "train": {
+      "file": "train.trajectories.jsonl",
+      "hands": 4844,
+      "manifest": {
+        "version": "xiamen-training-trajectory-v3",
+        "hands": 4844,
+        "decisions": 53326,
+        "rules_versions": {
+          "xiamen-classic-full-v2": 4844
+        },
+        "agent_profiles": {
+          "candidate_policy": 4844,
+          "heuristic_teacher": 14532
+        },
+        "action_counts": {
+          "add_kan": 159,
+          "an_kan": 83,
+          "chi": 6560,
+          "discard": 40263,
+          "hu": 1040,
+          "ming_kan": 359,
+          "pass": 15,
+          "pong": 4847
+        },
+        "phase_counts": {
+          "discard": 41239,
+          "response": 12087
+        },
+        "outcome_counts": {
+          "discard": 1365,
+          "draw": 16,
+          "opening_gold": 8,
+          "self_draw": 3389,
+          "three_gold": 31,
+          "three_gold_open": 32,
+          "travelling_gold": 3
+        },
+        "score_mean": 0.0,
+        "score_min": -80,
+        "score_max": 240,
+        "action_value_decisions": 0,
+        "mean_action_value_span": null,
+        "action_value_stderr_observations": 0,
+        "mean_action_value_stderr": null,
+        "action_value_gap_stderr_observations": 0,
+        "mean_action_value_gap_stderr": null
+      },
+      "randomized_intervention_coverage": {
+        "randomized_decisions": 3673,
+        "wall_groups": 1186
+      }
+    },
+    "validation": {
+      "file": "validation.trajectories.jsonl",
+      "hands": 1212,
+      "manifest": {
+        "version": "xiamen-training-trajectory-v3",
+        "hands": 1212,
+        "decisions": 13406,
+        "rules_versions": {
+          "xiamen-classic-full-v2": 1212
+        },
+        "agent_profiles": {
+          "candidate_policy": 1212,
+          "heuristic_teacher": 3636
+        },
+        "action_counts": {
+          "add_kan": 43,
+          "an_kan": 28,
+          "chi": 1665,
+          "discard": 10098,
+          "hu": 248,
+          "ming_kan": 91,
+          "pass": 1,
+          "pong": 1232
+        },
+        "phase_counts": {
+          "discard": 10354,
+          "response": 3052
+        },
+        "outcome_counts": {
+          "discard": 331,
+          "opening_gold": 4,
+          "self_draw": 876,
+          "three_gold": 1
+        },
+        "score_mean": 0.0,
+        "score_min": -76,
+        "score_max": 228,
+        "action_value_decisions": 0,
+        "mean_action_value_span": null,
+        "action_value_stderr_observations": 0,
+        "mean_action_value_stderr": null,
+        "action_value_gap_stderr_observations": 0,
+        "mean_action_value_gap_stderr": null
+      },
+      "randomized_intervention_coverage": {
+        "randomized_decisions": 931,
+        "wall_groups": 300
+      }
+    },
+    "test": {
+      "file": "test.trajectories.jsonl",
+      "hands": 1944,
+      "manifest": {
+        "version": "xiamen-training-trajectory-v3",
+        "hands": 1944,
+        "decisions": 21608,
+        "rules_versions": {
+          "xiamen-classic-full-v2": 1944
+        },
+        "agent_profiles": {
+          "candidate_policy": 1944,
+          "heuristic_teacher": 5832
+        },
+        "action_counts": {
+          "add_kan": 67,
+          "an_kan": 32,
+          "chi": 2600,
+          "discard": 16426,
+          "hu": 423,
+          "ming_kan": 164,
+          "pass": 1,
+          "pong": 1895
+        },
+        "phase_counts": {
+          "discard": 16829,
+          "response": 4779
+        },
+        "outcome_counts": {
+          "discard": 520,
+          "draw": 5,
+          "opening_gold": 4,
+          "self_draw": 1406,
+          "three_gold": 5,
+          "three_gold_open": 4
+        },
+        "score_mean": 0.0,
+        "score_min": -76,
+        "score_max": 228,
+        "action_value_decisions": 0,
+        "mean_action_value_span": null,
+        "action_value_stderr_observations": 0,
+        "mean_action_value_stderr": null,
+        "action_value_gap_stderr_observations": 0,
+        "mean_action_value_gap_stderr": null
+      },
+      "randomized_intervention_coverage": {
+        "randomized_decisions": 1480,
+        "wall_groups": 481
+      }
+    }
+  }
+}
