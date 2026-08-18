@@ -76,21 +76,9 @@ def next_gold_tile(indicator: int) -> int:
     return 31 + (indicator - 31 + 1) % 3
 
 
-def base_wall(*, include_honors: bool = True) -> list[int]:
-    """Build a physical wall for the selected Xiamen ruleset.
-
-    The 144-tile game contains all 34 base identities.  The current 120-tile
-    game removes winds plus red/green dragons, but deliberately keeps the four
-    white dragons because they are the fixed face-value proxy for gold.
-    """
-
+def base_wall() -> list[int]:
     tiles: list[int] = []
-    base_tiles = (
-        range(BASE_TILE_COUNT)
-        if include_honors
-        else (*range(27), WHITE_DRAGON)
-    )
-    for tile in base_tiles:
+    for tile in range(BASE_TILE_COUNT):
         tiles.extend([tile] * 4)
     tiles.extend(range(FLOWER_TILE_BASE, TOTAL_TILE_COUNT))
     return tiles

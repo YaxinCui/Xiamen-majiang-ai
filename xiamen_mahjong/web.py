@@ -19,9 +19,9 @@ STATIC_ROOT = ROOT / "web_game_static"
 
 
 class GameStore:
-    def __init__(self, default_profile: str = "classic") -> None:
+    def __init__(self) -> None:
         self.lock = threading.Lock()
-        self.rules_profile = default_profile
+        self.rules_profile = "classic"
         self.game = XiamenMahjongGame(rules=XiamenRules.from_profile(self.rules_profile))
 
     def _public_state(self, *, reveal_ai_hands: bool = False) -> dict[str, Any]:
@@ -84,9 +84,7 @@ class GameStore:
             return self._public_state()
 
 
-def make_handler(store: GameStore, new120_store: GameStore | None = None):
-    new120_store = new120_store or GameStore("new120")
-
+def make_handler(store: GameStore):
     class GameHandler(BaseHTTPRequestHandler):
         server_version = "XiamenMahjong/0.1"
 
@@ -98,13 +96,6 @@ def make_handler(store: GameStore, new120_store: GameStore | None = None):
                 # in-page debug toggle requests this view.
                 reveal_ai_hands = parse_qs(request_url.query).get("debug") == ["1"]
                 self._send_json(HTTPStatus.OK, store.state(reveal_ai_hands=reveal_ai_hands))
-                return
-            if request_url.path == "/api/game-120":
-                reveal_ai_hands = parse_qs(request_url.query).get("debug") == ["1"]
-                self._send_json(
-                    HTTPStatus.OK,
-                    new120_store.state(reveal_ai_hands=reveal_ai_hands),
-                )
                 return
             self._serve_static()
 
@@ -126,23 +117,8 @@ def make_handler(store: GameStore, new120_store: GameStore | None = None):
                         store.new_game(seed, rules_profile, reset_match=reset_match),
                     )
                     return
-                if self.path == "/api/game-120/new":
-                    seed = payload.get("seed")
-                    if seed is not None and not isinstance(seed, int):
-                        raise GameError("seed 必须是整数")
-                    reset_match = payload.get("reset_match", False)
-                    if not isinstance(reset_match, bool):
-                        raise GameError("reset_match 必须是布尔值")
-                    self._send_json(
-                        HTTPStatus.OK,
-                        new120_store.new_game(seed, "new120", reset_match=reset_match),
-                    )
-                    return
                 if self.path == "/api/game/action":
                     self._send_json(HTTPStatus.OK, store.action(payload))
-                    return
-                if self.path == "/api/game-120/action":
-                    self._send_json(HTTPStatus.OK, new120_store.action(payload))
                     return
                 self._send_json(HTTPStatus.NOT_FOUND, {"error": "接口不存在"})
             except GameError as error:
